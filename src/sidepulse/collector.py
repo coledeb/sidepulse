@@ -213,10 +213,10 @@ class AgentMonitor:
                 metadata_by_session,
                 metadata_by_status,
             )
-            status = status_from_event(record, metadata)
+            previous = statuses_by_key.get(record.status_key)
+            status = status_from_event(record, metadata, previous=previous)
             if status is not None:
                 track_pending_permissions(record, pending_permissions_by_key)
-                previous = statuses_by_key.get(status.agent_id)
                 if should_ignore_status_transition(
                     previous,
                     status,
@@ -421,12 +421,12 @@ class LiveAgentMonitor:
                 self.metadata_by_session,
                 self.metadata_by_status,
             )
-            status = status_from_event(record, metadata)
+            previous = self.statuses_by_key.get(record.status_key)
+            status = status_from_event(record, metadata, previous=previous)
             if status is None:
                 return
 
             track_pending_permissions(record, self.pending_permissions_by_key)
-            previous = self.statuses_by_key.get(status.agent_id)
             if should_ignore_status_transition(
                 previous,
                 status,
@@ -1071,10 +1071,28 @@ def is_provider_session_title(record: HookEvent, title: str) -> bool:
     return False
 
 
-def status_from_event(record: HookEvent, metadata: StatusMetadata | None = None) -> AgentStatus | None:
+def status_from_event(
+    record: HookEvent,
+    metadata: StatusMetadata | None = None,
+    *,
+    previous: AgentStatus | None = None,
+) -> AgentStatus | None:
     mode = mode_for_event(record)
     if mode is None:
         return None
+
+    if (
+        record.provider == "claude"
+        and record.event_name == "Notification"
+        and str(record.raw.get("notification_type", "")).strip().lower() == "idle_prompt"
+        and previous is not None
+        and previous.mode == AgentMode.IDLE_READY
+        and mode == AgentMode.WAITING_FOR_INPUT
+        and explicit_mode_for_record(record) is None
+    ):
+        # An idle reminder does not start a task or ask a question. Keep its
+        # timestamp so recovery can also correct a previously persisted Ask.
+        mode = AgentMode.IDLE_READY
 
     metadata = metadata or StatusMetadata(cwd=record.cwd)
     if should_ignore_record(record, metadata):
