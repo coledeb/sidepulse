@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
+from .claude_session_state import confirmed_idle_at
 from .models import (
     MODE_PRIORITY,
     AgentMode,
@@ -38,6 +39,7 @@ COMPLETED_VISIBLE_SECONDS = 20 * 60.0
 IDLE_VISIBLE_SECONDS = 0.0
 POST_TOOL_WORKING_VISIBLE_SECONDS = 2 * 60.0
 PERMISSION_PROMPT_SETTLE_SECONDS = 30.0
+CLAUDE_SESSION_IDLE_GRACE_SECONDS = 5.0
 
 
 @dataclass(frozen=True)
@@ -438,6 +440,7 @@ class LiveAgentMonitor:
 
     def snapshot(self, include_stale: bool = False) -> MonitorSnapshot:
         now = datetime.now(timezone.utc)
+        self.reconcile_claude_session_idle(now)
         with self.lock:
             statuses = tuple(self.statuses_by_key.values())
         return snapshot_from_statuses(
@@ -451,6 +454,38 @@ class LiveAgentMonitor:
             post_tool_working_visible_seconds=self.post_tool_working_visible_seconds,
             include_stale=include_stale,
         )
+
+    def reconcile_claude_session_idle(self, now: datetime) -> None:
+        # Some local/cancelled Claude prompts return to idle without a Stop hook.
+        # Require explicit newer client state; a quiet session alone is not proof.
+        with self.lock:
+            candidates = tuple(
+                status for status in self.statuses_by_key.values()
+                if status.provider == "claude"
+                and status.session_id
+                and status.agent_id == f"claude:session:{status.session_id}"
+                and status.mode == AgentMode.WORKING
+                and status.event_name == "UserPromptSubmit"
+                and status.age_seconds(now) >= CLAUDE_SESSION_IDLE_GRACE_SECONDS
+            )
+        for status in candidates:
+            idle_at = confirmed_idle_at(status.session_id, after=status.updated_at, now=now)
+            if idle_at is None:
+                continue
+            with self.lock:
+                # A hook arriving during the registry read takes precedence.
+                if self.statuses_by_key.get(status.agent_id) is not status:
+                    continue
+                self.statuses_by_key[status.agent_id] = replace(
+                    status,
+                    mode=AgentMode.IDLE_READY,
+                    event_name="SessionIdle",
+                    updated_at=idle_at,
+                    message=None,
+                )
+                # The newer timestamp also prevents log replay from reviving
+                # the old prompt when Claude removes its session metadata.
+                self.write_latest_state()
 
     def load_latest_state(self) -> None:
         if self.latest_state_path is None or not self.latest_state_path.exists():
