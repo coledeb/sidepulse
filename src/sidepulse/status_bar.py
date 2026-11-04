@@ -697,6 +697,7 @@ class StatusBarController(NSObject):
         button.setAccessibilityLabel_("SidePulse Agent Monitor: Idle")
         self.status_item.setVisible_(self.settings.show_menu_bar_icon)
         log_status_bar("status item created")
+        self.start_monitor_recovery()
 
         self.refresh_(None)
         self.timer = schedule_status_bar_timer(
@@ -1371,10 +1372,25 @@ class StatusBarController(NSObject):
             stale_after_seconds=self.settings.idle_timeout_seconds,
             completed_visible_seconds=self.settings.completed_visible_seconds,
             latest_state_path=default_latest_state_path(),
+            recover_on_init=False,
         )
+
+    def start_monitor_recovery(self) -> None:
+        # Capture this instance: settings changes can replace self.monitor while
+        # an earlier recovery is still running. Workers never access AppKit.
+        monitor = self.monitor
+
+        def recover() -> None:
+            try:
+                monitor.reconcile_recovery_sources()
+            except Exception as exc:
+                log_status_bar(f"history recovery error: {exc}")
+
+        threading.Thread(target=recover, daemon=True).start()
 
     def reload_monitor(self) -> None:
         self.monitor = self.build_monitor()
+        self.start_monitor_recovery()
 
     def start_event_server(self) -> None:
         self.stop_event_server()
@@ -7470,6 +7486,7 @@ def applescript_quote(value: str) -> str:
 
 def run_status_bar(*, show_settings: bool = False) -> None:
     app = NSApplication.sharedApplication()
+    app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
     controller = StatusBarController.alloc().init()
     controller.open_settings_on_launch = show_settings
     app.setDelegate_(controller)
