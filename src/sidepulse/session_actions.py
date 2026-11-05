@@ -4,7 +4,7 @@ import shlex
 from pathlib import Path
 from urllib.parse import quote, urlencode
 
-from .jetbrains import JetBrainsIDE, jetbrains_ide_for_project
+from .jetbrains import JetBrainsIDE, jetbrains_launch_for_project
 from .models import AgentStatus
 from .origin import T3CODE_BUNDLE_ID, is_relayed_origin, is_t3code_origin
 
@@ -45,17 +45,25 @@ def session_vscode_link(status: AgentStatus) -> str | None:
 
 def session_jetbrains_ide(status: AgentStatus) -> JetBrainsIDE | None:
     project_dir = session_jetbrains_project_dir(status)
-    return jetbrains_ide_for_project(project_dir) if project_dir else None
+    launch = jetbrains_launch_for_project(project_dir) if project_dir else None
+    return launch.ide if launch else None
 
 
-def session_jetbrains_target(status: AgentStatus) -> tuple[str, str, str] | None:
+def session_jetbrains_target(
+    status: AgentStatus,
+) -> tuple[str, str, str, str | None] | None:
     project_dir = session_jetbrains_project_dir(status)
     if not project_dir:
         return None
-    ide = jetbrains_ide_for_project(project_dir)
-    if ide is None:
+    launch = jetbrains_launch_for_project(project_dir)
+    if launch is None:
         return None
-    return "open", ide.bundle_id, str(Path(project_dir).expanduser())
+    return (
+        "open",
+        launch.ide.bundle_id,
+        str(Path(project_dir).expanduser()),
+        str(launch.app_path) if launch.app_path else None,
+    )
 
 
 def session_jetbrains_project_dir(status: AgentStatus) -> str | None:
@@ -124,7 +132,7 @@ def normalized_origin(origin: str | None) -> str:
 def session_open_target(
     status: AgentStatus,
     action: str,
-) -> tuple[str, str | tuple[str, str]] | None:
+) -> tuple[str, str | tuple[str, str, str | None]] | None:
     if is_t3code_origin(status.origin):
         # T3 Code owns the session: "App" brings T3 Code forward, and the VS Code
         # extension would open a different client on the same session.
@@ -147,7 +155,7 @@ def session_open_target(
         return ("terminal", command) if command else None
     if action == SESSION_OPEN_JETBRAINS:
         target = session_jetbrains_target(status)
-        return ("ide", (target[1], target[2])) if target else None
+        return ("ide", (target[1], target[2], target[3])) if target else None
     return None
 
 
