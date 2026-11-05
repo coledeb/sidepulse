@@ -84,6 +84,7 @@ from sidepulse.firmware_status import FirmwareStatus  # noqa: E402
 from sidepulse.collector import MonitorSnapshot, SourceSpec  # noqa: E402
 from sidepulse.models import AgentMode, AgentStatus, AggregateStatus  # noqa: E402
 from sidepulse.providers import HOOK_PROVIDERS  # noqa: E402
+from sidepulse.session_actions import IdeOpenTarget  # noqa: E402
 from sidepulse.settings import AgentMonitorSettings  # noqa: E402
 
 
@@ -801,7 +802,10 @@ class WindowBuildTests(StatusBarTestCase):
         with (
             patch(
                 "sidepulse.status_bar.session_open_target",
-                return_value=("ide", ("com.jetbrains.intellij", "/tmp/junie-project", None)),
+                return_value=(
+                    "ide",
+                    IdeOpenTarget("com.jetbrains.intellij", "/tmp/junie-project"),
+                ),
             ),
             patch("sidepulse.status_bar.subprocess.Popen") as popen,
         ):
@@ -822,7 +826,7 @@ class WindowBuildTests(StatusBarTestCase):
                 "sidepulse.status_bar.session_open_target",
                 return_value=(
                     "ide",
-                    (
+                    IdeOpenTarget(
                         "com.jetbrains.intellij",
                         "/tmp/junie-project",
                         "/Applications/IntelliJ IDEA 2025.1.app",

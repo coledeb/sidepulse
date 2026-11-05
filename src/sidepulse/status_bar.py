@@ -188,6 +188,7 @@ from .session_actions import (
     SESSION_OPEN_VSCODE,
     available_session_open_actions,
     default_session_open_action,
+    default_session_open_target,
     session_open_action_label,
     session_open_target,
 )
@@ -2445,15 +2446,16 @@ class StatusBarController(NSObject):
         if not isinstance(status, AgentStatus):
             return
         provider = status.provider.lower()
-        requested_action = (
-            action
-            or self.settings.session_open_action(provider, status.origin)
-            or default_session_open_action(status)
+        requested_action = action or self.settings.session_open_action(
+            provider, status.origin
         )
-        target = session_open_target(status, requested_action)
+        target = (
+            session_open_target(status, requested_action) if requested_action else None
+        )
         if target is None:
-            requested_action = default_session_open_action(status)
-            target = session_open_target(status, requested_action)
+            default = default_session_open_target(status)
+            if default is not None:
+                requested_action, target = default
         if target is None:
             self.set_settings_message(f"No open action available for {status.display_name}.")
             return
@@ -2471,11 +2473,10 @@ class StatusBarController(NSObject):
                 session_hints=terminal_session_hints(status),
             )
         elif kind == "ide":
-            bundle_id, project_path, app_path = value
-            if app_path:
-                subprocess.Popen(["open", "-a", app_path, project_path])
+            if value.app_path:
+                subprocess.Popen(["open", "-a", value.app_path, value.project_path])
             else:
-                subprocess.Popen(["open", "-b", bundle_id, project_path])
+                subprocess.Popen(["open", "-b", value.bundle_id, value.project_path])
         else:
             self.set_settings_message(f"Unknown open action for {status.display_name}.")
             return
