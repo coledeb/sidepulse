@@ -4,13 +4,20 @@ import shlex
 from pathlib import Path
 from urllib.parse import quote, urlencode
 
+from .jetbrains import JetBrainsIDE, jetbrains_ide_for_project
 from .models import AgentStatus
 from .origin import T3CODE_BUNDLE_ID, is_relayed_origin, is_t3code_origin
 
 SESSION_OPEN_APP = "app"
 SESSION_OPEN_TERMINAL = "terminal"
 SESSION_OPEN_VSCODE = "vscode"
-SESSION_OPEN_CHOICES = (SESSION_OPEN_APP, SESSION_OPEN_TERMINAL, SESSION_OPEN_VSCODE)
+SESSION_OPEN_JETBRAINS = "jetbrains"
+SESSION_OPEN_CHOICES = (
+    SESSION_OPEN_APP,
+    SESSION_OPEN_TERMINAL,
+    SESSION_OPEN_VSCODE,
+    SESSION_OPEN_JETBRAINS,
+)
 SESSION_OPEN_APP_SURFACES = ("app", "ui", "transcript")
 SESSION_OPEN_TERMINAL_SURFACES = ("cli", "terminal", "command line")
 SESSION_OPEN_VSCODE_SURFACES = ("vscode", "vs code", "visual studio code")
@@ -34,6 +41,29 @@ def session_vscode_link(status: AgentStatus) -> str | None:
         {"session": status.session_id},
         quote_via=quote,
     )
+
+
+def session_jetbrains_ide(status: AgentStatus) -> JetBrainsIDE | None:
+    project_dir = session_jetbrains_project_dir(status)
+    return jetbrains_ide_for_project(project_dir) if project_dir else None
+
+
+def session_jetbrains_target(status: AgentStatus) -> tuple[str, str, str] | None:
+    project_dir = session_jetbrains_project_dir(status)
+    if not project_dir:
+        return None
+    ide = jetbrains_ide_for_project(project_dir)
+    if ide is None:
+        return None
+    return "open", ide.bundle_id, str(Path(project_dir).expanduser())
+
+
+def session_jetbrains_project_dir(status: AgentStatus) -> str | None:
+    if status.provider.lower() != "junie":
+        return None
+    from .collector import junie_session_project_dir
+
+    return junie_session_project_dir(status.session_id) or status.cwd
 
 
 def session_resume_command(status: AgentStatus) -> str | None:
@@ -71,6 +101,8 @@ def preferred_session_open_actions(status: AgentStatus) -> tuple[str, ...]:
         return (SESSION_OPEN_APP, SESSION_OPEN_TERMINAL, SESSION_OPEN_VSCODE)
     origin = normalized_origin(status.origin)
     if origin:
+        if "jetbrains" in origin:
+            return (SESSION_OPEN_JETBRAINS, SESSION_OPEN_TERMINAL, SESSION_OPEN_APP)
         if any(surface in origin for surface in SESSION_OPEN_VSCODE_SURFACES):
             return (SESSION_OPEN_VSCODE, SESSION_OPEN_APP, SESSION_OPEN_TERMINAL)
         if any(surface in origin for surface in SESSION_OPEN_TERMINAL_SURFACES):
@@ -89,7 +121,10 @@ def normalized_origin(origin: str | None) -> str:
     return " ".join(str(origin or "").strip().lower().replace("-", " ").split())
 
 
-def session_open_target(status: AgentStatus, action: str) -> tuple[str, str] | None:
+def session_open_target(
+    status: AgentStatus,
+    action: str,
+) -> tuple[str, str | tuple[str, str]] | None:
     if is_t3code_origin(status.origin):
         # T3 Code owns the session: "App" brings T3 Code forward, and the VS Code
         # extension would open a different client on the same session.
@@ -110,6 +145,9 @@ def session_open_target(status: AgentStatus, action: str) -> tuple[str, str] | N
     if action == SESSION_OPEN_TERMINAL:
         command = session_resume_command(status)
         return ("terminal", command) if command else None
+    if action == SESSION_OPEN_JETBRAINS:
+        target = session_jetbrains_target(status)
+        return ("ide", (target[1], target[2])) if target else None
     return None
 
 
@@ -129,6 +167,9 @@ def session_open_action_label(status: AgentStatus, action: str) -> str:
         return "Open App"
     if action == SESSION_OPEN_VSCODE:
         return "Open in VS Code"
+    if action == SESSION_OPEN_JETBRAINS:
+        ide = session_jetbrains_ide(status)
+        return f"Open in {ide.name}" if ide else "Open in JetBrains IDE"
     if action == SESSION_OPEN_TERMINAL:
         return "Resume in Terminal"
     return action

@@ -183,6 +183,7 @@ from .t3_status import (
 )
 from .session_actions import (
     SESSION_OPEN_APP,
+    SESSION_OPEN_JETBRAINS,
     SESSION_OPEN_TERMINAL,
     SESSION_OPEN_VSCODE,
     available_session_open_actions,
@@ -1857,7 +1858,7 @@ class StatusBarController(NSObject):
                 and self.selected_agent_animation_profile_id
                 not in AGENT_ANIMATION_BUILT_IN_PROFILE_IDS
             )
-        for provider in ("codex", "claude", "grok"):
+        for provider in ("codex", "claude", "grok", "junie"):
             popup = self.settings_fields.get(f"{provider}_session_opener")
             if popup is not None:
                 refresh_provider_opener_popup(
@@ -2469,6 +2470,9 @@ class StatusBarController(NSObject):
                 custom_terminal_path=self.settings.custom_terminal_path,
                 session_hints=terminal_session_hints(status),
             )
+        elif kind == "ide":
+            bundle_id, project_path = value
+            subprocess.Popen(["open", "-b", bundle_id, project_path])
         else:
             self.set_settings_message(f"Unknown open action for {status.display_name}.")
             return
@@ -4663,13 +4667,17 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
     codex_opener = add_provider_opener_popup(
         agents_tab, "codex", value_x, 164, target, width=value_width
     )
-    add_label(agents_tab, "Claude", label_x, 136, 90, 22)
+    add_label(agents_tab, "Claude", label_x, 140, 90, 22)
     claude_opener = add_provider_opener_popup(
-        agents_tab, "claude", value_x, 134, target, width=value_width
+        agents_tab, "claude", value_x, 138, target, width=value_width
     )
-    add_label(agents_tab, "Grok", label_x, 106, 90, 22)
+    add_label(agents_tab, "Grok", label_x, 114, 90, 22)
     grok_opener = add_provider_opener_popup(
-        agents_tab, "grok", value_x, 104, target, width=value_width
+        agents_tab, "grok", value_x, 112, target, width=value_width
+    )
+    add_label(agents_tab, "Junie", label_x, 88, 90, 22)
+    junie_opener = add_provider_opener_popup(
+        agents_tab, "junie", value_x, 86, target, width=value_width
     )
 
     terminal_popup = add_terminal_popup(
@@ -4956,6 +4964,7 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
         "codex_session_opener": codex_opener,
         "claude_session_opener": claude_opener,
         "grok_session_opener": grok_opener,
+        "junie_session_opener": junie_opener,
         "session_terminal": terminal_popup,
         "custom_terminal_path": custom_terminal_path,
         "recent_session_retention_hours": retention_hours,
@@ -5452,6 +5461,8 @@ def add_history_timeframe_popup(parent, x: int, y: int, target):
 
 
 def provider_open_actions(provider: str) -> tuple[str, ...]:
+    if provider == "junie":
+        return (SESSION_OPEN_TERMINAL, SESSION_OPEN_JETBRAINS)
     if provider == "claude":
         return (SESSION_OPEN_VSCODE, SESSION_OPEN_APP, SESSION_OPEN_TERMINAL)
     if provider == "codex":
@@ -5460,6 +5471,8 @@ def provider_open_actions(provider: str) -> tuple[str, ...]:
 
 
 def default_provider_open_action(provider: str) -> str:
+    if provider == "junie":
+        return SESSION_OPEN_TERMINAL
     if provider == "claude":
         return SESSION_OPEN_VSCODE
     if provider == "codex":
@@ -5472,6 +5485,8 @@ def provider_open_action_label(provider: str, action: str, settings=None) -> str
         return "VS Code"
     if action == SESSION_OPEN_TERMINAL:
         return "Resume in Terminal"
+    if action == SESSION_OPEN_JETBRAINS:
+        return "JetBrains IDE"
     return {"codex": "Codex", "claude": "Claude"}.get(provider, "App")
 
 
