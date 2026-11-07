@@ -6202,6 +6202,7 @@ class AgentMonitorTests(unittest.TestCase):
             settings = AgentMonitorSettings().with_agent_list_timing(
                 recent_session_retention_seconds=36 * 60 * 60,
                 idle_timeout_seconds=15 * 60,
+                completed_visible_seconds=15,
             )
 
             save_settings(settings, settings_path)
@@ -6217,6 +6218,7 @@ class AgentMonitorTests(unittest.TestCase):
             )
             self.assertEqual(loaded.recent_session_retention_seconds, 36 * 60 * 60)
             self.assertEqual(loaded.idle_timeout_seconds, 15 * 60)
+            self.assertEqual(loaded.completed_visible_seconds, 15)
 
     def test_settings_round_trip_agent_animations(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -6533,6 +6535,7 @@ class AgentMonitorTests(unittest.TestCase):
                 DEFAULT_RECENT_SESSION_RETENTION_SECONDS,
             )
             self.assertEqual(loaded.idle_timeout_seconds, DEFAULT_IDLE_TIMEOUT_SECONDS)
+            self.assertEqual(loaded.completed_visible_seconds, 1200)
 
     def test_default_sources_respect_transcript_settings(self) -> None:
         settings = AgentMonitorSettings(
