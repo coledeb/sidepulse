@@ -187,6 +187,17 @@ HISTORY_TIMEFRAME_12H_SECONDS = 12 * 60 * 60
 HISTORY_TIMEFRAME_24H_SECONDS = 24 * 60 * 60
 HISTORY_TIMEFRAME_48H_SECONDS = 48 * 60 * 60
 DEFAULT_HISTORY_TIMEFRAME_SECONDS = HISTORY_TIMEFRAME_12H_SECONDS
+VISUALIZER_STYLES = ("spectrum", "mono", "pulse", "meter")
+VISUALIZER_DEFAULT_STYLE = "spectrum"
+# Presets reuse the colors of the built-in animation profiles.
+VISUALIZER_COLOR_PRESETS = (
+    ("Cyan", "#00E5FF"),
+    ("Ember", "#F23819"),
+    ("Magenta", "#FF00FF"),
+    ("Amber", "#FF3A00"),
+    ("White", "#FFFFFF"),
+)
+VISUALIZER_DEFAULT_COLOR = "#00E5FF"
 HISTORY_TIMEFRAME_CHOICES = (
     HISTORY_TIMEFRAME_1H_SECONDS,
     HISTORY_TIMEFRAME_6H_SECONDS,
@@ -332,6 +343,10 @@ class AgentMonitorSettings:
     history_timeframe_seconds: float = DEFAULT_HISTORY_TIMEFRAME_SECONDS
     setup_screen_completed: bool = False
     show_menu_bar_icon: bool = True
+    visualizer_style: str = VISUALIZER_DEFAULT_STYLE
+    # "" means all system audio; otherwise an app name or bundle-ID fragment.
+    visualizer_source: str = ""
+    visualizer_color: str = VISUALIZER_DEFAULT_COLOR
 
     def transcript_enabled(self, provider: str) -> bool:
         if provider == "codex":
@@ -798,6 +813,20 @@ class AgentMonitorSettings:
             sleep_prevention_min_battery_percent=normalize_percent_setting(percent),
         )
 
+    def with_visualizer(
+        self,
+        *,
+        style: str | None = None,
+        source: str | None = None,
+        color: str | None = None,
+    ) -> "AgentMonitorSettings":
+        return replace(
+            self,
+            visualizer_style=_visualizer_style(style, self.visualizer_style),
+            visualizer_source=_visualizer_source(source, self.visualizer_source),
+            visualizer_color=_visualizer_color(color, self.visualizer_color),
+        )
+
     def with_history_timeframe(self, seconds: float) -> "AgentMonitorSettings":
         return replace(self, history_timeframe_seconds=normalize_history_timeframe(seconds))
 
@@ -835,6 +864,11 @@ class AgentMonitorSettings:
             },
             "history": {
                 "timeframe_seconds": self.history_timeframe_seconds,
+            },
+            "visualizer": {
+                "style": self.visualizer_style,
+                "source": self.visualizer_source,
+                "color": self.visualizer_color,
             },
             "agent_animations": {
                 mode: setting.to_dict()
@@ -911,6 +945,9 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
     history = data.get("history")
     if not isinstance(history, dict):
         history = {}
+    visualizer = data.get("visualizer")
+    if not isinstance(visualizer, dict):
+        visualizer = {}
 
     led_display = _led_display_setting(data.get("led_display"), LED_DISPLAY_AGENT)
     session_open_preferences = _session_open_preferences(
@@ -1015,7 +1052,29 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
             )
         ),
         setup_screen_completed=_bool_setting(data.get("setup_screen_completed"), False),
+        visualizer_style=_visualizer_style(visualizer.get("style")),
+        visualizer_source=_visualizer_source(visualizer.get("source")),
+        visualizer_color=_visualizer_color(visualizer.get("color")),
     )
+
+
+def _visualizer_style(value: object, default: str = VISUALIZER_DEFAULT_STYLE) -> str:
+    return value if isinstance(value, str) and value in VISUALIZER_STYLES else default
+
+
+def _visualizer_color(value: object, default: str = VISUALIZER_DEFAULT_COLOR) -> str:
+    if not isinstance(value, str):
+        return default
+    text = value.strip().lstrip("#")
+    if len(text) != 6 or any(char not in "0123456789abcdefABCDEF" for char in text):
+        return default
+    return "#" + text.upper()
+
+
+def _visualizer_source(value: object, default: str = "") -> str:
+    if not isinstance(value, str):
+        return default
+    return value.strip()[:200]
 
 
 def save_settings(

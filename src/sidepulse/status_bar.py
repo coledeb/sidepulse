@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import colorsys
 import json
 import math
 import shlex
@@ -29,6 +30,8 @@ try:
         NSButton,
         NSButtonTypeSwitch,
         NSColor,
+        NSColorPanel,
+        NSColorSpace,
         NSCompositingOperationSourceOver,
         NSCompositingOperationSourceIn,
         NSEventTrackingRunLoopMode,
@@ -174,7 +177,10 @@ from .session_actions import (
     session_open_action_label,
     session_open_target,
 )
+from .visualizer_control import VisualizerControl
 from .settings import (
+    VISUALIZER_COLOR_PRESETS,
+    VISUALIZER_STYLES,
     ANIMATION_STATE_LID_CLOSED,
     ANIMATION_STATE_LID_OPEN,
     ANIMATION_STATES,
@@ -617,6 +623,7 @@ class StatusBarController(NSObject):
         self.remote_led_program_by_device = {}
         self.last_led_display_kind_by_device = {}
         self.device_errors = {}
+        self.visualizer = VisualizerControl(default_state_dir() / "visualizer.log")
         self.leds_enabled = True
         self.led_sync_in_flight = False
         self.last_led_error = None
@@ -750,7 +757,116 @@ class StatusBarController(NSObject):
             battery_snapshot,
             self.active_led_display_kind(battery_snapshot),
         )
+        self.visualizer.poll()
+        self.visualizer.refresh_apps_async(self.request_menu_refresh)
         self.status_item.setMenu_(build_menu(snapshot, state, self))
+
+    def request_menu_refresh(self) -> None:
+        """Rebuild the menu from any thread (e.g. after the playing-apps list changes)."""
+        self.performSelectorOnMainThread_withObject_waitUntilDone_("forceRefresh:", None, False)
+
+    @objc.IBAction
+    def toggleVisualizer_(self, _sender):
+        if self.visualizer.running():
+            self.visualizer.stop()
+            log_status_bar("visualizer stopped")
+        else:
+            self.start_visualizer()
+        self.refresh_(None)
+
+    @objc.IBAction
+    def setVisualizerStyle_(self, sender):
+        self.update_visualizer_settings(style=str(sender.representedObject()))
+
+    @objc.IBAction
+    def setVisualizerSource_(self, sender):
+        self.update_visualizer_settings(source=str(sender.representedObject() or ""))
+
+    @objc.IBAction
+    def setVisualizerColor_(self, sender):
+        self.update_visualizer_settings(color=str(sender.representedObject()))
+
+    @objc.IBAction
+    def chooseVisualizerColor_(self, _sender):
+        """Open the standard macOS color picker for a custom visualizer color."""
+        panel = NSColorPanel.sharedColorPanel()
+        panel.setShowsAlpha_(False)
+        panel.setContinuous_(True)
+        panel.setColor_(ns_color_from_hex(self.settings.visualizer_color))
+        panel.setTarget_(self)
+        panel.setAction_("visualizerColorPanelChanged:")
+        if not panel.isVisible():
+            panel.center()
+        NSApp.activateIgnoringOtherApps_(True)
+        panel.makeKeyAndOrderFront_(None)
+
+    @objc.IBAction
+    def visualizerColorPanelChanged_(self, panel):
+        self.set_visualizer_color_live(hex_from_ns_color(panel.color()))
+
+    @objc.IBAction
+    def setVisualizerHue_(self, sender):
+        self.set_visualizer_color_live(hex_from_hue(sender.doubleValue() / 360.0))
+
+    def set_visualizer_color_live(self, color: str) -> None:
+        """Apply a color while the user is still dragging (hue slider in the open
+        menu, or the color panel): no restart, no menu rebuild, debounced save."""
+        if color == self.settings.visualizer_color:
+            return
+        self.settings = self.settings.with_visualizer(color=color)
+        self.visualizer.set_color(self.settings.visualizer_color)
+        update_visualizer_color_menu(self, self.settings.visualizer_color)
+        NSObject.cancelPreviousPerformRequestsWithTarget_selector_object_(
+            self, "persistVisualizerSettings:", None
+        )
+        # Common modes so the save also happens while the menu is still open.
+        self.performSelector_withObject_afterDelay_inModes_(
+            "persistVisualizerSettings:", None, 0.6, [NSRunLoopCommonModes]
+        )
+
+    @objc.IBAction
+    def persistVisualizerSettings_(self, _sender):
+        try:
+            save_settings(self.settings)
+        except Exception as exc:
+            log_status_bar(f"visualizer settings save error: {exc}")
+
+    def update_visualizer_settings(
+        self,
+        *,
+        style: str | None = None,
+        source: str | None = None,
+        color: str | None = None,
+    ) -> None:
+        try:
+            self.settings = self.settings.with_visualizer(style=style, source=source, color=color)
+            save_settings(self.settings)
+        except Exception as exc:
+            self.set_settings_message(f"Could not save visualizer setting: {exc}")
+            self.settings = load_settings()
+            return
+        if self.visualizer.own_running():
+            if style is not None or source is not None or not self.visualizer.set_color(
+                self.settings.visualizer_color
+            ):
+                self.start_visualizer()  # restart with the new style/source
+        self.refresh_(None)
+
+    def start_visualizer(self) -> None:
+        try:
+            self.visualizer.start(
+                self.settings.visualizer_style,
+                self.settings.visualizer_source,
+                self.settings.visualizer_color,
+            )
+        except Exception as exc:
+            self.visualizer.last_error = str(exc)
+            log_status_bar(f"visualizer start error: {exc}")
+            return
+        log_status_bar(
+            f"visualizer started style={self.settings.visualizer_style} "
+            f"source={self.settings.visualizer_source or 'all'} color={self.settings.visualizer_color}"
+        )
 
     @objc.IBAction
     def forceRefresh_(self, _sender):
@@ -1149,6 +1265,7 @@ class StatusBarController(NSObject):
             self.battery_timer = None
         self.stop_agent_animation_preview_timer()
         self.stop_event_server()
+        self.visualizer.stop(own_only=True)
         self.closed_lid_awake.release()
         self.keep_awake.release()
 
@@ -1170,6 +1287,7 @@ class StatusBarController(NSObject):
 
     def menuWillOpen_(self, menu):
         self.tracking_status_menu = menu
+        self.visualizer.refresh_apps_async(self.request_menu_refresh, force=True)
         self.update_status_icon_animation()
 
     def menuDidClose_(self, menu):
@@ -3165,20 +3283,27 @@ class StatusBarController(NSObject):
                 continue
 
             if device_display_kind == LED_DISPLAY_BATTERY and battery_snapshot is not None:
-                result = self.battery_controller_for_device(device).sync_snapshot(battery_snapshot)
+                controller = self.battery_controller_for_device(device)
+                result = controller.sync_snapshot(battery_snapshot)
                 label = (
                     f"{device.name} Battery {battery_snapshot.percent}% "
                     f"{format_watts(battery_snapshot.adapter_power)}"
                 )
             else:
                 animation = self.settings.agent_animation(mode)
-                result = self.agent_controller_for_device(device).sync_mode(
+                controller = self.agent_controller_for_device(device)
+                result = controller.sync_mode(
                     mode,
                     animation_style=animation.style,
                     custom_program=animation.custom_program,
                 )
                 label = f"{device.name} {result.label}"
 
+            if result.error and controller.last_error_busy:
+                # `sidepulse visualize` holds the device; the controller retries
+                # every second and restores the display once it is released.
+                self.device_errors.pop(device.device_id, None)
+                continue
             if result.error:
                 active_errors[device.device_id] = result.error
                 previous_error = self.device_errors.get(device.device_id)
@@ -3658,6 +3783,13 @@ def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> 
         virtual_toggle.setTarget_(target)
         menu.addItem_(virtual_toggle)
 
+    # The visualizer drives physical devices only (not the on-screen Notch or phones).
+    if any(device.connected and device.device_id != VIRTUAL_DEVICE_ID and device.remote_link is None
+           for device in devices):
+        menu.addItem_(NSMenuItem.separatorItem())
+        for item in build_visualizer_menu_items(target):
+            menu.addItem_(item)
+
     menu.addItem_(NSMenuItem.separatorItem())
     menu.addItem_(disabled_menu_item("Closed-Lid Sleep Prevention"))
     for policy in SLEEP_PREVENTION_CHOICES:
@@ -3689,6 +3821,167 @@ def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> 
     menu.addItem_(quit_item)
 
     return menu
+
+
+VISUALIZER_STYLE_LABELS = {
+    "spectrum": "Spectrum",
+    "mono": "Single Color",
+    "pulse": "Bass Pulse",
+    "meter": "Level Meter",
+}
+
+
+def build_visualizer_menu_items(target: StatusBarController) -> list[NSMenuItem]:
+    control = target.visualizer
+    settings = target.settings
+    running = control.running()
+    items = [disabled_menu_item("Music Visualizer")]
+
+    toggle = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        "Stop Visualizer" if running else "Start Visualizer",
+        "toggleVisualizer:",
+        "",
+    )
+    toggle.setTarget_(target)
+    toggle.setState_(1 if running else 0)
+    items.append(toggle)
+    if control.last_error and not running:
+        items.append(disabled_menu_item(f"Error: {control.last_error}"))
+
+    source_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        f"Source: {control.source_label(settings.visualizer_source)}", None, ""
+    )
+    source_menu = NSMenu.alloc().init()
+    choices = [("All System Audio", "")]
+    choices += [(name, bundle) for name, bundle in control.playing_apps]
+    if settings.visualizer_source and all(bundle != settings.visualizer_source for _, bundle in choices):
+        choices.append((control.source_label(settings.visualizer_source), settings.visualizer_source))
+    for index, (label, value) in enumerate(choices):
+        if index == 1:
+            source_menu.addItem_(NSMenuItem.separatorItem())
+        choice = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(label, "setVisualizerSource:", "")
+        choice.setTarget_(target)
+        choice.setRepresentedObject_(value)
+        choice.setState_(1 if settings.visualizer_source == value else 0)
+        source_menu.addItem_(choice)
+    if not control.playing_apps:
+        source_menu.addItem_(NSMenuItem.separatorItem())
+        source_menu.addItem_(disabled_menu_item("Play audio in an app to pick it here"))
+    source_item.setSubmenu_(source_menu)
+    items.append(source_item)
+
+    style_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        f"Style: {VISUALIZER_STYLE_LABELS.get(settings.visualizer_style, settings.visualizer_style)}", None, ""
+    )
+    style_menu = NSMenu.alloc().init()
+    for style in VISUALIZER_STYLES:
+        choice = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            VISUALIZER_STYLE_LABELS.get(style, style), "setVisualizerStyle:", ""
+        )
+        choice.setTarget_(target)
+        choice.setRepresentedObject_(style)
+        choice.setState_(1 if settings.visualizer_style == style else 0)
+        style_menu.addItem_(choice)
+    style_item.setSubmenu_(style_menu)
+    items.append(style_item)
+
+    if settings.visualizer_style in VISUALIZER_COLOR_STYLES:
+        items.append(build_visualizer_color_item(target))
+    return items
+
+
+VISUALIZER_COLOR_STYLES = ("mono", "pulse")
+
+
+def visualizer_color_label(color: str) -> str:
+    for name, value in VISUALIZER_COLOR_PRESETS:
+        if value == color:
+            return name
+    return color
+
+
+def visualizer_color_title(color: str) -> str:
+    return f"Color: {visualizer_color_label(color)}"
+
+
+def build_visualizer_color_item(target: StatusBarController) -> NSMenuItem:
+    current = target.settings.visualizer_color
+    item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(visualizer_color_title(current), None, "")
+    color_menu = NSMenu.alloc().init()
+    color_menu.addItem_(disabled_menu_item("Hue"))
+    color_menu.addItem_(build_visualizer_hue_slider_item(target))
+    color_menu.addItem_(NSMenuItem.separatorItem())
+    presets = []
+    for name, value in VISUALIZER_COLOR_PRESETS:
+        choice = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(name, "setVisualizerColor:", "")
+        choice.setTarget_(target)
+        choice.setRepresentedObject_(value)
+        presets.append(choice)
+        color_menu.addItem_(choice)
+    color_menu.addItem_(NSMenuItem.separatorItem())
+    custom = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Custom...", "chooseVisualizerColor:", "")
+    custom.setTarget_(target)
+    color_menu.addItem_(custom)
+    item.setSubmenu_(color_menu)
+    # Kept so the hue slider can update titles and checkmarks while the menu is open.
+    target.visualizer_color_menu_items = (item, tuple(presets), custom)
+    update_visualizer_color_menu(target, current)
+    return item
+
+
+def update_visualizer_color_menu(target, color: str) -> None:
+    items = getattr(target, "visualizer_color_menu_items", None)
+    if not items:
+        return
+    title_item, presets, custom = items
+    title_item.setTitle_(visualizer_color_title(color))
+    is_preset = False
+    for choice in presets:
+        selected = choice.representedObject() == color
+        choice.setState_(1 if selected else 0)
+        is_preset = is_preset or selected
+    custom.setTitle_("Custom..." if is_preset else f"Custom ({color})...")
+    custom.setState_(0 if is_preset else 1)
+
+
+def build_visualizer_hue_slider_item(target: StatusBarController) -> NSMenuItem:
+    """A continuous hue slider inside the menu (same layout as the brightness slider),
+    so colors can be dragged through live without the menu closing."""
+    item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("", None, "")
+    view = NSView.alloc().initWithFrame_(((0, 0), (230, 34)))
+    slider = NSSlider.alloc().initWithFrame_(((14, 6), (202, 22)))
+    slider.setMinValue_(0.0)
+    slider.setMaxValue_(360.0)
+    slider.setDoubleValue_(hue_from_hex(target.settings.visualizer_color) * 360.0)
+    slider.setContinuous_(True)
+    slider.setTarget_(target)
+    slider.setAction_("setVisualizerHue:")
+    view.addSubview_(slider)
+    item.setView_(view)
+    return item
+
+
+def hex_from_hue(hue: float) -> str:
+    red, green, blue = colorsys.hsv_to_rgb(hue % 1.0, 1.0, 1.0)
+    return "#" + "".join(f"{round(channel * 255):02X}" for channel in (red, green, blue))
+
+
+def hue_from_hex(value: str) -> float:
+    text = value.lstrip("#")
+    red, green, blue = (int(text[index:index + 2], 16) / 255.0 for index in (0, 2, 4))
+    return colorsys.rgb_to_hsv(red, green, blue)[0]
+
+
+def ns_color_from_hex(value: str):
+    text = value.lstrip("#")
+    red, green, blue = (int(text[index:index + 2], 16) / 255.0 for index in (0, 2, 4))
+    return NSColor.colorWithSRGBRed_green_blue_alpha_(red, green, blue, 1.0)
+
+
+def hex_from_ns_color(color) -> str:
+    srgb = color.colorUsingColorSpace_(NSColorSpace.sRGBColorSpace()) or color
+    channels = (srgb.redComponent(), srgb.greenComponent(), srgb.blueComponent())
+    return "#" + "".join(f"{max(0, min(255, round(channel * 255))):02X}" for channel in channels)
 
 
 def build_sleep_prevention_policy_item(policy: str, target: StatusBarController) -> NSMenuItem:

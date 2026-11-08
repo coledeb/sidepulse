@@ -9,6 +9,7 @@ from pathlib import Path
 
 from .device_writer import (
     DEFAULT_FILE_NAME,
+    DeviceBusyError,
     DeviceWriteError,
     normalize_led_text,
     resolve_target_path,
@@ -332,6 +333,7 @@ class AgentLedController:
         self.file_name = file_name
         self.dry_run = dry_run
         self.error_retry_seconds = error_retry_seconds
+        self.last_error_busy = False
         self.brightness = normalize_brightness(brightness)
         self.last_state: LedDisplayState | None = None
         self.last_brightness: int | None = None
@@ -340,6 +342,11 @@ class AgentLedController:
         self.last_error: str | None = None
         self.last_target: Path | None = None
         self.last_attempt_monotonic = 0.0
+
+    def retry_seconds(self) -> float:
+        # A busy device (held by `sidepulse visualize`) is retried quickly so the
+        # normal display comes back promptly when the visualizer exits.
+        return min(1.0, self.error_retry_seconds) if self.last_error_busy else self.error_retry_seconds
 
     def reset(self) -> None:
         self.last_state = None
@@ -392,7 +399,7 @@ class AgentLedController:
             and brightness == self.last_brightness
             and animation_signature == self.last_animation_signature
             and self.last_error is not None
-            and now - self.last_attempt_monotonic < self.error_retry_seconds
+            and now - self.last_attempt_monotonic < self.retry_seconds()
         ):
             return LedStatusWrite(
                 state=state,
@@ -414,6 +421,7 @@ class AgentLedController:
                 custom_program=custom_program,
             )
         except (DeviceWriteError, OSError) as exc:
+            self.last_error_busy = isinstance(exc, DeviceBusyError)
             self.last_state = state
             self.last_brightness = brightness
             self.last_animation_signature = animation_signature

@@ -13,6 +13,7 @@ from typing import Any, Callable
 
 from .device_writer import (
     DEFAULT_FILE_NAME,
+    DeviceBusyError,
     DeviceWriteError,
     resolve_target_path,
     write_led_program,
@@ -425,11 +426,17 @@ class BatteryLedController:
         self.file_name = file_name
         self.dry_run = dry_run
         self.error_retry_seconds = error_retry_seconds
+        self.last_error_busy = False
         self.brightness = normalize_brightness(brightness)
         self.last_program: str | None = None
         self.last_error: str | None = None
         self.last_target: Path | None = None
         self.last_attempt_monotonic = 0.0
+
+    def retry_seconds(self) -> float:
+        # A busy device (held by `sidepulse visualize`) is retried quickly so the
+        # normal display comes back promptly when the visualizer exits.
+        return min(1.0, self.error_retry_seconds) if self.last_error_busy else self.error_retry_seconds
 
     def reset(self) -> None:
         self.last_program = None
@@ -464,7 +471,7 @@ class BatteryLedController:
         if (
             program == self.last_program
             and self.last_error is not None
-            and now - self.last_attempt_monotonic < self.error_retry_seconds
+            and now - self.last_attempt_monotonic < self.retry_seconds()
         ):
             return BatteryLedWrite(
                 target=self.last_target,
@@ -482,6 +489,7 @@ class BatteryLedController:
                 dry_run=self.dry_run,
             )
         except (DeviceWriteError, OSError) as exc:
+            self.last_error_busy = isinstance(exc, DeviceBusyError)
             self.last_program = program
             self.last_error = str(exc)
             return BatteryLedWrite(

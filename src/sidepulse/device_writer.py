@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import json
 import os
 import sys
 import threading
@@ -26,6 +27,10 @@ _WRITE_LOCK = threading.Lock()
 
 class DeviceWriteError(RuntimeError):
     pass
+
+
+class DeviceBusyError(DeviceWriteError):
+    """Another process (e.g. `sidepulse visualize`) holds an exclusive LED lease."""
 
 
 @dataclass(frozen=True)
@@ -64,6 +69,13 @@ def write_normalized_led_program(
     if dry_run:
         return target
 
+    holder = led_lease_holder(target.parent)
+    if holder is not None:
+        raise DeviceBusyError(
+            f"{target.parent} is in use by {holder.get('owner') or 'another process'} "
+            f"(pid {holder.get('pid')}); stop it to restore normal LED updates."
+        )
+
     with device_write_lock(target.parent):
         target.parent.mkdir(parents=True, exist_ok=True)
         write_text_synced(target, program)
@@ -84,6 +96,73 @@ def device_write_lock(root: Path):
             yield
         finally:
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
+def _device_key(root: Path) -> str:
+    try:
+        resolved = root.resolve()
+    except OSError:
+        resolved = root
+    return hashlib.sha256(os.fsencode(resolved)).hexdigest()
+
+
+def led_lease_path(root: Path) -> Path:
+    return Path.home() / ".cache" / "sidepulse" / "device-leases" / f"{_device_key(root)}.json"
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def led_lease_holder(root: Path) -> dict | None:
+    """Return the live lease on a device held by *another* process, if any.
+
+    Leases left behind by a process that no longer exists are ignored.
+    """
+    try:
+        data = json.loads(led_lease_path(root).read_text(encoding="utf-8"))
+        pid = int(data["pid"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if pid == os.getpid() or not _pid_alive(pid):
+        return None
+    return data
+
+
+@contextmanager
+def hold_led_lease(root: Path, owner: str):
+    """Make this process the only LED writer for a device while the context is open.
+
+    Other writers (the background service, the status-bar app, `sidepulse write`)
+    get DeviceBusyError and retry on their normal schedule, so they restore their
+    display by themselves once the lease is released.
+    """
+    holder = led_lease_holder(root)
+    if holder is not None:
+        raise DeviceBusyError(
+            f"{root} is already in use by {holder.get('owner') or 'another process'} (pid {holder.get('pid')})."
+        )
+    path = led_lease_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    temporary = path.with_suffix(f".{os.getpid()}.tmp")
+    temporary.write_text(json.dumps({"pid": os.getpid(), "owner": owner, "root": str(root)}), encoding="utf-8")
+    os.replace(temporary, path)
+    try:
+        yield
+    finally:
+        try:
+            if json.loads(path.read_text(encoding="utf-8")).get("pid") == os.getpid():
+                path.unlink()
+        except (OSError, ValueError):
+            pass
 
 
 def write_text_synced(target: Path, text: str) -> None:

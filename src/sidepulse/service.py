@@ -9,7 +9,7 @@ import time
 
 from .battery import program_for_battery, read_battery_snapshot
 from .collector import LiveAgentMonitor, default_sources
-from .device_writer import DeviceWriteError, discover_devices, write_led_program
+from .device_writer import DeviceBusyError, DeviceWriteError, discover_devices, write_led_program
 from .hook import write_hook_line
 from .ipc import (
     HookEventServer,
@@ -182,6 +182,10 @@ class SidePulseService:
                 continue
             try:
                 write_led_program(program, device_path=candidate.target)
+            except DeviceBusyError:
+                # `sidepulse visualize` owns the LEDs; not cached, so the
+                # program is rewritten once the lease is released.
+                continue
             except Exception as exc:
                 print(f"sidepulse service: device write failed: {exc}", file=sys.stderr)
                 continue

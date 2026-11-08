@@ -223,6 +223,9 @@ def build_sidepulse_parser() -> argparse.ArgumentParser:
     settings.set_defaults(func=cmd_sidepulse_settings)
     add_sidepulse_sdejectguard_parser(subparsers)
     add_sidepulse_battery_parser(subparsers)
+    from .visualize import add_visualize_parser
+
+    add_visualize_parser(subparsers)
     # Agent configs written by older installs invoke `sidepulse hook-log`
     # directly, and `python -m sidepulse` lands here too, so both CLIs must
     # accept it.

@@ -863,6 +863,45 @@ send_hook_event(
 )
 ```
 
+#### Music Visualizer
+
+`sidepulse visualize` turns live audio into a frequency visualizer: each LED
+shows one band, from bass on LED 0 to treble on LED 7 (two bands on SidePulse
+Dot). It can listen to all system audio, specific apps, or the microphone.
+
+```sh
+sidepulse visualize                         # all system audio
+sidepulse visualize --app spotify           # only Spotify
+sidepulse visualize --app chrome --app music
+sidepulse visualize --list-apps             # apps that currently have audio
+sidepulse visualize --style pulse --color '#ff3a00'
+sidepulse visualize --mic --style meter
+```
+
+The menu-bar app has the same controls under **Music Visualizer** (shown when a
+SidePulse is connected): Start/Stop, Source (all audio or a playing app), Style,
+and Color for the single-color and pulse styles (profile presets or a custom
+color from the macOS color picker).
+
+Styles: `spectrum` (rainbow bands, default), `mono` (bands in one `--color`),
+`pulse` (whole strip pulses with the bass), `meter` (loudness bar). `--cycle 2`
+slowly rotates the spectrum hues; `--brightness 40` dims it.
+
+How it works:
+
+- A small Swift helper captures audio with Core Audio process taps (macOS 14.2+)
+  and analyzes it with Accelerate. It is compiled on first run, so Xcode or the
+  Command Line Tools (`xcode-select --install`) must be installed. macOS asks
+  once for audio-recording permission for your terminal.
+- On SidePulse Pro, frames stream over READ2ME: they are sent by *reading*
+  `setup.html`, so nothing is written to the device and its flash metadata is
+  never saved. This runs at about 20 fps. `--transport file` writes `LEDS.LED`
+  instead (30-60 fps), but the device then saves metadata to flash about twice a
+  minute. SidePulse Dot always uses file writes.
+- While it runs, the visualizer holds an exclusive LED lease: the background
+  service, the menu-bar app, and `sidepulse write` pause their LED writes and
+  restore the normal display within about a second after it exits.
+
 #### Audio Monitor Example
 
 `examples/audio_monitor.py` turns microphone volume into a smooth LED level
