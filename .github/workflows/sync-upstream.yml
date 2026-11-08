@@ -1,0 +1,30 @@
+name: Sync upstream
+
+on:
+  schedule:
+    - cron: '0 6,18 * * *' # Daily at 6 AM and 6 PM Central, including daylight saving time.
+      timezone: 'America/Chicago'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  statuses: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.repository == 'coledeb/sidepulse' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Sync upstream and propose updates
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/sync_upstream.py
