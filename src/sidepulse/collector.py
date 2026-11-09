@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
@@ -35,6 +37,7 @@ CODEX_SESSION_INDEX_MAX_LINES = 5000
 COMPLETED_VISIBLE_SECONDS = 20 * 60.0
 IDLE_VISIBLE_SECONDS = 0.0
 POST_TOOL_WORKING_VISIBLE_SECONDS = 2 * 60.0
+PERMISSION_PROMPT_SETTLE_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
@@ -1095,6 +1098,11 @@ def mode_for_event(record: HookEvent) -> AgentMode | None:
     if event in {"Stop", "SubagentStop"}:
         if _assistant_message_asks_question(raw.get("last_assistant_message")):
             return AgentMode.WAITING_FOR_INPUT
+        # A Claude turn can end with a shell, monitor, or subagent still running in
+        # the background. Only the session's own Stop keeps waiting: nothing later
+        # would clear a finished subagent's row.
+        if event == "Stop" and has_running_background_task(raw):
+            return AgentMode.LONG_TASK_PROGRESS
         return AgentMode.COMPLETED
     if event in {"SessionEnd"}:
         return AgentMode.COMPLETED
@@ -1312,6 +1320,17 @@ def status_for_snapshot(
     post_tool_working_visible_seconds: float,
 ) -> AgentStatus:
     if (
+        status.mode == AgentMode.WAITING_FOR_INPUT
+        and status.event_name == "PermissionRequest"
+        and PERMISSION_PROMPT_SETTLE_SECONDS >= 0
+        and status.age_seconds(now) < PERMISSION_PROMPT_SETTLE_SECONDS
+    ):
+        # Codex emits PermissionRequest even for auto-approved (sandboxed)
+        # commands, so a fresh request is usually just work in progress.
+        # A real prompt blocks until answered, so it stays unresolved and is
+        # promoted back to Waiting for Input once it outlives the settle window.
+        return _replace_mode(status, AgentMode.WORKING)
+    if (
         status.mode == AgentMode.WORKING
         and status.event_name == "PostToolUse"
         and post_tool_working_visible_seconds >= 0
@@ -1399,15 +1418,29 @@ def permission_signature(record: HookEvent) -> str | None:
     return None
 
 
+def has_running_background_task(raw: dict[str, Any]) -> bool:
+    """Whether Claude's Stop hook lists a shell, monitor, or subagent still running."""
+    tasks = raw.get("background_tasks")
+    if not isinstance(tasks, list):
+        return False
+    return any(isinstance(task, dict) and task.get("status") == "running" for task in tasks)
+
+
 def should_ignore_status_transition(
     previous: AgentStatus | None,
     current: AgentStatus,
     pending_permission_signatures: set[str],
 ) -> bool:
+    # Claude sends an idle "waiting for your input" Notification about a minute
+    # after a turn ends; it must not flip a finished turn, or one still running
+    # background work, to Ask.
     if (
         previous is not None
-        and previous.mode == AgentMode.COMPLETED
         and current.event_name == "Notification"
+        and (
+            previous.mode == AgentMode.COMPLETED
+            or (previous.mode == AgentMode.LONG_TASK_PROGRESS and previous.event_name == "Stop")
+        )
     ):
         return True
 
@@ -1594,7 +1627,9 @@ def summarize_prompt(value: object, max_len: int = 72) -> str | None:
     )
     text = re.sub(r"(?:~|/Users|/var|/private|/tmp)/[^\s,;)'\"`]+", "...", text)
     text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"[\u2500-\u257f]+", " ", text)  # box drawing: a pasted `tree` listing
     text = re.sub(r"#+\s*", " ", text)
+    text = re.sub(r"^\s*user\s*:\s*", "", text, flags=re.IGNORECASE)  # a pasted transcript's role label
     text = re.sub(r"\s+", " ", text).strip(" -:\n\t")
 
     if not text:
@@ -1642,7 +1677,19 @@ def project_name(cwd: str | None) -> str | None:
     for candidate in (path, *path.parents):
         if (candidate / ".git").exists():
             return candidate.name or str(candidate)
+    if is_temp_root(path):
+        return None
     return path.name or cwd
+
+
+def is_temp_root(path: Path) -> bool:
+    """The temp directory itself names no project.
+
+    macOS puts ``$TMPDIR`` at ``/var/folders/.../T``, so a session started there would be
+    labelled "T". Directories under it keep their own names.
+    """
+    resolved = os.path.realpath(path)
+    return any(resolved == os.path.realpath(root) for root in (tempfile.gettempdir(), "/tmp", "/var/tmp"))
 
 
 def truncate_text(text: str, max_len: int) -> str:
@@ -1665,10 +1712,10 @@ def _tool_response_looks_failed(response: object) -> bool:
             return True
         return False
 
-    if isinstance(response, str):
-        text = response.lower()
-        return "exit code: 1" in text or "traceback" in text
-
+    # A string response carries no status, only output. Sniffing it for words
+    # like "traceback" flags commands that printed one and still succeeded, so
+    # genuine failures are left to the PostToolUseFailure hook and to the
+    # structured fields above.
     return False
 
 

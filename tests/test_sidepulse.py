@@ -4,6 +4,7 @@ import json
 import os
 import plistlib
 import re
+import socket
 import subprocess
 import sys
 import tempfile
@@ -39,6 +40,9 @@ from sidepulse.collector import (
     MonitorSnapshot,
     SourceSpec,
     default_sources,
+    display_name_from_parts,
+    project_name,
+    summarize_prompt,
 )
 from sidepulse.cli import build_parser, visible_watch_statuses
 from sidepulse.device_writer import (
@@ -433,6 +437,113 @@ class AgentMonitorTests(unittest.TestCase):
         self.assertIsNotNone(status)
         self.assertEqual(status.mode, AgentMode.WAITING_FOR_INPUT)
 
+    def test_claude_stop_failure_marks_session_blocked(self) -> None:
+        record = parse_log_line(
+            "claude",
+            json.dumps(
+                {
+                    "hook_event_name": "StopFailure",
+                    "session_id": "claude-session",
+                    "error": "rate_limit",
+                    "last_assistant_message": "You've hit your session limit",
+                    "logged_at": "2026-07-18T21:55:14Z",
+                }
+            ),
+        )
+
+        self.assertIsNotNone(record)
+        status = collector_module.status_from_event(record)
+        self.assertIsNotNone(status)
+        self.assertEqual(status.mode, AgentMode.BLOCKED_ERROR)
+        self.assertEqual(status.message, "You've hit your session limit")
+
+    def _claude_stop_status(self, event_name: str, background_tasks: object, **extra: object):
+        payload = {
+            "hook_event_name": event_name,
+            "session_id": "claude-session",
+            "last_assistant_message": "Started the test run in the background.",
+            "logged_at": "2026-11-08T12:00:00Z",
+            **extra,
+        }
+        if background_tasks is not None:
+            payload["background_tasks"] = background_tasks
+        record = parse_log_line("claude", json.dumps(payload))
+        self.assertIsNotNone(record)
+        status = collector_module.status_from_event(record)
+        self.assertIsNotNone(status)
+        return status
+
+    def test_claude_stop_with_running_background_task_stays_in_progress(self) -> None:
+        for task_type in ("shell", "monitor", "subagent"):
+            with self.subTest(task_type=task_type):
+                status = self._claude_stop_status(
+                    "Stop",
+                    [
+                        {"id": "a", "type": "shell", "status": "completed"},
+                        {"id": "b", "type": task_type, "status": "running", "description": "tests"},
+                    ],
+                )
+                self.assertEqual(status.mode, AgentMode.LONG_TASK_PROGRESS)
+
+    def test_claude_stop_without_running_background_task_completes(self) -> None:
+        for tasks in (None, [], [{"id": "a", "status": "completed"}], "running", ["running"]):
+            with self.subTest(tasks=tasks):
+                status = self._claude_stop_status("Stop", tasks)
+                self.assertEqual(status.mode, AgentMode.COMPLETED)
+
+    def test_claude_subagent_stop_ignores_background_tasks(self) -> None:
+        status = self._claude_stop_status(
+            "SubagentStop", [{"id": "b", "type": "shell", "status": "running"}]
+        )
+        self.assertEqual(status.mode, AgentMode.COMPLETED)
+
+    def test_claude_stop_question_outranks_background_tasks(self) -> None:
+        status = self._claude_stop_status(
+            "Stop",
+            [{"id": "b", "type": "shell", "status": "running"}],
+            last_assistant_message="Tests are running. Want me to also update the docs?",
+        )
+        self.assertEqual(status.mode, AgentMode.WAITING_FOR_INPUT)
+
+    def test_idle_notification_after_background_stop_is_ignored(self) -> None:
+        previous = self._claude_stop_status(
+            "Stop", [{"id": "b", "type": "shell", "status": "running"}]
+        )
+        notification = parse_log_line(
+            "claude",
+            json.dumps(
+                {
+                    "hook_event_name": "Notification",
+                    "session_id": "claude-session",
+                    "message": "Claude is waiting for your input",
+                    "logged_at": "2026-11-08T12:01:00Z",
+                }
+            ),
+        )
+        current = collector_module.status_from_event(notification)
+        self.assertIsNotNone(current)
+        self.assertTrue(
+            collector_module.should_ignore_status_transition(previous, current, set())
+        )
+
+        # A long task reported by something other than a Stop is not shielded.
+        working = collector_module.status_from_event(
+            parse_log_line(
+                "claude",
+                json.dumps(
+                    {
+                        "hook_event_name": "UserPromptSubmit",
+                        "session_id": "claude-session",
+                        "prompt": "go",
+                        "logged_at": "2026-11-08T11:59:00Z",
+                    }
+                ),
+            )
+        )
+        self.assertFalse(
+            collector_module.should_ignore_status_transition(working, current, set())
+        )
+
     def test_claude_compat_grok_payload_routes_to_grok_log(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -615,6 +726,41 @@ class AgentMonitorTests(unittest.TestCase):
                     "Stop",
                 )
             finally:
+                server.stop()
+
+    def test_hook_event_server_survives_a_stalled_client(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            received: list[str] = []
+            server = HookEventServer(
+                lambda provider, line: received.append(line["session_id"]),
+                socket_path=Path(tmp) / "events.sock",
+            )
+            stalled = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                server.start()
+                # This client sends a full message and never sends EOF. It then sends a
+                # space every 0.1 s, so a timeout per recv() never expires.
+                stalled.connect(str(server.socket_path))
+                stalled.sendall(b'{"provider":"codex","line":{"session_id":"stalled"}}')
+                sent = send_hook_event(
+                    "codex",
+                    {"session_id": "next"},
+                    socket_path=server.socket_path,
+                    timeout=0.5,
+                )
+
+                deadline = time.time() + 3
+                while sent and len(received) < 2 and time.time() < deadline:
+                    try:
+                        stalled.send(b" ")
+                    except OSError:
+                        pass  # The server closed the connection at its deadline.
+                    time.sleep(0.1)
+
+                self.assertTrue(sent)
+                self.assertEqual(received, ["stalled", "next"])
+            finally:
+                stalled.close()
                 server.stop()
 
     def test_hook_event_reaches_app_when_xdg_state_home_differs(self) -> None:
@@ -951,6 +1097,46 @@ class AgentMonitorTests(unittest.TestCase):
         self.assertIsNotNone(image)
         self.assertGreater(image.size().width, 38)
         self.assertEqual(image.size().height, 18)
+
+    def test_bash_output_mentioning_traceback_is_not_blocked_error(self) -> None:
+        """Output text carries no exit status, so it must not imply failure.
+
+        A command can print a traceback, or tail a log containing one, and
+        still succeed. Treating that as BLOCKED_ERROR turned the LEDs amber
+        mid-run, which reads as "your turn" when the agent is still working.
+        """
+        from datetime import datetime, timezone
+
+        from sidepulse.collector import mode_for_event
+        from sidepulse.models import AgentMode, HookEvent
+
+        def event(response):
+            return HookEvent(
+                provider="claude",
+                logged_at=datetime.now(timezone.utc),
+                event_name="PostToolUse",
+                raw={"tool_response": response},
+                tool_name="Bash",
+            )
+
+        for response in (
+            "Traceback (most recent call last):\n  File \"x.py\", line 1",
+            "tests ... ok\nexit code: 1 appears in this log line",
+        ):
+            with self.subTest(response=response[:24]):
+                self.assertEqual(mode_for_event(event(response)), AgentMode.WORKING)
+
+        # Structured status is still authoritative.
+        self.assertEqual(
+            mode_for_event(event({"exit_code": 1})), AgentMode.BLOCKED_ERROR
+        )
+        self.assertEqual(
+            mode_for_event(event({"success": False})), AgentMode.BLOCKED_ERROR
+        )
+        self.assertEqual(
+            mode_for_event(event({"interrupted": True})), AgentMode.BLOCKED_ERROR
+        )
+        self.assertEqual(mode_for_event(event({"exit_code": 0})), AgentMode.WORKING)
 
     def test_virtual_sidepulse_notch_frame_covers_notch_plus_led_band(self) -> None:
         try:
@@ -3486,6 +3672,18 @@ class AgentMonitorTests(unittest.TestCase):
             self.assertTrue(any("hook_entry.py" in command for command in commands))
             self.assertFalse(any(command.startswith("jq -c") for command in commands))
             self.assertEqual(data["permissions"]["allow"], ["Bash(date)"])
+
+    def test_claude_installer_registers_stop_failure_hook(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            config = base / "settings.json"
+            log = base / "claude.jsonl"
+
+            install_claude_hooks(log_path=log, config_path=config, python_executable="python3")
+
+            entries = json.loads(config.read_text())["hooks"]["StopFailure"]
+            self.assertEqual(entries[0]["matcher"], "*")
+            self.assertIn("hook_entry.py", entries[0]["hooks"][0]["command"])
 
     def test_grok_installer_writes_global_hook_file_without_lifecycle_matchers(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -7091,9 +7289,15 @@ class AgentMonitorTests(unittest.TestCase):
             session_id = "019f179b-7fdc-7eb0-a3af-1ca3eb128eee"
             server_command = ".venv/bin/bambucuts server --host 127.0.0.1 --port 5425"
             curl_command = "curl -s http://127.0.0.1:5425/api/status | head -c 1000"
+            # Age the permission request past the settle window so this test
+            # exercises Ask persistence across unrelated tool activity rather
+            # than the fresh-request work-in-progress downgrade.
+            request_time = now - timedelta(
+                seconds=collector_module.PERMISSION_PROMPT_SETTLE_SECONDS + 3
+            )
             events = [
                 {
-                    "logged_at": now.isoformat(),
+                    "logged_at": request_time.isoformat(),
                     "event": {
                         "hook_event_name": "PreToolUse",
                         "session_id": session_id,
@@ -7103,7 +7307,7 @@ class AgentMonitorTests(unittest.TestCase):
                     },
                 },
                 {
-                    "logged_at": (now + timedelta(seconds=1)).isoformat(),
+                    "logged_at": (request_time + timedelta(seconds=1)).isoformat(),
                     "event": {
                         "hook_event_name": "PermissionRequest",
                         "session_id": session_id,
@@ -7113,7 +7317,7 @@ class AgentMonitorTests(unittest.TestCase):
                     },
                 },
                 {
-                    "logged_at": (now + timedelta(seconds=2)).isoformat(),
+                    "logged_at": (request_time + timedelta(seconds=2)).isoformat(),
                     "event": {
                         "hook_event_name": "PreToolUse",
                         "session_id": session_id,
@@ -7123,7 +7327,7 @@ class AgentMonitorTests(unittest.TestCase):
                     },
                 },
                 {
-                    "logged_at": (now + timedelta(seconds=3)).isoformat(),
+                    "logged_at": (request_time + timedelta(seconds=3)).isoformat(),
                     "event": {
                         "hook_event_name": "PostToolUse",
                         "session_id": session_id,
@@ -7223,6 +7427,63 @@ class AgentMonitorTests(unittest.TestCase):
         self.assertEqual(snapshot.aggregate.mode, AgentMode.COMPLETED)
         self.assertEqual(snapshot.aggregate.active_count, 0)
         self.assertEqual(snapshot.statuses[0].event_name, "PostToolUse")
+
+    def test_fresh_permission_request_is_shown_as_working(self) -> None:
+        now = datetime.now(timezone.utc)
+        status = AgentStatus(
+            provider="codex",
+            agent_id="codex:session:perm-session",
+            display_name="perm-session",
+            mode=AgentMode.WAITING_FOR_INPUT,
+            updated_at=now - timedelta(seconds=5),
+            event_name="PermissionRequest",
+            session_id="perm-session",
+            cwd="/tmp/project",
+            tool_name="Bash",
+        )
+
+        snapshot = collector_module.snapshot_from_statuses(
+            (status,),
+            sources=(),
+            collected_at=now,
+            stale_after_seconds=3600,
+            tool_running_timeout_seconds=0,
+            completed_visible_seconds=20 * 60,
+            idle_visible_seconds=0,
+        )
+
+        # Codex fires PermissionRequest even for auto-approved (sandboxed)
+        # commands, so a fresh request is usually just work in progress.
+        self.assertEqual(snapshot.aggregate.mode, AgentMode.WORKING)
+
+    def test_permission_request_promotes_to_ask_after_settle_window(self) -> None:
+        now = datetime.now(timezone.utc)
+        status = AgentStatus(
+            provider="codex",
+            agent_id="codex:session:perm-session",
+            display_name="perm-session",
+            mode=AgentMode.WAITING_FOR_INPUT,
+            updated_at=now
+            - timedelta(seconds=collector_module.PERMISSION_PROMPT_SETTLE_SECONDS + 1),
+            event_name="PermissionRequest",
+            session_id="perm-session",
+            cwd="/tmp/project",
+            tool_name="Bash",
+        )
+
+        snapshot = collector_module.snapshot_from_statuses(
+            (status,),
+            sources=(),
+            collected_at=now,
+            stale_after_seconds=3600,
+            tool_running_timeout_seconds=0,
+            completed_visible_seconds=20 * 60,
+            idle_visible_seconds=0,
+        )
+
+        # A real prompt blocks until answered, so it stays unresolved and is
+        # promoted back to Waiting for Input once it outlives the settle window.
+        self.assertEqual(snapshot.aggregate.mode, AgentMode.WAITING_FOR_INPUT)
 
     def test_internal_codex_helper_sessions_are_ignored(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -8329,6 +8590,60 @@ team id YOUR_TEAM_ID, push key '/path/to/AuthKey_YOUR_KEY_ID.p8'
                 "vscode://anthropic.claude-code/open?session=1ca4348e-2aec-4147-9e81-d7d56364d257",
             ),
         )
+
+    def test_summarize_prompt_drops_tree_glyphs_and_a_leading_role_label(self) -> None:
+        """A pasted `tree` listing or transcript must not become the session title."""
+        listing = "src\n├── collector.py\n│   └── helpers.py\n└── status_bar.py\nwhy is this slow?"
+        self.assertEqual(
+            summarize_prompt(listing),
+            "src collector.py helpers.py status_bar.py why is this slow?",
+        )
+        self.assertEqual(summarize_prompt("User: fix the flaky test"), "fix the flaky test")
+        self.assertEqual(summarize_prompt("user:fix the flaky test"), "fix the flaky test")
+        self.assertEqual(summarize_prompt("the user: table is empty"), "the user: table is empty")
+        self.assertIsNone(summarize_prompt("User:"))
+        self.assertIsNone(summarize_prompt("├──\n└──"))
+
+    def test_project_name_skips_the_temp_directory_itself(self) -> None:
+        """A session whose cwd is $TMPDIR (basename "T" on macOS) has no project to show."""
+        temp_root = Path(tempfile.gettempdir())
+        with tempfile.TemporaryDirectory() as tmp:
+            scratch = Path(tmp)
+            checkout = scratch / "sidepulse"
+            (checkout / ".git").mkdir(parents=True)
+
+            self.assertIsNone(project_name(str(temp_root)))
+            self.assertIsNone(project_name(str(temp_root.resolve())))
+            self.assertIsNone(project_name("/tmp"))
+            self.assertEqual(project_name(str(scratch)), scratch.name)
+            self.assertEqual(project_name(str(checkout)), "sidepulse")
+            self.assertEqual(project_name(str(checkout / "src")), "sidepulse")
+        self.assertEqual(project_name("/tmp/project"), "project")
+        self.assertEqual(project_name("/Users/pero/pgit/example"), "example")
+        self.assertIsNone(project_name(None))
+
+    def test_status_bar_menu_title_has_no_project_for_temp_directory_sessions(self) -> None:
+        try:
+            from sidepulse import status_bar
+        except SystemExit as exc:
+            self.skipTest(str(exc))
+
+        cwd = tempfile.gettempdir()
+        status = AgentStatus(
+            provider="claude",
+            agent_id="claude:session:abc",
+            display_name=display_name_from_parts(
+                project_name(cwd), "fix the flaky test", "1ca4348e", "Claude 1ca4348e"
+            ),
+            mode=AgentMode.WORKING,
+            updated_at=datetime.now(timezone.utc),
+            event_name="UserPromptSubmit",
+            session_id="1ca4348e-2aec-4147-9e81-d7d56364d257",
+            cwd=cwd,
+        )
+
+        self.assertEqual(status.display_name, "fix the flaky test (1ca4348e)")
+        self.assertEqual(status_bar.native_session_menu_title(status), "fix the flaky test")
 
 
 if __name__ == "__main__":
