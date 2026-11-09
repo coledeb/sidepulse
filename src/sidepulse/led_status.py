@@ -67,11 +67,11 @@ COUNT_SPECIFIC_ANIMATIONS = frozenset(
     }
 )
 # Built-in idle breaths whose cycle length follows the "Idle pulse" setting.
-# Their authored programs fade out and back in over 2s each, a 4s cycle.
+# Each fades out over 2s (a leading `off` line) and back in over 2s, a 4s
+# breath; a longer cycle keeps that breath and holds dark in between.
 IDLE_PULSE_ANIMATIONS = frozenset({"idle-pulse", "ember-idle", "purple-idle"})
-IDLE_PULSE_AUTHORED_SECONDS = 4.0
+IDLE_PULSE_BREATH_SECONDS = 4.0
 MAX_STEP_MS = 65535
-_TIMING_TOKEN = re.compile(r"(?<![#\w.])(\d+(?:\.\d+)?)(ms|s)\b", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -139,9 +139,8 @@ def program_for_agent_mode(
         custom_program=custom_program,
     )
     if idle_pulse_seconds is not None and _is_idle_pulse(mode, animation_style):
-        program = retime_program(
-            program, float(idle_pulse_seconds) / IDLE_PULSE_AUTHORED_SECONDS
-        )
+        dark_ms = round((float(idle_pulse_seconds) - IDLE_PULSE_BREATH_SECONDS) * 1000)
+        program = add_dark_hold(program, dark_ms)
     return program
 
 
@@ -151,17 +150,20 @@ def _is_idle_pulse(mode: AgentMode, animation_style: str) -> bool:
     return animation_style in IDLE_PULSE_ANIMATIONS
 
 
-def retime_program(program: str, factor: float) -> str:
-    """Scale every duration and delay in an LED program by ``factor``."""
-    if factor <= 0 or abs(factor - 1.0) < 1e-9:
+def add_dark_hold(program: str, dark_ms: int) -> str:
+    """Hold the LEDs off for ``dark_ms`` right after the program fades to off."""
+    if dark_ms <= 0:
         return program
-
-    def scale(match: re.Match[str]) -> str:
-        value = float(match.group(1))
-        ms = value if match.group(2).lower() == "ms" else value * 1000
-        return f"{max(1, min(MAX_STEP_MS, round(ms * factor)))}ms"
-
-    return _TIMING_TOKEN.sub(scale, program)
+    holds: list[str] = []
+    while dark_ms > 0:
+        step = min(MAX_STEP_MS, dark_ms)
+        holds.append(f"off {step}ms")
+        dark_ms -= step
+    lines = program.splitlines()
+    for index, line in enumerate(lines):
+        if re.match(r"\s*off\b", line, re.IGNORECASE):
+            return "\n".join(lines[: index + 1] + holds + lines[index + 1 :])
+    return program
 
 
 def _program_for_agent_mode(

@@ -203,8 +203,8 @@ VISUALIZER_COLOR_PRESETS = (
 VISUALIZER_DEFAULT_COLOR = "#00E5FF"
 # Full fade-out/fade-in cycle of the built-in idle animations, in seconds.
 DEFAULT_IDLE_PULSE_SECONDS = 4.0
-MIN_IDLE_PULSE_SECONDS = 1.0
-# Each half of the cycle must fit the firmware's 65535 ms step limit.
+# The breath itself takes 4s; longer cycles add a dark pause between breaths.
+MIN_IDLE_PULSE_SECONDS = 4.0
 MAX_IDLE_PULSE_SECONDS = 120.0
 HISTORY_TIMEFRAME_CHOICES = (
     HISTORY_TIMEFRAME_1H_SECONDS,

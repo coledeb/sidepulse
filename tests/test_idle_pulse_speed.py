@@ -7,7 +7,7 @@ from pathlib import Path
 from sidepulse.led_status import (
     AgentLedController,
     program_for_agent_mode,
-    retime_program,
+    add_dark_hold,
 )
 from sidepulse.models import AgentMode
 from sidepulse.settings import (
@@ -26,7 +26,7 @@ class IdlePulseSpeedTests(unittest.TestCase):
         )
         self.assertEqual(plain, timed)
 
-    def test_slower_idle_pulse_stretches_both_halves(self) -> None:
+    def test_longer_cycle_keeps_breath_speed_and_holds_dark(self) -> None:
         for style in ("default", "idle-pulse", "ember-idle", "purple-idle"):
             for led_count in (2, 8):
                 program = program_for_agent_mode(
@@ -35,9 +35,11 @@ class IdlePulseSpeedTests(unittest.TestCase):
                     animation_style=style,
                     idle_pulse_seconds=12,
                 )
-                self.assertIn("off 6000ms", program, style)
-                self.assertIn("6000ms ease", program, style)
-                self.assertNotIn(" 2s", program, style)
+                lines = program.splitlines()
+                self.assertEqual(lines[0], "off 2s", style)
+                self.assertEqual(lines[1], "off 8000ms", style)
+                self.assertTrue(lines[2].endswith(" 2s ease"), style)
+                self.assertEqual(lines[3], "repeat", style)
 
     def test_non_idle_animations_ignore_idle_pulse(self) -> None:
         for mode, style in (
@@ -63,12 +65,12 @@ class IdlePulseSpeedTests(unittest.TestCase):
             custom,
         )
 
-    def test_retime_scales_delays_and_leaves_colors_alone(self) -> None:
+    def test_dark_hold_goes_after_fade_out_and_splits_long_holds(self) -> None:
         self.assertEqual(
-            retime_program("brightness 128\n0:#00ff00 0.33s ease-in 250ms; 1:#123456 1s", 2),
-            "brightness 128\n0:#00ff00 660ms ease-in 500ms; 1:#123456 2000ms",
+            add_dark_hold("brightness 128\noff 2s\n#00ff00 2s ease\nrepeat", 70000),
+            "brightness 128\noff 2s\noff 65535ms\noff 4465ms\n#00ff00 2s ease\nrepeat",
         )
-        self.assertEqual(retime_program("#ffffff 40s", 3), "#ffffff 65535ms")
+        self.assertEqual(add_dark_hold("off 2s\nrepeat", 0), "off 2s\nrepeat")
 
     def test_controller_rewrites_when_idle_pulse_changes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -81,7 +83,7 @@ class IdlePulseSpeedTests(unittest.TestCase):
             self.assertTrue(first.changed)
             self.assertFalse(same.changed)
             self.assertTrue(slower.changed)
-            self.assertIn("10000ms", (device / "LEDS.LED").read_text())
+            self.assertIn("off 16000ms", (device / "LEDS.LED").read_text())
 
     def test_setting_round_trips_and_clamps(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -89,16 +91,18 @@ class IdlePulseSpeedTests(unittest.TestCase):
             save_settings(AgentMonitorSettings().with_idle_pulse_seconds(7.5), path)
             self.assertEqual(load_settings(path).idle_pulse_seconds, 7.5)
         settings = AgentMonitorSettings()
-        self.assertEqual(settings.with_idle_pulse_seconds(0.2).idle_pulse_seconds, 1.0)
+        self.assertEqual(settings.with_idle_pulse_seconds(1).idle_pulse_seconds, 4.0)
         self.assertEqual(settings.with_idle_pulse_seconds(500).idle_pulse_seconds, 120.0)
         self.assertEqual(
             settings.with_idle_pulse_seconds(float("nan")).idle_pulse_seconds,
             DEFAULT_IDLE_PULSE_SECONDS,
         )
 
-    def test_longest_idle_pulse_fits_firmware_step_limit(self) -> None:
+    def test_longest_idle_pulse_fits_firmware_limits(self) -> None:
         program = program_for_agent_mode(AgentMode.IDLE_READY, idle_pulse_seconds=120)
-        self.assertIn("off 60000ms", program)
+        self.assertIn("off 65535ms\noff 50465ms", program)
+        self.assertLessEqual(len(program.encode()), 512)
+        self.assertLessEqual(len(program.splitlines()), 20)
 
 
 if __name__ == "__main__":
