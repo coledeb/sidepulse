@@ -6351,7 +6351,7 @@ def session_row_icon_for_status(
     state = state_for_mode(status.mode)
     if animation_frame is not None and state in (STATE_WORKING, STATE_ASK):
         return animated_session_row_icon(
-            state, animation_frame, session_origin_icon_for_status(status), dark_mode,
+            state, animation_frame, session_origin_icon_for_status(status, dark_mode=dark_mode), dark_mode,
         )
     cache_key = (
         status.mode.value,
@@ -6363,7 +6363,7 @@ def session_row_icon_for_status(
         return _session_row_icon_cache[cache_key]
 
     status_icon = status_icon_for_status(status)
-    origin_icon = session_origin_icon_for_status(status)
+    origin_icon = session_origin_icon_for_status(status, dark_mode=dark_mode)
     if origin_icon is None:
         image = status_icon
     elif status_icon is None:
@@ -6420,12 +6420,40 @@ def animated_session_row_icon(state: StatusBarState, frame: int, origin_icon, da
     return horizontal_icon_pair(icon, origin_icon, dark_mode=dark_mode)
 
 
-def session_origin_icon_for_status(status: AgentStatus):
-    provider_icon = provider_icon_for_status(status)
-    host_icon = host_icon_for_origin(status.origin)
+def session_origin_icon_for_status(status: AgentStatus, *, dark_mode: bool | None = None):
+    if dark_mode is None:
+        dark_mode = is_dark_appearance()
+    # The row image holds full-color app icons, so it can't be a template; a
+    # fallback SF Symbol must be colored for the menu's appearance up front.
+    provider_icon = appearance_colored_icon(provider_icon_for_status(status), dark_mode)
+    host_icon = appearance_colored_icon(host_icon_for_origin(status.origin), dark_mode)
     if host_icon is None:
         return provider_icon
     return composite_app_icons(host_icon, provider_icon)
+
+
+@lru_cache(maxsize=64)
+def appearance_colored_icon(icon, dark_mode: bool):
+    """A template glyph filled with the menu text color; app icons pass through."""
+    if icon is None or not icon.isTemplate():
+        return icon
+    size = icon.size()
+    image = NSImage.alloc().initWithSize_(size)
+    try:
+        image.lockFocus()
+        icon.drawInRect_fromRect_operation_fraction_(
+            ((0.0, 0.0), (size.width, size.height)),
+            image_source_rect(icon),
+            NSCompositingOperationSourceOver,
+            1.0,
+        )
+        (NSColor.whiteColor() if dark_mode else NSColor.blackColor()).set()
+        NSRectFillUsingOperation(
+            ((0.0, 0.0), (size.width, size.height)), NSCompositingOperationSourceIn,
+        )
+    finally:
+        image.unlockFocus()
+    return image
 
 
 def provider_icon_for_status(status: AgentStatus):
@@ -6515,24 +6543,23 @@ def composite_app_icons(host_icon, provider_icon):
     if host_icon is None:
         return provider_icon
 
-    image = NSImage.alloc().initWithSize_((24.0, 18.0))
+    # Host app, then the agent it runs, side by side.
+    icon_size = 15.5
+    gap = 2.0
+    width = icon_size * 2 + gap
+    image = NSImage.alloc().initWithSize_((width, 18.0))
     try:
         image.lockFocus()
-        host_icon.drawInRect_fromRect_operation_fraction_(
-            ((0.0, 1.0), (15.5, 15.5)),
-            image_source_rect(host_icon),
-            NSCompositingOperationSourceOver,
-            1.0,
-        )
-        provider_icon.drawInRect_fromRect_operation_fraction_(
-            ((8.0, 1.0), (15.5, 15.5)),
-            image_source_rect(provider_icon),
-            NSCompositingOperationSourceOver,
-            1.0,
-        )
+        for x, icon in ((0.0, host_icon), (icon_size + gap, provider_icon)):
+            icon.drawInRect_fromRect_operation_fraction_(
+                ((x, 1.25), (icon_size, icon_size)),
+                image_source_rect(icon),
+                NSCompositingOperationSourceOver,
+                1.0,
+            )
     finally:
         image.unlockFocus()
-    image.setSize_((24.0, 18.0))
+    image.setSize_((width, 18.0))
     return image
 
 

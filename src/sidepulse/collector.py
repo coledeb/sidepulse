@@ -6,7 +6,7 @@ import re
 import tempfile
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable
@@ -20,7 +20,7 @@ from .models import (
     parse_datetime,
     provider_label,
 )
-from .origin import origin_label_from_payload
+from .origin import T3CODE_THREAD_KEY, is_t3code_origin, origin_label_from_payload
 from .providers import detect_log_path, parse_log_line
 from .settings import AgentMonitorSettings, load_settings
 
@@ -197,6 +197,7 @@ class AgentMonitor:
         metadata_by_session: dict[str, StatusMetadata] = {}
         metadata_by_status: dict[str, StatusMetadata] = {}
         pending_permissions_by_key: dict[str, set[str]] = {}
+        sessions_by_t3_thread: dict[str, str] = {}
 
         records = sorted(
             self._iter_records(),
@@ -204,6 +205,9 @@ class AgentMonitor:
         )
 
         for record in records:
+            record = resolve_record_session(record, sessions_by_t3_thread)
+            if record is None:
+                continue
             metadata = metadata_for_record(
                 record,
                 metadata_by_session,
@@ -403,11 +407,15 @@ class LiveAgentMonitor:
         self.metadata_by_session: dict[str, StatusMetadata] = {}
         self.metadata_by_status: dict[str, StatusMetadata] = {}
         self.pending_permissions_by_key: dict[str, set[str]] = {}
+        self.sessions_by_t3_thread: dict[str, str] = {}
         self.load_latest_state()
         self.reconcile_recovery_sources()
 
     def ingest_record(self, record: HookEvent) -> None:
         with self.lock:
+            record = resolve_record_session(record, self.sessions_by_t3_thread)
+            if record is None:
+                return
             metadata = metadata_for_record(
                 record,
                 self.metadata_by_session,
@@ -457,7 +465,7 @@ class LiveAgentMonitor:
         loaded: dict[str, AgentStatus] = {}
         for status_data in statuses:
             status = agent_status_from_dict(status_data)
-            if status is not None:
+            if status is not None and not is_orphan_status(status):
                 loaded[status.agent_id] = status
         self.statuses_by_key.update(loaded)
 
@@ -980,6 +988,41 @@ def message_text_from_content(content: object) -> str:
 
 def _string_or_none(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
+
+
+def resolve_record_session(
+    record: HookEvent, sessions_by_t3_thread: dict[str, str],
+) -> HookEvent | None:
+    """Attach a sessionless hook event to its session, or drop it.
+
+    Agents hosted by T3 Code sometimes fire a bare hook (e.g. a Stop payload with
+    nothing but the event name). Every hook from T3 carries its thread id, so the
+    thread's earlier events tell us which session it belongs to. A sessionless
+    event that can't be matched would otherwise become a nameless
+    "<provider>:unknown" row, so it is dropped for T3-hosted agents and Claude,
+    whose real hooks always include a session id.
+    """
+    thread_id = _string_or_none(record.raw.get(T3CODE_THREAD_KEY))
+    thread_key = f"{record.provider}:{thread_id}" if thread_id else None
+    if record.session_id or record.agent_id:
+        # T3's own thread records use the thread id as the session id; only an
+        # agent's hook names the real session.
+        if thread_key and record.session_id and record.session_id != thread_id:
+            sessions_by_t3_thread[thread_key] = record.session_id
+        return record
+    session_id = sessions_by_t3_thread.get(thread_key) if thread_key else None
+    if session_id:
+        return replace(record, session_id=session_id)
+    if thread_key or record.provider == "claude":
+        return None
+    return record
+
+
+def is_orphan_status(status: AgentStatus) -> bool:
+    """A saved row from a sessionless event that resolve_record_session now drops."""
+    if status.session_id or status.agent_id != f"{status.provider}:unknown":
+        return False
+    return status.provider == "claude" or is_t3code_origin(status.origin)
 
 
 def metadata_for_record(

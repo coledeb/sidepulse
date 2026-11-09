@@ -990,6 +990,65 @@ class AgentMonitorTests(unittest.TestCase):
             self.assertEqual(reloaded.snapshot().aggregate.mode, AgentMode.TOOL_RUNNING)
             self.assertEqual(reloaded.snapshot().statuses[0].origin, "Codex UI")
 
+    def test_sessionless_t3_hook_joins_its_threads_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            latest = Path(tmp) / "latest.json"
+            monitor = LiveAgentMonitor(latest_state_path=latest)
+
+            def ingest(event: dict) -> None:
+                record = parse_log_line("claude", json.dumps({
+                    "logged_at": datetime.now(timezone.utc).isoformat(),
+                    **event,
+                }))
+                self.assertIsNotNone(record)
+                monitor.ingest_record(record)
+
+            ingest({
+                "hook_event_name": "UserPromptSubmit",
+                "session_id": "real-session",
+                "cwd": "/tmp/project",
+                "prompt": "Fix the icons",
+                "agent_origin": "Claude in T3 Code",
+                "t3code_thread_id": "thread-1",
+            })
+            ingest({
+                "hook_event_name": "Stop",
+                "agent_origin": "Claude in T3 Code",
+                "t3code_thread_id": "thread-1",
+            })
+            # A bare hook from a thread SidePulse hasn't seen has nowhere to go.
+            ingest({
+                "hook_event_name": "Stop",
+                "agent_origin": "Claude in T3 Code",
+                "t3code_thread_id": "thread-unknown",
+            })
+
+            statuses = monitor.snapshot(include_stale=True).statuses
+            self.assertEqual([s.agent_id for s in statuses], ["claude:session:real-session"])
+            self.assertEqual(statuses[0].mode, AgentMode.COMPLETED)
+
+    def test_sessionless_claude_hook_is_dropped_and_purged_on_load(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            latest = Path(tmp) / "latest.json"
+            latest.write_text(json.dumps({"statuses": [{
+                "provider": "claude",
+                "agent_id": "claude:unknown",
+                "display_name": "Claude",
+                "mode": "completed",
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "event_name": "Stop",
+            }]}))
+            monitor = LiveAgentMonitor(latest_state_path=latest)
+            self.assertEqual(monitor.snapshot(include_stale=True).statuses, ())
+
+            record = parse_log_line("claude", json.dumps({
+                "logged_at": datetime.now(timezone.utc).isoformat(),
+                "hook_event_name": "Stop",
+            }))
+            self.assertIsNotNone(record)
+            monitor.ingest_record(record)
+            self.assertEqual(monitor.snapshot(include_stale=True).statuses, ())
+
     def test_codex_interrupt_clears_active_status_and_permissions(self) -> None:
         for active_event in ("UserPromptSubmit", "PreToolUse", "PermissionRequest"):
             with self.subTest(active_event=active_event), tempfile.TemporaryDirectory() as tmp:
@@ -1218,7 +1277,7 @@ class AgentMonitorTests(unittest.TestCase):
         image = status_bar.session_origin_icon_for_status(status)
 
         self.assertIsNotNone(image)
-        self.assertEqual(image.size().width, 24)
+        self.assertEqual(image.size().width, 33)
         self.assertEqual(image.size().height, 18)
 
     def test_status_bar_session_row_icon_combines_status_and_origin(self) -> None:
