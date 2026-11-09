@@ -5236,7 +5236,7 @@ class AgentMonitorTests(unittest.TestCase):
         self.assertEqual(snapshot.current_capacity_mah, 4000)
         self.assertEqual(len(snapshot.pd_profiles), 2)
 
-    def test_battery_program_matches_simulator_frontier_pulse(self) -> None:
+    def test_charging_program_fills_from_level_to_end(self) -> None:
         snapshot = BatterySnapshot(
             percent=50,
             is_plugged=True,
@@ -5252,10 +5252,14 @@ class AgentMonitorTests(unittest.TestCase):
         self.assertIn(f"0:{BATTERY_CHARGING_MINT} 360ms ease", lines[0])
         self.assertIn(f"3:{BATTERY_CHARGING_MINT} 360ms ease", lines[0])
         self.assertIn("4:#000000 360ms ease", lines[0])
-        self.assertEqual(lines[1], f"4:{BATTERY_CHARGING_MINT} 790ms pulse")
-        self.assertEqual(lines[2], "4:#000000 800ms none")
-        self.assertEqual(lines[3], "repeat")
-        self.assertEqual(len(lines), 4)
+        self.assertEqual(lines[1], "4:#000000 600ms none")
+        self.assertEqual(
+            lines[2:6],
+            [f"{index}:{BATTERY_CHARGING_MINT} 220ms ease-out" for index in range(4, 8)],
+        )
+        self.assertEqual(lines[6], f"7:{BATTERY_CHARGING_MINT} 500ms none")
+        self.assertEqual(lines[7], "repeat")
+        self.assertEqual(len(lines), 8)
         self.assertNotIn("\noff", program)
 
     def test_unplugged_battery_program_eases_to_static_level(self) -> None:
@@ -5290,7 +5294,7 @@ class AgentMonitorTests(unittest.TestCase):
         validate_led_text(program)
         self.assertTrue(program.startswith("brightness 128\n"))
 
-    def test_battery_program_uses_full_speed_steady_pulse(self) -> None:
+    def test_charging_fill_speeds_up_with_charger_power(self) -> None:
         snapshot = BatterySnapshot(
             percent=80,
             is_plugged=True,
@@ -5302,9 +5306,19 @@ class AgentMonitorTests(unittest.TestCase):
         program = program_for_battery(snapshot, led_count=8)
 
         validate_led_text(program)
-        self.assertIn(f"6:{BATTERY_CHARGING_MINT} 1400ms pulse", program)
+        self.assertIn(f"6:{BATTERY_CHARGING_MINT} 120ms ease-out", program)
+        self.assertIn(f"7:{BATTERY_CHARGING_MINT} 120ms ease-out", program)
+        self.assertNotIn("5:#80FFC8 120ms", program)
         self.assertTrue(program.endswith("repeat"))
-        self.assertNotIn("none", program)
+
+    def test_empty_battery_charging_fill_fits_device_limits(self) -> None:
+        snapshot = BatterySnapshot(percent=0, is_plugged=True, is_charging=True)
+
+        for led_count in (8, 2):
+            program = program_for_battery(snapshot, led_count=led_count, brightness=128)
+            validate_led_text(program)
+            self.assertLessEqual(len(program.encode()), 512)
+            self.assertIn(f"0:{BATTERY_CHARGING_MINT}", program.splitlines()[3])
 
     def test_plugged_but_not_charging_uses_static_battery_display(self) -> None:
         snapshot = BatterySnapshot(

@@ -206,6 +206,8 @@ DEFAULT_IDLE_PULSE_SECONDS = 4.0
 # The breath itself takes 4s; longer cycles add a dark pause between breaths.
 MIN_IDLE_PULSE_SECONDS = 4.0
 MAX_IDLE_PULSE_SECONDS = 120.0
+MIN_POWER_CHANGE_PREVIEW_SECONDS = 5.0
+MAX_POWER_CHANGE_PREVIEW_SECONDS = 15.0
 HISTORY_TIMEFRAME_CHOICES = (
     HISTORY_TIMEFRAME_1H_SECONDS,
     HISTORY_TIMEFRAME_6H_SECONDS,
@@ -576,7 +578,7 @@ class AgentMonitorSettings:
     ) -> "AgentMonitorSettings":
         preview_seconds = self.battery_power_change_preview_seconds
         if seconds is not None:
-            preview_seconds = max(0.0, float(seconds))
+            preview_seconds = normalize_power_change_preview_seconds(seconds)
         return replace(
             self,
             battery_show_on_power_change=(
@@ -1034,9 +1036,8 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
             battery.get("show_on_power_change"),
             True,
         ),
-        battery_power_change_preview_seconds=_float_setting(
+        battery_power_change_preview_seconds=normalize_power_change_preview_seconds(
             battery.get("power_change_preview_seconds"),
-            DEFAULT_POWER_CHANGE_PREVIEW_SECONDS,
         ),
         agent_animations=agent_animations,
         custom_agent_animations=custom_agent_animations,
@@ -1553,6 +1554,17 @@ def normalize_history_timeframe(value: object) -> float:
             if abs(candidate - float(choice)) < 0.5:
                 return float(choice)
     return float(DEFAULT_HISTORY_TIMEFRAME_SECONDS)
+
+
+def normalize_power_change_preview_seconds(value: object) -> float:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        candidate = float(value)
+        if math.isfinite(candidate):
+            return max(
+                MIN_POWER_CHANGE_PREVIEW_SECONDS,
+                min(MAX_POWER_CHANGE_PREVIEW_SECONDS, candidate),
+            )
+    return DEFAULT_POWER_CHANGE_PREVIEW_SECONDS
 
 
 def normalize_idle_pulse_seconds(value: object) -> float:

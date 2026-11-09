@@ -83,6 +83,7 @@ except ImportError:  # pragma: no cover - only the Ghostty integration needs thi
 from .battery import (
     BatteryLedController,
     BatterySnapshot,
+    DEFAULT_POWER_CHANGE_PREVIEW_SECONDS,
     format_watts,
     program_for_battery,
     read_battery_snapshot,
@@ -236,6 +237,8 @@ from .settings import (
     HISTORY_TIMEFRAME_48H_SECONDS,
     HISTORY_TIMEFRAME_CHOICES,
     DEFAULT_IDLE_PULSE_SECONDS,
+    MAX_POWER_CHANGE_PREVIEW_SECONDS,
+    MIN_POWER_CHANGE_PREVIEW_SECONDS,
     LED_DISPLAY_AGENT,
     LED_DISPLAY_BATTERY,
     LED_DISPLAY_CUSTOM,
@@ -1149,6 +1152,10 @@ class StatusBarController(NSObject):
         self.set_battery_power_preview(sender.state() == NSOnState)
 
     @objc.IBAction
+    def saveBatteryPreviewSeconds_(self, sender):
+        self.save_battery_preview_seconds(text_control_value(sender))
+
+    @objc.IBAction
     def setAgentAnimationStyle_(self, sender):
         item = sender.selectedItem()
         payload = item.representedObject() if item is not None else None
@@ -1842,6 +1849,13 @@ class StatusBarController(NSObject):
             self.settings_buttons.get("battery_power_preview"),
             self.settings.battery_show_on_power_change,
         )
+        battery_preview_field = self.settings_fields.get("battery_power_preview_seconds")
+        set_text_control_value(
+            battery_preview_field,
+            f"{self.settings.battery_power_change_preview_seconds:g}",
+        )
+        if battery_preview_field is not None:
+            battery_preview_field.setEnabled_(self.settings.battery_show_on_power_change)
         for mode_value in ANIMATION_UI_STATES:
             popup = self.settings_fields.get(f"agent_animation_{mode_value}")
             if popup is not None:
@@ -2514,6 +2528,37 @@ class StatusBarController(NSObject):
         )
         self.refresh_settings_window()
         self.refresh_(None)
+
+    def save_battery_preview_seconds(self, text: str) -> None:
+        text = text.strip()
+        try:
+            seconds = float(text) if text else DEFAULT_POWER_CHANGE_PREVIEW_SECONDS
+        except ValueError:
+            seconds = math.nan
+        if not math.isfinite(seconds):
+            self.set_settings_message("Battery preview length must be a number of seconds.")
+            self.refresh_settings_window()
+            return
+        try:
+            settings = self.settings.with_battery_power_change_preview(seconds=seconds)
+            if settings == self.settings:
+                self.refresh_settings_window()
+                return
+            save_settings(settings)
+            self.settings = settings
+        except Exception as exc:
+            self.set_settings_message(f"Could not save settings: {exc}")
+            self.settings = load_settings()
+            self.refresh_settings_window()
+            return
+
+        saved = self.settings.battery_power_change_preview_seconds
+        note = "" if saved == seconds else (
+            f" (allowed range is {MIN_POWER_CHANGE_PREVIEW_SECONDS:g}-"
+            f"{MAX_POWER_CHANGE_PREVIEW_SECONDS:g}s)"
+        )
+        self.set_settings_message(f"Battery preview: {saved:g} seconds{note}.")
+        self.refresh_settings_window()
 
     def set_agent_animation_style(
         self,
@@ -5412,13 +5457,25 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
     add_separator(behavior_tab, 24, 140, tab_width - 48)
     battery_power_preview = add_checkbox(
         behavior_tab,
-        "Show battery for 7s on plug/unplug",
+        "Show battery on plug/unplug for",
         32,
         106,
-        320,
+        236,
         24,
         target,
         "setBatteryPowerPreviewFromCheckbox:",
+    )
+    battery_preview_seconds = add_editable_field(behavior_tab, "", 272, 106, 58, 24)
+    battery_preview_seconds.setTarget_(target)
+    battery_preview_seconds.setAction_("saveBatteryPreviewSeconds:")
+    battery_preview_seconds.cell().setSendsActionOnEndEditing_(True)
+    add_label(
+        behavior_tab,
+        f"seconds ({MIN_POWER_CHANGE_PREVIEW_SECONDS:g}-{MAX_POWER_CHANGE_PREVIEW_SECONDS:g})",
+        340,
+        108,
+        140,
+        22,
     )
     add_separator(behavior_tab, 24, 96, tab_width - 48)
     show_menu_bar_icon = add_checkbox(
@@ -5492,6 +5549,7 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
         "sleep_prevention_min_battery_percent": min_battery_percent,
         "status_history_timeframe": history_timeframe,
         "idle_pulse_seconds": idle_pulse,
+        "battery_power_preview_seconds": battery_preview_seconds,
         "status_history_status": history_status,
         "status_history_chart": history_chart,
         "agent_animation_profile": animation_profile,

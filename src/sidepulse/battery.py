@@ -28,6 +28,10 @@ BATTERY_HIGH_GREEN = "#00FF66"
 BATTERY_CHARGING_MINT = "#80FFC8"
 BATTERY_OFF = "#000000"
 DEFAULT_POWER_CHANGE_PREVIEW_SECONDS = 7.0
+CHARGING_FILL_SLOW_STEP_MS = 320
+CHARGING_FILL_FAST_STEP_MS = 120
+CHARGING_FILL_REST_MS = 600
+CHARGING_FILL_HOLD_MS = 500
 
 
 @dataclass(frozen=True)
@@ -319,11 +323,11 @@ def program_for_battery(
             brightness,
         )
 
+    # Charging: hold the current level, then light the LEDs from the level
+    # to the end one by one, as if the bar were filling, and fall back.
     color = BATTERY_CHARGING_MINT
     ratio = snapshot.charge_speed_ratio(full_charge_watts)
-    pulse_ms = charging_pulse_length_ms(ratio)
-    cycle_ms = round(charging_cycle_seconds(ratio) * 1000)
-    hold_ms = max(0, cycle_ms - transition - pulse_ms)
+    step_ms = charging_fill_step_ms(ratio)
     frontier_color = battery_fill_color(pulse_index, fill, color)
     lines = [
         ";".join(
@@ -333,11 +337,13 @@ def program_for_battery(
                 transition,
             )
             for index in range(count)
-        )
+        ),
+        f"{pulse_index}:{frontier_color} {CHARGING_FILL_REST_MS}ms none",
     ]
-    lines.append(f"{pulse_index}:{color} {pulse_ms}ms pulse")
-    if hold_ms > 0:
-        lines.append(f"{pulse_index}:{frontier_color} {hold_ms}ms none")
+    lines.extend(
+        f"{index}:{color} {step_ms}ms ease-out" for index in range(pulse_index, count)
+    )
+    lines.append(f"{count - 1}:{color} {CHARGING_FILL_HOLD_MS}ms none")
     lines.append("repeat")
     return apply_brightness("\n".join(lines), brightness)
 
@@ -552,14 +558,12 @@ def battery_color(percent: int) -> str:
     return BATTERY_HIGH_GREEN
 
 
-def charging_pulse_length_ms(ratio: float) -> int:
+def charging_fill_step_ms(ratio: float) -> int:
+    """Time to light each LED of the charging fill; faster chargers sweep faster."""
     speed = clamp(ratio)
-    return round(180 + (1220 * speed))
-
-
-def charging_cycle_seconds(ratio: float) -> float:
-    speed = clamp(ratio)
-    return max(0.9, 3.0 - (2.1 * speed))
+    return round(CHARGING_FILL_SLOW_STEP_MS - (
+        CHARGING_FILL_SLOW_STEP_MS - CHARGING_FILL_FAST_STEP_MS
+    ) * speed)
 
 
 def parse_full_watts(value: str | float | int | None) -> float | None:

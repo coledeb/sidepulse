@@ -404,7 +404,7 @@ def add_sidepulse_battery_parser(subparsers: argparse._SubParsersAction) -> None
     configure.add_argument(
         "--power-change-preview-seconds",
         type=float,
-        help="Seconds to show battery LEDs after plug/unplug.",
+        help="Seconds to show battery LEDs after plug/unplug (5-15).",
     )
     configure.set_defaults(func=cmd_sidepulse_battery_configure)
 
