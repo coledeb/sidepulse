@@ -95,7 +95,7 @@ from sidepulse.lid_sleep import (
     sleep_helper_sudoers_rule,
 )
 from sidepulse.models import AgentMode, AgentStatus, AggregateStatus
-from sidepulse.origin import ProcessInfo, origin_from_processes
+from sidepulse.origin import ProcessInfo, is_t3code_origin, origin_from_processes
 from sidepulse.providers import (
     detect_codex_config_from_text,
     detect_grok_config,
@@ -122,8 +122,10 @@ from sidepulse.session_actions import (
     SESSION_OPEN_APP,
     SESSION_OPEN_TERMINAL,
     SESSION_OPEN_VSCODE,
+    available_session_open_actions,
     default_session_open_action,
     session_deep_link,
+    session_open_action_label,
     session_open_target,
     session_resume_command,
     session_vscode_link,
@@ -366,6 +368,147 @@ class AgentMonitorTests(unittest.TestCase):
             "Claude Code CLI",
         )
 
+    def test_hook_payload_stamps_t3_code_origin_and_thread(self) -> None:
+        env = {
+            "T3CODE_THREAD_ID": "c9bf7bac-5496-4e4f-b5a9-fe92bd7ad7c7",
+            "__CFBundleIdentifier": "com.t3tools.t3code",
+            # T3 Code may itself be launched from a terminal or editor.
+            "TERM_PROGRAM": "vscode",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            claude_line = format_hook_payload(
+                "claude",
+                '{"hook_event_name":"UserPromptSubmit","session_id":"claude-session","prompt":"hi"}',
+            )
+            codex_line = format_hook_payload(
+                "codex",
+                '{"hook_event_name":"UserPromptSubmit","session_id":"codex-session","prompt":"hi"}',
+            )
+
+        self.assertEqual(claude_line["agent_origin"], "Claude in T3 Code")
+        self.assertEqual(claude_line["agent_origin_kind"], "claude_t3code")
+        self.assertEqual(claude_line["t3code_thread_id"], "c9bf7bac-5496-4e4f-b5a9-fe92bd7ad7c7")
+        self.assertEqual(codex_line["event"]["agent_origin"], "Codex in T3 Code")
+        self.assertEqual(
+            codex_line["event"]["t3code_thread_id"], "c9bf7bac-5496-4e4f-b5a9-fe92bd7ad7c7"
+        )
+
+        record = parse_log_line("claude", json.dumps(claude_line))
+        self.assertIsNotNone(record)
+        status = collector_module.status_from_event(record)
+        self.assertIsNotNone(status)
+        self.assertEqual(status.origin, "Claude in T3 Code")
+
+    def test_t3_code_origin_from_bundle_id_alone(self) -> None:
+        with (
+            patch.dict(os.environ, {"__CFBundleIdentifier": "com.t3tools.t3code"}, clear=True),
+            patch("sidepulse.origin.process_ancestry", return_value=()),
+        ):
+            line = format_hook_payload(
+                "claude",
+                '{"hook_event_name":"Stop","session_id":"claude-session"}',
+            )
+        self.assertEqual(line["agent_origin"], "Claude in T3 Code")
+        self.assertNotIn("t3code_thread_id", line)
+
+    def test_t3_code_origin_from_process_ancestry(self) -> None:
+        for app in ("T3 Code.app", "T3 Code (Nightly).app"):
+            with self.subTest(app=app):
+                processes = (
+                    ProcessInfo(pid=300, ppid=200, comm="codex", command="codex app-server"),
+                    ProcessInfo(
+                        pid=200,
+                        ppid=1,
+                        comm=f"/Applications/{app}/Contents/MacOS/T3 Code",
+                        command=f"/Applications/{app}/Contents/MacOS/T3 Code",
+                    ),
+                )
+                self.assertEqual(
+                    origin_from_processes("codex", processes).label, "Codex in T3 Code"
+                )
+
+    def test_t3_code_origin_matching(self) -> None:
+        self.assertTrue(is_t3code_origin("Claude in T3 Code"))
+        self.assertTrue(is_t3code_origin("codex in t3-code"))
+        self.assertFalse(is_t3code_origin("Claude in VS Code"))
+        self.assertFalse(is_t3code_origin("Claude Code CLI"))
+        self.assertFalse(is_t3code_origin(None))
+        self.assertTrue(is_t3code_origin("Claude in T3 Code · KARLY-WSL"))
+        self.assertFalse(is_t3code_origin("Claude Code CLI · KARLY-WSL"))
+
+    def test_relayed_t3_code_session_opens_t3_and_never_resumes_locally(self) -> None:
+        from sidepulse.relay import annotate_remote_line
+
+        line = annotate_remote_line(
+            "claude",
+            {
+                "hook_event_name": "UserPromptSubmit",
+                "session_id": "remote-session",
+                "agent_origin": "Claude in T3 Code",
+                "t3code_thread_id": "thread-1",
+            },
+            "KARLY-WSL",
+        )
+        self.assertEqual(line["agent_origin"], "Claude in T3 Code · KARLY-WSL")
+        record = parse_log_line("claude", json.dumps(line))
+        self.assertIsNotNone(record)
+        status = collector_module.status_from_event(record)
+        self.assertIsNotNone(status)
+        self.assertTrue(is_t3code_origin(status.origin))
+        self.assertEqual(default_session_open_action(status), SESSION_OPEN_APP)
+        self.assertEqual(available_session_open_actions(status), (SESSION_OPEN_APP,))
+
+    def test_t3_code_sessions_open_in_t3_code(self) -> None:
+        status = AgentStatus(
+            provider="claude",
+            agent_id="claude:session:abc",
+            display_name="Claude abc",
+            mode=AgentMode.WORKING,
+            updated_at=datetime.now(timezone.utc),
+            event_name="PreToolUse",
+            session_id="1ca4348e-2aec-4147-9e81-d7d56364d257",
+            cwd="/Users/pero/pgit/example",
+            origin="Claude in T3 Code",
+        )
+        self.assertEqual(default_session_open_action(status), SESSION_OPEN_APP)
+        self.assertEqual(
+            session_open_target(status, SESSION_OPEN_APP), ("app", "com.t3tools.t3code")
+        )
+        self.assertEqual(session_open_action_label(status, SESSION_OPEN_APP), "Open in T3 Code")
+        # The VS Code extension would attach a second client to a T3-owned session.
+        self.assertNotIn(SESSION_OPEN_VSCODE, available_session_open_actions(status))
+        self.assertIn(SESSION_OPEN_TERMINAL, available_session_open_actions(status))
+
+    def test_status_bar_opens_t3_code_by_bundle_id(self) -> None:
+        try:
+            from sidepulse import status_bar
+        except SystemExit as exc:
+            self.skipTest(str(exc))
+
+        status = AgentStatus(
+            provider="codex",
+            agent_id="codex:session:abc",
+            display_name="Codex abc",
+            mode=AgentMode.COMPLETED,
+            updated_at=datetime.now(timezone.utc),
+            event_name="Stop",
+            session_id="01a1bea8-194e-7d03-aa97-8a8998169741",
+            cwd="/Users/pero/pgit/example",
+            origin="Codex in T3 Code",
+        )
+        fake = SimpleNamespace(
+            settings=AgentMonitorSettings(),
+            set_settings_message=lambda message: None,
+        )
+        with (
+            patch("sidepulse.status_bar.open_application") as open_application,
+            patch("sidepulse.status_bar.open_url") as open_url,
+        ):
+            status_bar.StatusBarController.open_session(fake, status, None, remember=False)
+
+        open_application.assert_called_once_with("com.t3tools.t3code")
+        open_url.assert_not_called()
+
     def test_grok_log_line_normalizes_camel_case_payload(self) -> None:
         record = parse_log_line(
             "grok",
@@ -563,6 +706,8 @@ class AgentMonitorTests(unittest.TestCase):
             with (
                 patch("sidepulse.hook.detect_log_path", return_value=grok),
                 patch.dict(os.environ, {"TERM_PROGRAM": "Apple_Terminal"}, clear=True),
+                # The real ancestry may lead to a host app such as T3 Code.
+                patch("sidepulse.origin.process_ancestry", return_value=()),
             ):
                 provider, path, line = routed_hook_payload("claude", claude, payload)
 

@@ -5,6 +5,7 @@ from pathlib import Path
 from urllib.parse import quote, urlencode
 
 from .models import AgentStatus
+from .origin import T3CODE_BUNDLE_ID, is_relayed_origin, is_t3code_origin
 
 SESSION_OPEN_APP = "app"
 SESSION_OPEN_TERMINAL = "terminal"
@@ -62,6 +63,8 @@ def default_session_open_action(status: AgentStatus) -> str:
 
 
 def preferred_session_open_actions(status: AgentStatus) -> tuple[str, ...]:
+    if is_t3code_origin(status.origin):
+        return (SESSION_OPEN_APP, SESSION_OPEN_TERMINAL, SESSION_OPEN_VSCODE)
     origin = normalized_origin(status.origin)
     if origin:
         if any(surface in origin for surface in SESSION_OPEN_VSCODE_SURFACES):
@@ -83,6 +86,17 @@ def normalized_origin(origin: str | None) -> str:
 
 
 def session_open_target(status: AgentStatus, action: str) -> tuple[str, str] | None:
+    if is_t3code_origin(status.origin):
+        # T3 Code owns the session: "App" brings T3 Code forward, and the VS Code
+        # extension would open a different client on the same session.
+        if action == SESSION_OPEN_APP:
+            return ("app", T3CODE_BUNDLE_ID)
+        if action == SESSION_OPEN_VSCODE:
+            return None
+        # A relayed T3 session runs on another computer: resuming it here would
+        # start the agent on this Mac, where the session does not exist.
+        if action == SESSION_OPEN_TERMINAL and is_relayed_origin(status.origin):
+            return None
     if action == SESSION_OPEN_APP:
         url = session_deep_link(status)
         return ("url", url) if url else None
@@ -102,6 +116,8 @@ def available_session_open_actions(status: AgentStatus) -> tuple[str, ...]:
 def session_open_action_label(status: AgentStatus, action: str) -> str:
     provider = status.provider.lower()
     if action == SESSION_OPEN_APP:
+        if is_t3code_origin(status.origin):
+            return "Open in T3 Code"
         if provider == "codex":
             return "Open in Codex"
         if provider == "claude":

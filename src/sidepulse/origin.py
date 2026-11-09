@@ -10,6 +10,13 @@ from typing import Any, Mapping
 
 from .models import provider_label
 
+T3CODE_BUNDLE_ID = "com.t3tools.t3code"
+T3CODE_THREAD_ENV = "T3CODE_THREAD_ID"
+T3CODE_THREAD_KEY = "t3code_thread_id"
+T3CODE_SURFACE = "t3code"
+# relay.annotate_remote_line joins an origin and its computer with this.
+RELAY_ORIGIN_SEPARATOR = " · "
+
 
 @dataclass(frozen=True)
 class ProcessInfo:
@@ -82,6 +89,14 @@ def explicit_origin_from_env(provider: str, env: Mapping[str, str]) -> AgentOrig
 
 
 def origin_from_environment(provider: str, env: Mapping[str, str]) -> AgentOrigin | None:
+    # T3 Code hosts other agents' runtimes; it is checked first because a hosted
+    # session can also inherit terminal or editor variables from wherever T3 Code
+    # itself was launched.
+    if clean_label(env.get(T3CODE_THREAD_ENV)):
+        return surface_origin(provider, T3CODE_SURFACE, f"env:{T3CODE_THREAD_ENV}")
+    if is_t3code_bundle_id(env.get("__CFBundleIdentifier")):
+        return surface_origin(provider, T3CODE_SURFACE, "env:__CFBundleIdentifier")
+
     term_program = str(env.get("TERM_PROGRAM") or "").strip().lower()
     if term_program == "vscode" or any(key.startswith("VSCODE_") for key in env):
         return surface_origin(provider, "vscode", "env:VSCODE")
@@ -105,6 +120,10 @@ def origin_from_processes(
     processes: tuple[ProcessInfo, ...],
 ) -> AgentOrigin | None:
     haystack = "\n".join(f"{info.comm}\n{info.command}" for info in processes).lower()
+
+    # "T3 Code.app" and "T3 Code (Nightly).app" both run as ".../T3 Code...app/".
+    if re.search(r"/t3 code[^/]*\.app/", haystack):
+        return surface_origin(provider, T3CODE_SURFACE, "process:T3 Code")
 
     if any(token in haystack for token in ("visual studio code.app", "code helper", "vscode")):
         return surface_origin(provider, "vscode", "process:Visual Studio Code")
@@ -175,7 +194,10 @@ def surface_origin(provider: str, surface: str, source: str) -> AgentOrigin:
         ("junie", "ide"): "Junie in JetBrains IDE",
         ("junie", "transcript"): "Junie Transcript",
     }
-    label = labels.get((provider, surface), provider_label(provider))
+    if surface == T3CODE_SURFACE:
+        label = f"{provider_label(provider)} in T3 Code"
+    else:
+        label = labels.get((provider, surface), provider_label(provider))
     return AgentOrigin(
         kind=f"{provider}_{surface}",
         label=label,
@@ -257,9 +279,36 @@ def annotate_payload_with_origin(
 ) -> dict[str, Any]:
     if "agent_origin" in payload or "agentOrigin" in payload:
         return payload
+    active_env = os.environ if env is None else env
     result = dict(payload)
-    result.update(detect_agent_origin(provider, env=env).to_payload())
+    result.update(detect_agent_origin(provider, env=active_env).to_payload())
+    thread_id = clean_label(active_env.get(T3CODE_THREAD_ENV))
+    if thread_id and T3CODE_THREAD_KEY not in result:
+        result[T3CODE_THREAD_KEY] = thread_id
     return result
+
+
+def is_t3code_bundle_id(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    bundle_id = value.strip().lower()
+    return bundle_id == T3CODE_BUNDLE_ID or bundle_id.startswith(f"{T3CODE_BUNDLE_ID}.")
+
+
+def is_t3code_origin(origin: str | None) -> bool:
+    """Whether an origin label names T3 Code as the session's host.
+
+    A relayed session's label carries its computer after a separator, as in
+    "Claude in T3 Code · KARLY-WSL", so only the part before it is checked.
+    """
+    host = str(origin or "").split(RELAY_ORIGIN_SEPARATOR, 1)[0]
+    normalized = " ".join(host.strip().lower().replace("-", " ").split())
+    return normalized.endswith(" in t3 code") or normalized in {"t3 code", "t3code"}
+
+
+def is_relayed_origin(origin: str | None) -> bool:
+    """Whether an origin label was stamped by the relay with a remote computer's name."""
+    return RELAY_ORIGIN_SEPARATOR in str(origin or "")
 
 
 def origin_label_from_payload(provider: str, raw: Mapping[str, Any]) -> str | None:

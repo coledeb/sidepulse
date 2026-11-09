@@ -168,6 +168,7 @@ from .sd_eject_guard_launch import (
     sd_eject_guard_installed,
     uninstall_sd_eject_guard,
 )
+from .origin import T3CODE_BUNDLE_ID, is_t3code_origin
 from .session_actions import (
     SESSION_OPEN_APP,
     SESSION_OPEN_TERMINAL,
@@ -2277,6 +2278,8 @@ class StatusBarController(NSObject):
         kind, value = target
         if kind == "url":
             open_url(value)
+        elif kind == "app":
+            open_application(value)
         elif kind == "terminal":
             open_terminal_command(
                 value,
@@ -6387,7 +6390,12 @@ def host_icon_for_origin(origin: str | None):
     if normalized in _origin_icon_cache:
         return _origin_icon_cache[normalized]
     image = None
-    if "vs code" in normalized or "vscode" in normalized or "visual studio code" in normalized:
+    if is_t3code_origin(origin):
+        app_url = application_url_for_bundle_id(T3CODE_BUNDLE_ID)
+        image = (app_icon(app_url.path()) if app_url is not None else None) or first_app_icon(
+            ("/Applications/T3 Code.app", "/Applications/T3 Code (Nightly).app")
+        ) or image_for_symbol("bubble.left.and.text.bubble.right", "T3 Code")
+    elif "vs code" in normalized or "vscode" in normalized or "visual studio code" in normalized:
         image = first_app_icon(
             (
                 "/Applications/Visual Studio Code.app",
@@ -6790,6 +6798,20 @@ def open_url(url: str) -> None:
     ns_url = NSURL.URLWithString_(url)
     if ns_url is not None:
         NSWorkspace.sharedWorkspace().openURL_(ns_url)
+
+
+def open_application(bundle_id: str) -> None:
+    """Launch or bring forward an application by bundle identifier."""
+    app_url = application_url_for_bundle_id(bundle_id)
+    if app_url is not None:
+        NSWorkspace.sharedWorkspace().openURL_(app_url)
+
+
+def application_url_for_bundle_id(bundle_id: str):
+    try:
+        return NSWorkspace.sharedWorkspace().URLForApplicationWithBundleIdentifier_(bundle_id)
+    except Exception:
+        return None
 
 
 def open_terminal_command(

@@ -21,6 +21,7 @@ from .links import (
     iter_sse_messages,
     normalize_server,
 )
+from .origin import RELAY_ORIGIN_SEPARATOR
 from .providers import HOOK_PROVIDERS, candidate_state_dirs, default_state_dir
 from .settings import default_config_dir
 
@@ -200,7 +201,7 @@ def annotate_remote_line(provider: str, line: dict, source_name: str) -> dict:
         raw = annotated
     raw["sidepulse_relay_source"] = source_name
     origin = str(raw.get("agent_origin") or raw.get("agentOrigin") or "").strip()
-    raw["agent_origin"] = f"{origin} · {source_name}" if origin else source_name
+    raw["agent_origin"] = f"{origin}{RELAY_ORIGIN_SEPARATOR}{source_name}" if origin else source_name
     identity = str(
         raw.get("agent_id")
         or raw.get("agentId")
