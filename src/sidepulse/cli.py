@@ -12,6 +12,7 @@ import sys
 import threading
 import time
 import uuid
+from datetime import datetime
 from pathlib import Path
 
 from . import __version__
@@ -195,6 +196,18 @@ def build_sidepulse_parser() -> argparse.ArgumentParser:
     )
     link.add_argument("relay_code", nargs="?", help="Relay code printed by the receiving Mac.")
     link.set_defaults(func=cmd_sidepulse_link)
+
+    t3 = subparsers.add_parser(
+        "t3",
+        help="Show T3 Code threads from linked environments: connect, status, or disconnect.",
+    )
+    t3.add_argument(
+        "t3_command",
+        choices=("connect", "status", "disconnect"),
+        nargs="?",
+        default="status",
+    )
+    t3.set_defaults(func=cmd_sidepulse_t3)
 
     unlink = subparsers.add_parser(
         "unlink",
@@ -664,6 +677,59 @@ def _remote_event_data(event_id: str) -> dict[str, object]:
         "sidepulse_event_id": event_id,
         "source": source,
     }
+
+
+def cmd_sidepulse_t3(args: argparse.Namespace) -> int:
+    from . import t3_status
+
+    command = getattr(args, "t3_command", "status")
+    if command == "connect":
+        print("Opening T3 Code's approval page. Choose Read only, paste a pairing code")
+        print("(T3 Settings > Sharing & access, or `t3 auth pairing create`), then Approve.")
+        try:
+            credentials = t3_status.connect_t3()
+        except t3_status.T3Error as exc:
+            print(f"sidepulse t3: {exc}", file=sys.stderr)
+            return 1
+        expires = (
+            datetime.fromtimestamp(credentials.expires_at).strftime("%Y-%m-%d")
+            if credentials.expires_at
+            else "never"
+        )
+        print(f"Connected. SidePulse can read T3 Code threads until {expires}.")
+        print("The menu bar app picks this up within 15 seconds.")
+        return 0
+    if command == "disconnect":
+        removed = t3_status.delete_t3_credentials()
+        print("Disconnected from T3 Code." if removed else "SidePulse was not connected to T3 Code.")
+        print("To revoke the session itself, use T3 Code's Settings > Sharing & access.")
+        return 0
+
+    credentials = t3_status.load_t3_credentials()
+    if credentials is None:
+        print("Not connected. Run `sidepulse t3 connect`.")
+        return 1
+    if credentials.expired():
+        print("The T3 Code sign-in has expired. Run `sidepulse t3 connect`.")
+        return 1
+    records: list = []
+    poller = t3_status.T3StatusPoller(records.append)
+    poller.poll_once()
+    if poller.state != t3_status.STATE_CONNECTED:
+        print(f"T3 Code: {poller.state.replace('_', ' ')} ({poller.last_error})")
+        return 1
+    if credentials.expires_at:
+        print(f"Connected until {datetime.fromtimestamp(credentials.expires_at):%Y-%m-%d}.")
+    print(f"Linked environments: {', '.join(label for _, label in poller.environments) or 'none'}")
+    shown = [record for record in records if record.raw.get("sidepulse_status") != "idle"]
+    if not shown:
+        print("No threads need attention.")
+    for record in shown:
+        title = record.raw.get("sidepulse_title") or record.session_id
+        print(f"  {record.raw['sidepulse_status']:<10} {record.origin}  {title}")
+    if poller.last_error:
+        print(f"Note: {poller.last_error}")
+    return 0
 
 
 def cmd_sidepulse_link(args: argparse.Namespace) -> int:

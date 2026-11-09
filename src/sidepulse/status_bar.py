@@ -169,6 +169,14 @@ from .sd_eject_guard_launch import (
     uninstall_sd_eject_guard,
 )
 from .origin import T3CODE_BUNDLE_ID, is_t3code_origin
+from .t3_status import (
+    STATE_DISCONNECTED as T3_STATE_DISCONNECTED,
+    STATE_NEEDS_RECONNECT as T3_STATE_NEEDS_RECONNECT,
+    T3Error,
+    T3StatusPoller,
+    connect_t3,
+    t3_installed,
+)
 from .session_actions import (
     SESSION_OPEN_APP,
     SESSION_OPEN_TERMINAL,
@@ -579,6 +587,11 @@ class StatusBarController(NSObject):
         self.open_settings_on_launch = False
         self.monitor = self.build_monitor()
         self.event_server = None
+        self.t3_poller = T3StatusPoller(
+            self.handle_t3_record,
+            on_state_change=self.t3_state_changed,
+        )
+        self.t3_connecting = False
         self.status_item = None
         self.status_icon_timer = None
         self.tracking_status_menu = None
@@ -669,6 +682,8 @@ class StatusBarController(NSObject):
         install_standard_edit_menu()
         log_status_bar("launching status item")
         self.start_event_server()
+        if t3_installed():
+            self.t3_poller.start()
 
         self.status_item = NSStatusBar.systemStatusBar().statusItemWithLength_(
             NSSquareStatusItemLength
@@ -1266,6 +1281,7 @@ class StatusBarController(NSObject):
             self.battery_timer = None
         self.stop_agent_animation_preview_timer()
         self.stop_event_server()
+        self.t3_poller.stop()
         self.visualizer.stop(own_only=True)
         self.closed_lid_awake.release()
         self.keep_awake.release()
@@ -1391,6 +1407,54 @@ class StatusBarController(NSObject):
                 self.schedule_event_refresh()
         except Exception as exc:
             log_status_bar(f"event_server ingest error: {exc}")
+
+    def t3_state_changed(self, state: str) -> None:
+        error = self.t3_poller.last_error if state != "connected" else None
+        log_status_bar(f"t3 state={state}" + (f" error={error}" if error else ""))
+        self.schedule_event_refresh()
+
+    def handle_t3_record(self, record) -> None:
+        """A linked T3 environment's thread changed (called on the poller thread)."""
+        try:
+            log_status_bar(
+                f"t3 thread={record.session_id} status={record.raw.get('sidepulse_status')} "
+                f"origin={record.origin}"
+            )
+            self.monitor.ingest_record(record)
+            self.schedule_event_refresh()
+        except Exception as exc:
+            log_status_bar(f"t3 ingest error: {exc}")
+
+    def t3_menu_action_title(self) -> str | None:
+        if self.t3_connecting:
+            return "Connecting T3 Code… (approve in your browser)"
+        if not t3_installed():
+            return None
+        if self.t3_poller.state == T3_STATE_NEEDS_RECONNECT:
+            return "Reconnect T3 Code…"
+        if self.t3_poller.state == T3_STATE_DISCONNECTED:
+            return "Connect T3 Code…"
+        return None
+
+    @objc.IBAction
+    def connectT3Code_(self, _sender):
+        if self.t3_connecting:
+            return
+        self.t3_connecting = True
+
+        def run() -> None:
+            try:
+                connect_t3()
+                log_status_bar("t3 connected")
+            except T3Error as exc:
+                log_status_bar(f"t3 connect failed: {exc}")
+            finally:
+                self.t3_connecting = False
+                self.t3_poller.reconnect()
+                self.t3_poller.start()
+                self.schedule_event_refresh()
+
+        threading.Thread(target=run, name="sidepulse-t3-connect", daemon=True).start()
 
     def schedule_event_refresh(self) -> None:
         if self.event_refresh_pending:
@@ -3769,6 +3833,17 @@ def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> 
                     disambiguate_title=session_title_collision_key(status) in collision_keys,
                 )
             )
+
+    t3_title = target.t3_menu_action_title() if hasattr(target, "t3_menu_action_title") else None
+    if t3_title:
+        t3_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            t3_title,
+            "connectT3Code:",
+            "",
+        )
+        t3_item.setTarget_(target)
+        t3_item.setEnabled_(not getattr(target, "t3_connecting", False))
+        menu.addItem_(t3_item)
 
     menu.addItem_(NSMenuItem.separatorItem())
     menu.addItem_(disabled_menu_item("Devices"))

@@ -1021,6 +1021,8 @@ def update_metadata(metadata: StatusMetadata, record: HookEvent) -> None:
 
 
 def is_provider_session_title(record: HookEvent, title: str) -> bool:
+    if isinstance(record.raw.get("sidepulse_title"), str):
+        return True  # the session's own, current title
     if record.provider == "codex":
         return title == codex_session_title(record.session_id)
     return False
@@ -1541,6 +1543,11 @@ def _replace_mode(status: AgentStatus, mode: AgentMode) -> AgentStatus:
 
 
 def title_from_event(record: HookEvent) -> str | None:
+    # A source that knows the session's own title (a T3 Code thread) says so.
+    explicit = record.raw.get("sidepulse_title")
+    if isinstance(explicit, str) and explicit.strip():
+        return summarize_prompt(explicit)
+
     if record.provider == "codex":
         title = codex_session_title(record.session_id)
         if title:
