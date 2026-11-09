@@ -1,6 +1,6 @@
 {
   "animations": {
-    "blocked_error": "amber-pulse",
+    "blocked_error": "blocked-blink",
     "completed": "cyan-complete",
     "idle_ready": "idle-pulse",
     "lid_closed": "lid-closed",

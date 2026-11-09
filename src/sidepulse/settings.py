@@ -121,11 +121,10 @@ def default_agent_animation_id(mode: AgentMode | str) -> str:
         AgentMode.LONG_TASK_PROGRESS.value,
     }:
         return AGENT_ANIMATION_CYAN_ROLL
-    if key in {
-        AgentMode.WAITING_FOR_INPUT.value,
-        AgentMode.BLOCKED_ERROR.value,
-    }:
+    if key == AgentMode.WAITING_FOR_INPUT.value:
         return AGENT_ANIMATION_AMBER_PULSE
+    if key == AgentMode.BLOCKED_ERROR.value:
+        return AGENT_ANIMATION_BLOCKED_BLINK
     if key == AgentMode.COMPLETED.value:
         return AGENT_ANIMATION_CYAN_COMPLETE
     if key == ANIMATION_STATE_LID_OPEN:
