@@ -235,7 +235,6 @@ from .settings import (
     HISTORY_TIMEFRAME_24H_SECONDS,
     HISTORY_TIMEFRAME_48H_SECONDS,
     HISTORY_TIMEFRAME_CHOICES,
-    IDLE_PULSE_CHOICES,
     DEFAULT_IDLE_PULSE_SECONDS,
     LED_DISPLAY_AGENT,
     LED_DISPLAY_BATTERY,
@@ -1000,26 +999,6 @@ class StatusBarController(NSObject):
             self.refresh_settings_window()
             return
         self.set_session_terminal(terminal)
-
-    @objc.IBAction
-    def setIdlePulseSeconds_(self, sender):
-        selected = sender.selectedItem()
-        value = selected.representedObject() if selected is not None else None
-        if not isinstance(value, (int, float)):
-            return
-        try:
-            self.settings = self.settings.with_idle_pulse_seconds(float(value))
-            save_settings(self.settings)
-        except Exception as exc:
-            self.set_settings_message(f"Could not save idle pulse speed: {exc}")
-            self.settings = load_settings()
-            self.refresh_settings_window()
-            return
-        self.refresh_settings_window()
-        self.refresh_(None)
-        self.set_settings_message(
-            f"Idle pulse: every {self.settings.idle_pulse_seconds:g} seconds."
-        )
 
     @objc.IBAction
     def setHistoryTimeframe_(self, sender):
@@ -1946,13 +1925,10 @@ class StatusBarController(NSObject):
             self.settings_fields.get("sleep_prevention_min_battery_percent"),
             f"{self.settings.sleep_prevention_min_battery_percent:g}",
         )
-        idle_pulse_popup = self.settings_fields.get("idle_pulse_seconds")
-        if idle_pulse_popup is not None:
-            # Same float matching as the history popup; tolerance is ample.
-            refresh_history_timeframe_popup(
-                idle_pulse_popup,
-                self.settings.idle_pulse_seconds,
-            )
+        set_text_control_value(
+            self.settings_fields.get("idle_pulse_seconds"),
+            f"{self.settings.idle_pulse_seconds:g}",
+        )
         timeframe_popup = self.settings_fields.get("status_history_timeframe")
         if timeframe_popup is not None:
             refresh_history_timeframe_popup(
@@ -2113,6 +2089,7 @@ class StatusBarController(NSObject):
         )
         completed_text = text_control_value(self.settings_fields.get("completed_visible_seconds"))
         idle_text = text_control_value(self.settings_fields.get("idle_timeout_minutes"))
+        idle_pulse_text = text_control_value(self.settings_fields.get("idle_pulse_seconds"))
         battery_text = text_control_value(
             self.settings_fields.get("sleep_prevention_min_battery_percent")
         )
@@ -2124,6 +2101,9 @@ class StatusBarController(NSObject):
                 DEFAULT_IDLE_TIMEOUT_SECONDS / 60
             )
             completed_seconds = float(completed_text) if completed_text else DEFAULT_COMPLETED_VISIBLE_SECONDS
+            idle_pulse_seconds = (
+                float(idle_pulse_text) if idle_pulse_text else DEFAULT_IDLE_PULSE_SECONDS
+            )
             min_battery_percent = float(battery_text) if battery_text else (
                 DEFAULT_SLEEP_PREVENTION_MIN_BATTERY_PERCENT
             )
@@ -2131,7 +2111,13 @@ class StatusBarController(NSObject):
             self.set_settings_message("Advanced settings must be numeric.")
             return
 
-        values = (retention_hours * 3600, idle_minutes * 60, completed_seconds, min_battery_percent)
+        values = (
+            retention_hours * 3600,
+            idle_minutes * 60,
+            completed_seconds,
+            min_battery_percent,
+            idle_pulse_seconds,
+        )
         if not all(math.isfinite(value) for value in values):
             self.set_settings_message("Advanced settings must be finite numbers.")
             return
@@ -2145,6 +2131,7 @@ class StatusBarController(NSObject):
             settings = settings.with_sleep_prevention_battery_safeguard(
                 min_battery_percent
             )
+            settings = settings.with_idle_pulse_seconds(idle_pulse_seconds)
             if settings == self.settings:
                 return
             save_settings(settings)
@@ -5401,15 +5388,24 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
     add_label(behavior_tab, "Idle timeout", 32, 316, 120, 22)
     idle_minutes = add_editable_field(behavior_tab, "", 224, 314, 58, 24)
     add_label(behavior_tab, "minutes", 292, 316, 80, 22)
-    add_label(behavior_tab, "Show Done for", 32, 280, 180, 22)
-    completed_seconds = add_editable_field(behavior_tab, "", 224, 278, 58, 24)
+    add_label(behavior_tab, "Idle LED pulse every", 32, 280, 180, 22)
+    idle_pulse = add_editable_field(behavior_tab, "", 224, 278, 58, 24)
     add_label(behavior_tab, "seconds", 292, 280, 80, 22)
-    add_separator(behavior_tab, 24, 266, tab_width - 48)
-    add_label(behavior_tab, "Sleep Prevention", 24, 238, 240, 24)
-    add_label(behavior_tab, "Let Mac sleep on battery below", 32, 196, 210, 22)
-    min_battery_percent = add_editable_field(behavior_tab, "", 260, 194, 58, 24)
-    add_label(behavior_tab, "%", 328, 196, 24, 22)
-    for field in (retention_hours, idle_minutes, completed_seconds, min_battery_percent):
+    add_label(behavior_tab, "Show Done for", 32, 244, 180, 22)
+    completed_seconds = add_editable_field(behavior_tab, "", 224, 242, 58, 24)
+    add_label(behavior_tab, "seconds", 292, 244, 80, 22)
+    add_separator(behavior_tab, 24, 230, tab_width - 48)
+    add_label(behavior_tab, "Sleep Prevention", 24, 202, 240, 24)
+    add_label(behavior_tab, "Let Mac sleep on battery below", 32, 166, 210, 22)
+    min_battery_percent = add_editable_field(behavior_tab, "", 260, 164, 58, 24)
+    add_label(behavior_tab, "%", 328, 166, 24, 22)
+    for field in (
+        retention_hours,
+        idle_minutes,
+        idle_pulse,
+        completed_seconds,
+        min_battery_percent,
+    ):
         field.setTarget_(target)
         field.setAction_("saveAgentListTiming:")
         field.cell().setSendsActionOnEndEditing_(True)
@@ -5424,8 +5420,6 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
         target,
         "setBatteryPowerPreviewFromCheckbox:",
     )
-    add_label(behavior_tab, "Idle pulse every", 380, 106, 110, 22)
-    idle_pulse = add_idle_pulse_popup(behavior_tab, 494, 102, target)
     add_separator(behavior_tab, 24, 96, tab_width - 48)
     show_menu_bar_icon = add_checkbox(
         behavior_tab, "Show menu bar icon", 32, 60, 280, 24,
@@ -5960,26 +5954,6 @@ def add_terminal_popup(parent, x: int, y: int, target, *, width: int = 150):
         item = popup.lastItem()
         item.setRepresentedObject_(terminal_app)
         item.setEnabled_(terminal_app_selectable(terminal_app))
-    parent.addSubview_(popup)
-    return popup
-
-
-def idle_pulse_label(seconds: float) -> str:
-    label = f"{seconds:g} seconds"
-    if abs(seconds - DEFAULT_IDLE_PULSE_SECONDS) < 0.05:
-        label += " (default)"
-    return label
-
-
-def add_idle_pulse_popup(parent, x: int, y: int, target):
-    popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(
-        ((x, y), (142, 26)), False
-    )
-    popup.setTarget_(target)
-    popup.setAction_("setIdlePulseSeconds:")
-    for seconds in IDLE_PULSE_CHOICES:
-        popup.addItemWithTitle_(idle_pulse_label(seconds))
-        popup.lastItem().setRepresentedObject_(float(seconds))
     parent.addSubview_(popup)
     return popup
 

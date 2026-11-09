@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 from dataclasses import dataclass, field, replace
@@ -202,7 +203,9 @@ VISUALIZER_COLOR_PRESETS = (
 VISUALIZER_DEFAULT_COLOR = "#00E5FF"
 # Full fade-out/fade-in cycle of the built-in idle animations, in seconds.
 DEFAULT_IDLE_PULSE_SECONDS = 4.0
-IDLE_PULSE_CHOICES = (4.0, 6.0, 8.0, 12.0, 20.0, 30.0)
+MIN_IDLE_PULSE_SECONDS = 1.0
+# Each half of the cycle must fit the firmware's 65535 ms step limit.
+MAX_IDLE_PULSE_SECONDS = 120.0
 HISTORY_TIMEFRAME_CHOICES = (
     HISTORY_TIMEFRAME_1H_SECONDS,
     HISTORY_TIMEFRAME_6H_SECONDS,
@@ -1555,9 +1558,8 @@ def normalize_history_timeframe(value: object) -> float:
 def normalize_idle_pulse_seconds(value: object) -> float:
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         candidate = float(value)
-        for choice in IDLE_PULSE_CHOICES:
-            if abs(candidate - choice) < 0.05:
-                return choice
+        if math.isfinite(candidate):
+            return max(MIN_IDLE_PULSE_SECONDS, min(MAX_IDLE_PULSE_SECONDS, candidate))
     return DEFAULT_IDLE_PULSE_SECONDS
 
 

@@ -83,15 +83,22 @@ class IdlePulseSpeedTests(unittest.TestCase):
             self.assertTrue(slower.changed)
             self.assertIn("10000ms", (device / "LEDS.LED").read_text())
 
-    def test_setting_round_trips_and_rejects_unknown_values(self) -> None:
+    def test_setting_round_trips_and_clamps(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "settings.json"
-            save_settings(AgentMonitorSettings().with_idle_pulse_seconds(12), path)
-            self.assertEqual(load_settings(path).idle_pulse_seconds, 12.0)
+            save_settings(AgentMonitorSettings().with_idle_pulse_seconds(7.5), path)
+            self.assertEqual(load_settings(path).idle_pulse_seconds, 7.5)
+        settings = AgentMonitorSettings()
+        self.assertEqual(settings.with_idle_pulse_seconds(0.2).idle_pulse_seconds, 1.0)
+        self.assertEqual(settings.with_idle_pulse_seconds(500).idle_pulse_seconds, 120.0)
         self.assertEqual(
-            AgentMonitorSettings().with_idle_pulse_seconds(7).idle_pulse_seconds,
+            settings.with_idle_pulse_seconds(float("nan")).idle_pulse_seconds,
             DEFAULT_IDLE_PULSE_SECONDS,
         )
+
+    def test_longest_idle_pulse_fits_firmware_step_limit(self) -> None:
+        program = program_for_agent_mode(AgentMode.IDLE_READY, idle_pulse_seconds=120)
+        self.assertIn("off 60000ms", program)
 
 
 if __name__ == "__main__":
