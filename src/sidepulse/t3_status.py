@@ -18,7 +18,12 @@ so SidePulse asks it instead:
   is active, rarely while everything is quiet.
 
 This Mac's own T3 threads are left to the agents' hooks, which are instant and
-richer; only linked environments are polled, so no session shows twice.
+richer; only linked environments are polled, so no session shows twice. The one
+exception is settling: a hook row waiting on a closing question has no event
+that says the user read it, so while one is shown the poller checks whether its
+T3 thread was settled (``check_local_settled``). Claude and OpenCode hooks name
+their T3 thread; a Codex row is matched to the thread whose latest run finished
+when its Stop hook fired, since T3 runs every Codex thread in one shared server.
 """
 
 from __future__ import annotations
@@ -37,7 +42,7 @@ import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Sequence
 
 from .models import HookEvent, provider_label
 from .origin import RELAY_ORIGIN_SEPARATOR
@@ -58,6 +63,11 @@ T3_LINKS_REFRESH_SECONDS = 60.0
 T3_ACTIVE_HEARTBEAT_SECONDS = 60.0
 # A finished thread older than this is history, not news, when first seen.
 T3_FINISHED_MAX_AGE_SECONDS = 60 * 60.0
+# A hook row whose T3 thread is unknown matches the thread whose latest run
+# finished within this long of the row's Stop. Hooks log whole seconds, and
+# T3 marks a run done a few milliseconds after the agent's Stop.
+T3_RUN_MATCH_SECONDS = 3.0
+T3_SETTLED_SCAN_LIMIT = 50
 
 ACTIVE_STATUSES = frozenset({"preparing", "queued", "starting", "running", "waiting"})
 
@@ -479,6 +489,48 @@ def t3_thread_record(
 # --- polling ---------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class LocalWaitingRow:
+    """A hook row on this Mac, hosted by T3, that waits on a closing question."""
+
+    agent_id: str
+    provider: str
+    updated_at: datetime
+    t3_thread_id: str | None = None
+
+
+def settled_run_matches(
+    detail: dict[str, Any] | None,
+    row: LocalWaitingRow,
+    *,
+    exact: bool,
+) -> datetime | None:
+    """When a T3 thread's detail shows ``row``'s turn was settled, the settle time.
+
+    The thread must be settled after its latest run finished, with no prompt
+    still pending and nothing running. A row matched by timing alone also needs
+    that run to have finished alongside the row's Stop.
+    """
+    thread = detail.get("thread") if isinstance(detail, dict) else None
+    if not isinstance(thread, dict) or not thread.get("settled"):
+        return None
+    if thread.get("pendingRequestCount") or str(thread.get("status") or "").lower() in ACTIVE_STATUSES:
+        return None
+    if thread.get("activeRunId"):
+        return None
+    settled_at = parse_t3_time(thread.get("settledAt"))
+    runs = [run for run in detail.get("recentRuns") or () if isinstance(run, dict)]
+    if settled_at is None or not runs:
+        return None
+    latest = max(runs, key=lambda run: run.get("ordinal") if isinstance(run.get("ordinal"), int) else -1)
+    completed_at = parse_t3_time(latest.get("completedAt"))
+    if completed_at is None or settled_at < completed_at:
+        return None
+    if not exact and abs((completed_at - row.updated_at).total_seconds()) > T3_RUN_MATCH_SECONDS:
+        return None
+    return settled_at
+
+
 @dataclass
 class _Tracked:
     status: str
@@ -502,8 +554,15 @@ class T3StatusPoller:
         wall_clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
         on_state_change: Callable[[str], None] | None = None,
         credentials_signature: Callable[[], object] | None = None,
+        local_waiting: Callable[[], Sequence[LocalWaitingRow]] | None = None,
+        on_local_settled: Callable[[LocalWaitingRow, datetime], None] | None = None,
     ) -> None:
         self.ingest = ingest
+        self.local_waiting = local_waiting
+        self.on_local_settled = on_local_settled
+        # (row, thread, settle time) checks that did not match, so a thread is
+        # read once per settle rather than on every poll.
+        self.settle_misses: set[tuple[str, str, str, str]] = set()
         self.client_factory = client_factory or default_t3_client
         self.credentials_signature = credentials_signature or (
             (lambda: None) if client_factory is not None else default_t3_credentials_signature
@@ -586,6 +645,8 @@ class T3StatusPoller:
                     any_active = any_active or self._environment_active(environment_id)
                     continue
                 any_active = self._apply(environment_id, label, threads) or any_active
+            # A waiting row is settled from T3 within a poll or two.
+            any_active = self.check_local_settled() or any_active
             self.any_active = any_active
             self._set_state(STATE_CONNECTED)
         except T3AuthError as exc:
@@ -679,6 +740,80 @@ class T3StatusPoller:
             next_cursor = page.get("nextCursor")
             cursor = next_cursor if isinstance(next_cursor, int) and next_cursor > cursor else None
         return threads
+
+    def check_local_settled(self) -> bool:
+        """Clear waiting hook rows whose T3 thread was settled; True while any wait."""
+        if self.local_waiting is None or self.on_local_settled is None:
+            return False
+        rows = list(self.local_waiting())
+        if not rows:
+            self.settle_misses.clear()
+            return False
+        try:
+            page = self.client.call_tool(
+                "t3_thread_list",
+                {
+                    "allProjects": True,
+                    "settled": True,
+                    "includeSubagents": False,
+                    "limit": T3_SETTLED_SCAN_LIMIT,
+                },
+            )
+        except T3AuthError:
+            raise
+        except T3Error as exc:
+            self.last_error = f"this Mac: {exc}"
+            return True
+        settled = {
+            thread["threadId"]: thread
+            for thread in page.get("threads") or ()
+            if isinstance(thread, dict) and isinstance(thread.get("threadId"), str)
+        }
+        details: dict[str, dict[str, Any] | None] = {}
+        for row in rows:
+            exact = bool(row.t3_thread_id)
+            if exact:
+                candidates = [settled[row.t3_thread_id]] if row.t3_thread_id in settled else []
+            else:
+                candidates = [
+                    thread for thread in settled.values()
+                    if provider_for_t3_instance(thread.get("providerInstanceId")) == row.provider
+                ]
+            matches: list[datetime] = []
+            for thread in candidates:
+                thread_id = thread["threadId"]
+                settled_at = parse_t3_time(thread.get("settledAt"))
+                # Settled before this turn ended: that was an earlier turn.
+                if settled_at is None or settled_at < row.updated_at:
+                    continue
+                miss = (row.agent_id, row.updated_at.isoformat(), thread_id, str(thread.get("settledAt")))
+                if miss in self.settle_misses:
+                    continue
+                if thread_id not in details:
+                    details[thread_id] = self._thread_detail(thread_id)
+                matched = settled_run_matches(details[thread_id], row, exact=exact)
+                if matched is None:
+                    if details[thread_id] is not None:
+                        self.settle_misses.add(miss)
+                    continue
+                matches.append(matched)
+            # Two threads that finished together cannot be told apart.
+            if len(matches) == 1:
+                self.on_local_settled(row, matches[0])
+        if len(self.settle_misses) > 1000:
+            self.settle_misses.clear()
+        return True
+
+    def _thread_detail(self, thread_id: str) -> dict[str, Any] | None:
+        try:
+            return self.client.call_tool(
+                "t3_thread_read",
+                {"threadId": thread_id, "limit": 1, "runLimit": 3, "maxCharsPerItem": 1},
+            )
+        except T3AuthError:
+            raise
+        except T3Error:
+            return None
 
     def _environment_active(self, environment_id: str) -> bool:
         prefix = f"{environment_id}/"

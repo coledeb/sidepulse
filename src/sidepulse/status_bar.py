@@ -597,6 +597,9 @@ class StatusBarController(NSObject):
         self.t3_poller = T3StatusPoller(
             self.handle_t3_record,
             on_state_change=self.t3_state_changed,
+            # Settings reloads replace self.monitor, so look it up each time.
+            local_waiting=lambda: self.monitor.t3_settle_candidates(),
+            on_local_settled=self.handle_t3_settled,
         )
         self.t3_connecting = False
         self.status_item = None
@@ -1487,6 +1490,17 @@ class StatusBarController(NSObject):
         error = self.t3_poller.last_error if state != "connected" else None
         log_status_bar(f"t3 state={state}" + (f" error={error}" if error else ""))
         self.schedule_event_refresh()
+
+    def handle_t3_settled(self, row, settled_at) -> None:
+        """A waiting row's T3 thread was settled on this Mac (called on the poller thread)."""
+        try:
+            if self.monitor.settle_waiting_session(row, settled_at):
+                log_status_bar(
+                    f"t3 settled agent={row.agent_id} thread={row.t3_thread_id or 'by-timing'}"
+                )
+                self.schedule_event_refresh()
+        except Exception as exc:
+            log_status_bar(f"t3 settle error: {exc}")
 
     def handle_t3_record(self, record) -> None:
         """A linked T3 environment's thread changed (called on the poller thread)."""

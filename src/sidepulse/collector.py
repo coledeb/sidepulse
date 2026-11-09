@@ -21,9 +21,15 @@ from .models import (
     parse_datetime,
     provider_label,
 )
-from .origin import T3CODE_THREAD_KEY, is_t3code_origin, origin_label_from_payload
+from .origin import (
+    RELAY_ORIGIN_SEPARATOR,
+    T3CODE_THREAD_KEY,
+    is_t3code_origin,
+    origin_label_from_payload,
+)
 from .providers import detect_log_path, parse_log_line
 from .settings import DEFAULT_COMPLETED_VISIBLE_SECONDS, AgentMonitorSettings, load_settings
+from .t3_status import LocalWaitingRow
 
 
 CODEX_TRANSCRIPT_PROVIDER = "codex-transcripts"
@@ -442,6 +448,44 @@ class LiveAgentMonitor:
                 return
             self.statuses_by_key[status.agent_id] = status
             self.write_latest_state()
+
+    def t3_settle_candidates(self) -> list[LocalWaitingRow]:
+        """Rows on this Mac, hosted by T3, waiting on a closing question.
+
+        Nothing an agent sends says the user read its question; T3 records that
+        as the thread being settled, so these rows are checked against T3.
+        Permission prompts are left alone: the agent is still blocked on them.
+        """
+        with self.lock:
+            threads_by_session = {
+                session_id: key.split(":", 1)[1]
+                for key, session_id in self.sessions_by_t3_thread.items()
+            }
+            return [
+                LocalWaitingRow(
+                    agent_id=status.agent_id,
+                    provider=status.provider,
+                    updated_at=status.updated_at,
+                    t3_thread_id=threads_by_session.get(status.session_id or ""),
+                )
+                for status in self.statuses_by_key.values()
+                if is_local_t3_question_wait(status)
+            ]
+
+    def settle_waiting_session(self, row: LocalWaitingRow, settled_at: datetime) -> bool:
+        """Mark ``row`` read once T3 says its thread was settled; False if it moved on."""
+        with self.lock:
+            status = self.statuses_by_key.get(row.agent_id)
+            if status is None or status.updated_at != row.updated_at or not is_local_t3_question_wait(status):
+                return False
+            self.statuses_by_key[row.agent_id] = replace(
+                status,
+                mode=AgentMode.IDLE_READY,
+                event_name=T3_SETTLED_EVENT_NAME,
+                updated_at=max(settled_at, status.updated_at),
+            )
+            self.write_latest_state()
+            return True
 
     def snapshot(self, include_stale: bool = False) -> MonitorSnapshot:
         now = datetime.now(timezone.utc)
@@ -1041,6 +1085,20 @@ def message_text_from_content(content: object) -> str:
 
 def _string_or_none(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
+
+
+T3_SETTLED_EVENT_NAME = "T3ThreadSettled"
+
+
+def is_local_t3_question_wait(status: AgentStatus) -> bool:
+    """A hook row on this Mac, hosted by T3, waiting because its turn ended on a question."""
+    origin = status.origin or ""
+    return (
+        status.mode == AgentMode.WAITING_FOR_INPUT
+        and status.event_name == "Stop"
+        and is_t3code_origin(origin)
+        and RELAY_ORIGIN_SEPARATOR not in origin
+    )
 
 
 def resolve_record_session(

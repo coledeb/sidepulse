@@ -363,6 +363,55 @@ class OpenCodePluginTests(unittest.TestCase):
         self.assertTrue(all(row.get("sidepulse_title") in (None, "Parent work") for row in rows))
         self.assertEqual(rows[-1]["last_assistant_message"], "All done.")
 
+    def test_t3_sessions_report_their_t3_thread(self) -> None:
+        thread_a = "39ddb903-e905-4793-af8e-5cd82718a244"
+        thread_b = "6408fcb8-3c51-42f9-a64c-b5b9a2942160"
+
+        def t3_rules(thread_id: str) -> list[dict]:
+            return [
+                {"action": "shell", "resource": "*", "effect": "ask"},
+                {"action": "t3-code-*", "resource": "*", "effect": "deny"},
+                {"action": f"t3-code-{thread_id}_*", "resource": "*", "effect": "allow"},
+            ]
+
+        events = [
+            # Created while the plugin ran, with its rules on the event.
+            opencode_event("session.created", {"sessionID": "ses_a", "permission": t3_rules(thread_a)}),
+            opencode_event("session.execution.started", {"sessionID": "ses_a"}, directory=None),
+            # Its subagent reports on ses_a, with ses_a's thread.
+            opencode_event("session.created", {"sessionID": "ses_a_sub", "parentID": "ses_a"}),
+            opencode_event("form.created", {"sessionID": "ses_a_sub", "id": "f1"}),
+            opencode_event("session.execution.succeeded", {"sessionID": "ses_a"}, directory=None),
+            # Created before the plugin loaded: the lookup carries the rules.
+            opencode_event("session.execution.started", {"sessionID": "ses_b"}, directory=None),
+            # Created on an event without rules: looked up once.
+            opencode_event("session.created", {"sessionID": "ses_c"}),
+            opencode_event("session.execution.started", {"sessionID": "ses_c"}, directory=None),
+            # Not a T3 session.
+            opencode_event("session.created", {"sessionID": "ses_cli", "permission": t3_rules(thread_a)[:2]}),
+            opencode_event("session.execution.started", {"sessionID": "ses_cli"}, directory=None),
+        ]
+        sessions = {
+            # The shape ctx.session.get returns in OpenCode 2.2.6.
+            "ses_b": {"id": "ses_b", "permissions": t3_rules(thread_b)},
+            "ses_c": {"id": "ses_c", "permissions": t3_rules(thread_b)},
+            "ses_a_sub": {"id": "ses_a_sub", "parentID": "ses_a"},
+        }
+
+        _, rows = self.run_plugin(events, sessions)
+
+        self.assertEqual(
+            [(row["session_id"], row["hook_event_name"], row.get("t3code_thread_id")) for row in rows],
+            [
+                ("ses_a", "UserPromptSubmit", thread_a),
+                ("ses_a", "PermissionRequest", thread_a),
+                ("ses_a", "Stop", thread_a),
+                ("ses_b", "UserPromptSubmit", thread_b),
+                ("ses_c", "UserPromptSubmit", thread_b),
+                ("ses_cli", "UserPromptSubmit", None),
+            ],
+        )
+
     def test_plugin_translates_events_once_per_server(self) -> None:
         sid = "ses_plugin1"
         events = [

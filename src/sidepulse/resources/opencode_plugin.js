@@ -111,10 +111,34 @@ function emit(state, eventName, sessionID, fields = {}) {
     ...fields,
   }
   if (record.title) payload.sidepulse_title = record.title
+  if (record.t3ThreadID) payload.t3code_thread_id = record.t3ThreadID
   for (const key of Object.keys(payload)) {
     if (payload[key] === undefined) delete payload[key]
   }
   state.queue = state.queue.then(() => runHook(payload)).catch(() => {})
+}
+
+// T3 Code runs every OpenCode thread on one shared server, so no per-thread
+// environment reaches the plugin. Each session T3 creates does carry a
+// permission rule allowing that thread's own T3 tools ("t3-code-<thread id>_*"),
+// which names the thread.
+const T3_THREAD_RULE = /^t3-code-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})_\*$/i
+
+function permissionRules(info) {
+  // Session info names them "permissions"; the stored session row, "permission".
+  for (const value of [info?.permissions, info?.permission]) {
+    if (Array.isArray(value)) return value
+    if (Array.isArray(value?.rules)) return value.rules
+  }
+  return undefined
+}
+
+function t3ThreadFromPermissions(rules) {
+  for (const rule of rules ?? []) {
+    const match = typeof rule?.action === "string" ? T3_THREAD_RULE.exec(rule.action) : null
+    if (match && rule.effect !== "deny") return match[1].toLowerCase()
+  }
+  return undefined
 }
 
 function adoptSessionInfo(record, info) {
@@ -122,6 +146,7 @@ function adoptSessionInfo(record, info) {
   record.parentID = firstString(info?.parentID) ?? record.parentID
   record.directory = record.directory ?? firstString(info?.location?.directory, info?.directory)
   record.title = record.title ?? firstString(info?.title)
+  record.t3ThreadID = record.t3ThreadID ?? t3ThreadFromPermissions(permissionRules(info))
 }
 
 // A session first seen mid-run (the plugin loaded after it was created) is
@@ -159,6 +184,8 @@ async function handleEvent(state, ctx, event) {
 
   if (type === "session.created") {
     adoptSessionInfo(record, data)
+    // Without its permission rules the T3 thread is unknown; look it up once.
+    if (!permissionRules(data)) record.known = false
     return
   }
   if (!record.known) await learnSession(state, ctx, sessionID, record)
