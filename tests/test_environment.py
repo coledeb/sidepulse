@@ -237,6 +237,7 @@ class CleanInstallTests(unittest.TestCase):
     def test_every_shipped_module_imports_after_plain_install(self):
         darwin_only = {
             "sidepulse.status_bar",
+            "sidepulse.status_icon",
             "sidepulse.virtual_device",
             "sidepulse.led_wasm",
         }
