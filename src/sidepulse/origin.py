@@ -14,6 +14,12 @@ T3CODE_BUNDLE_ID = "com.t3tools.t3code"
 T3CODE_THREAD_ENV = "T3CODE_THREAD_ID"
 T3CODE_THREAD_KEY = "t3code_thread_id"
 T3CODE_SURFACE = "t3code"
+# These agents run every session inside one long-lived server, and SidePulse's
+# hook runs as that server's child. The server's environment belongs to
+# whatever first started it (OpenCode's background service can be started from
+# a T3 Code terminal and then serve plain terminal sessions), so only the
+# server's process ancestry says who hosts it: T3 Code starts its own server.
+SERVER_HOSTED_PROVIDERS = frozenset({"opencode"})
 # relay.annotate_remote_line joins an origin and its computer with this.
 RELAY_ORIGIN_SEPARATOR = " · "
 
@@ -55,14 +61,23 @@ def detect_agent_origin(
     if explicit is not None:
         return explicit
 
-    env_origin = origin_from_environment(normalized_provider, active_env)
-    if env_origin is not None:
-        return env_origin
+    server_hosted = normalized_provider in SERVER_HOSTED_PROVIDERS
+    if not server_hosted:
+        env_origin = origin_from_environment(normalized_provider, active_env)
+        if env_origin is not None:
+            return env_origin
 
     processes = process_ancestry(parent_pid or os.getppid())
     process_origin = origin_from_processes(normalized_provider, processes)
     if process_origin is not None:
         return process_origin
+
+    if server_hosted:
+        return AgentOrigin(
+            kind=f"{normalized_provider}_server",
+            label=provider_label(normalized_provider),
+            source="process:server",
+        )
 
     if terminal_environment(active_env):
         return surface_origin(normalized_provider, "cli", "env:TERM_PROGRAM")
@@ -138,6 +153,8 @@ def origin_from_processes(
         return surface_origin(provider, "app", "process:Codex.app")
     if provider == "claude" and "claude.app" in haystack:
         return surface_origin(provider, "app", "process:Claude.app")
+    if provider == "opencode" and "opencode.app" in haystack:
+        return surface_origin(provider, "app", "process:OpenCode.app")
     if provider == "grok" and "grok.app" in haystack:
         return surface_origin(provider, "app", "process:Grok.app")
     if provider == "junie" and any(
@@ -193,6 +210,7 @@ def surface_origin(provider: str, surface: str, source: str) -> AgentOrigin:
         ("junie", "cli"): "Junie CLI",
         ("junie", "ide"): "Junie in JetBrains IDE",
         ("junie", "transcript"): "Junie Transcript",
+        ("opencode", "app"): "OpenCode Desktop",
     }
     if surface == T3CODE_SURFACE:
         label = f"{provider_label(provider)} in T3 Code"
@@ -283,6 +301,9 @@ def annotate_payload_with_origin(
     result = dict(payload)
     result.update(detect_agent_origin(provider, env=active_env).to_payload())
     thread_id = clean_label(active_env.get(T3CODE_THREAD_ENV))
+    if provider.lower() in SERVER_HOSTED_PROVIDERS:
+        # One server runs many threads, so a thread id in its environment is stale.
+        thread_id = None
     if thread_id and T3CODE_THREAD_KEY not in result:
         result[T3CODE_THREAD_KEY] = thread_id
     return result

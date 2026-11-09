@@ -39,11 +39,13 @@ from .install import (
     install_cursor_hooks,
     install_grok_hooks,
     install_junie_hooks,
+    install_opencode_hooks,
     uninstall_claude_hooks,
     uninstall_codex_hooks,
     uninstall_cursor_hooks,
     uninstall_grok_hooks,
     uninstall_junie_hooks,
+    uninstall_opencode_hooks,
 )
 from .led_status import AgentLedController, LedStatusWrite
 from .links import (
@@ -162,6 +164,7 @@ def build_sidepulse_parser() -> argparse.ArgumentParser:
     setup.add_argument("--grok-log", type=Path, help="Grok JSONL log path.")
     setup.add_argument("--cursor-log", type=Path, help="Cursor JSONL log path.")
     setup.add_argument("--junie-log", type=Path, help="Junie JSONL log path.")
+    setup.add_argument("--opencode-log", type=Path, help="OpenCode JSONL log path.")
     setup.add_argument("--dry-run", action="store_true", help="Show what would change.")
     setup.add_argument(
         "--sd-eject-guard-scope",
@@ -1300,6 +1303,7 @@ def build_parser(prog: str = "agent-monitor") -> argparse.ArgumentParser:
     install.add_argument("--grok-log", type=Path, help="Grok JSONL log path.")
     install.add_argument("--cursor-log", type=Path, help="Cursor JSONL log path.")
     install.add_argument("--junie-log", type=Path, help="Junie JSONL log path.")
+    install.add_argument("--opencode-log", type=Path, help="OpenCode JSONL log path.")
     install.add_argument("--dry-run", action="store_true", help="Show what would change.")
     install.set_defaults(func=cmd_install)
 
@@ -1310,6 +1314,7 @@ def build_parser(prog: str = "agent-monitor") -> argparse.ArgumentParser:
     uninstall.add_argument("--grok-log", type=Path, help="Grok JSONL log path.")
     uninstall.add_argument("--cursor-log", type=Path, help="Cursor JSONL log path.")
     uninstall.add_argument("--junie-log", type=Path, help="Junie JSONL log path.")
+    uninstall.add_argument("--opencode-log", type=Path, help="OpenCode JSONL log path.")
     uninstall.add_argument("--dry-run", action="store_true", help="Show what would change.")
     uninstall.set_defaults(func=cmd_uninstall)
 
@@ -1353,6 +1358,7 @@ def add_status_args(parser: argparse.ArgumentParser, include_json: bool = True) 
     parser.add_argument("--grok-log", type=Path, help="Grok JSONL log path.")
     parser.add_argument("--cursor-log", type=Path, help="Cursor JSONL log path.")
     parser.add_argument("--junie-log", type=Path, help="Junie JSONL log path.")
+    parser.add_argument("--opencode-log", type=Path, help="OpenCode JSONL log path.")
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
@@ -1510,6 +1516,8 @@ def install_hook_results(args: argparse.Namespace):
             results.append(install_cursor_hooks(log_path=log_path, dry_run=args.dry_run))
         elif provider == "grok":
             results.append(install_grok_hooks(log_path=log_path, dry_run=args.dry_run))
+        elif provider == "opencode":
+            results.append(install_opencode_hooks(log_path=log_path, dry_run=args.dry_run))
         else:
             results.append(install_junie_hooks(log_path=log_path, dry_run=args.dry_run))
     return results
@@ -1527,6 +1535,10 @@ def print_install_results(results, *, dry_run: bool) -> None:
             print(f"  backup: {result.backup_path}")
         if result.provider == "codex" and result.changed and not dry_run:
             print("  Restart Codex to activate these hooks in new sessions.")
+        if result.provider == "opencode" and result.changed and not dry_run:
+            print(
+                "  Run `opencode service restart` and restart T3 Code to load the plugin."
+            )
 
 
 def cmd_uninstall(args: argparse.Namespace) -> int:
@@ -1542,6 +1554,8 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
             results.append(uninstall_cursor_hooks(log_path=log_path, dry_run=args.dry_run))
         elif provider == "grok":
             results.append(uninstall_grok_hooks(log_path=log_path, dry_run=args.dry_run))
+        elif provider == "opencode":
+            results.append(uninstall_opencode_hooks(log_path=log_path, dry_run=args.dry_run))
         else:
             results.append(uninstall_junie_hooks(log_path=log_path, dry_run=args.dry_run))
 

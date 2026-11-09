@@ -2,7 +2,7 @@ include LEDS_FORMAT.md
 include LICENSE
 include README.md
 include pyproject.toml
-recursive-include src *.c *.LED *.py *.wasm *.swift *.plist
+recursive-include src *.c *.LED *.py *.wasm *.swift *.plist *.js
 recursive-include tests *.py
 include tests/fixtures/read2me-vectors.txt
 include src/sidepulse/_vendor/README.md

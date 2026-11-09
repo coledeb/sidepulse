@@ -39,6 +39,9 @@ COMPLETED_VISIBLE_SECONDS = DEFAULT_COMPLETED_VISIBLE_SECONDS
 IDLE_VISIBLE_SECONDS = 0.0
 POST_TOOL_WORKING_VISIBLE_SECONDS = 2 * 60.0
 PERMISSION_PROMPT_SETTLE_SECONDS = 30.0
+# Providers that report a permission only once they stop to ask the user, so a
+# fresh request is already a real prompt and skips the settle window.
+PERMISSION_REQUEST_ALWAYS_PROMPTS = frozenset({"opencode"})
 CLAUDE_SESSION_IDLE_GRACE_SECONDS = 5.0
 
 
@@ -575,6 +578,7 @@ def default_sources(settings: AgentMonitorSettings | None = None) -> tuple[Sourc
         sources.append(SourceSpec(CLAUDE_TRANSCRIPT_PROVIDER, Path.home() / ".claude" / "projects"))
     sources.append(SourceSpec("grok", detect_log_path("grok")))
     sources.append(SourceSpec("junie", detect_log_path("junie")))
+    sources.append(SourceSpec("opencode", detect_log_path("opencode")))
     return unique_sources(sources)
 
 
@@ -1443,6 +1447,7 @@ def status_for_snapshot(
     if (
         status.mode == AgentMode.WAITING_FOR_INPUT
         and status.event_name == "PermissionRequest"
+        and status.provider not in PERMISSION_REQUEST_ALWAYS_PROMPTS
         and PERMISSION_PROMPT_SETTLE_SECONDS >= 0
         and status.age_seconds(now) < PERMISSION_PROMPT_SETTLE_SECONDS
     ):

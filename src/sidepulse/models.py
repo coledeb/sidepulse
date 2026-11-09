@@ -158,6 +158,6 @@ def provider_label(provider: str) -> str:
         "codex": "Codex",
         "claude": "Claude",
         "grok": "Grok",
-        # Lowercase is the product's own spelling, and provider.title() would break it.
-        "opencode": "opencode",
+        # OpenCode 2 spells itself "OpenCode"; provider.title() would give "Opencode".
+        "opencode": "OpenCode",
     }.get(provider, provider.title())

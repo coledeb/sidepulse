@@ -370,7 +370,7 @@ SidePulse Pro and SidePulse Dot.
 
 #### AI Agent Monitoring
 
-SidePulse can monitor AI agents such as Codex, Claude, Grok, Cursor, and Junie through hooks, then
+SidePulse can monitor AI agents such as Codex, Claude, Grok, Cursor, Junie, and OpenCode through hooks, then
 translate the current agent state into a small, glanceable LED status.
 
 Agent status modes:
@@ -526,7 +526,7 @@ sidepulse setup
 ```
 
 `sidepulse setup` installs or refreshes all supported agent hooks, including
-Junie CLI, installs SidePulse Pro Eject Prevention, writes the status-bar
+Junie CLI and the OpenCode plugin, installs SidePulse Pro Eject Prevention, writes the status-bar
 LaunchAgent, starts both helpers immediately, and enables them at login. This is
 intentionally an explicit command instead of a `pip install` side effect. To set
 up only one provider, pass its name, for example `sidepulse setup junie`.
@@ -593,6 +593,7 @@ sidepulse agent-monitor install claude
 sidepulse agent-monitor install grok
 sidepulse agent-monitor install cursor
 sidepulse agent-monitor install junie
+sidepulse agent-monitor install opencode
 ```
 
 Each hook invokes a small, standard-library-only Python entry point. It writes
@@ -671,7 +672,7 @@ Codex `PermissionRequest` events are treated as Ask and remain sticky until the
 matching tool command finishes. This prevents unrelated same-session activity
 from hiding an approval prompt that is still waiting on the user.
 
-For Codex, Claude, Grok, Cursor, or Junie projects that should report this reliably, add
+For Codex, Claude, Grok, Cursor, Junie, or OpenCode projects that should report this reliably, add
 guidance like this to the relevant agent instructions:
 
 ```text
@@ -708,6 +709,7 @@ sidepulse agent-monitor uninstall claude
 sidepulse agent-monitor uninstall grok
 sidepulse agent-monitor uninstall cursor
 sidepulse agent-monitor uninstall junie
+sidepulse agent-monitor uninstall opencode
 ```
 
 Install and start the macOS status-bar app:
@@ -777,7 +779,7 @@ firmware/websim `sdled.wasm` engine, then AppKit only draws the returned RGB
 frames.
 
 Open `Settings...` from the dropdown to manage agent integrations. The settings
-window can install or uninstall Codex, Claude, Grok, and Junie hooks. The transcript
+window can install or uninstall Codex, Claude, Grok, Cursor, Junie, and OpenCode hooks. The transcript
 checkboxes control the file-based CLI/debug fallback; the status-bar app gets
 live updates from the local hook event socket. Settings are stored at
 `${XDG_CONFIG_HOME:-~/.config}/sidepulse/agent-monitor/settings.json`.
@@ -788,6 +790,18 @@ connected to a JetBrains IDE; Junie hosted directly through IDE/ACP does not yet
 emit hooks. SidePulse intentionally does not register a Junie `PermissionRequest`
 hook because a successful observer hook would automatically approve the requested
 action. Junie's normal approval prompts therefore remain unchanged.
+
+OpenCode support (OpenCode 2 or later) is a small plugin at
+`${OPENCODE_CONFIG_DIR:-~/.config/opencode}/plugins/sidepulse/index.js`. OpenCode
+runs every session inside a long-lived server, and the plugin follows that
+server's event stream: prompts, tool calls, permission and question prompts, and
+finished, failed, or interrupted runs. It only observes, so OpenCode's approval
+prompts are unchanged. The plugin loads when a server starts, so after
+installing it run `opencode service restart` for the terminal and desktop
+clients, and restart T3 Code if it is already running OpenCode threads. Sessions
+in a server that T3 Code started show as "OpenCode in T3 Code". SidePulse checks
+the server's parent processes for this, not its environment, because the
+background service keeps whatever environment it was first started from.
 
 Settings can export the hook decision log as CSV or HTML. This log lives at
 `${XDG_STATE_HOME:-~/.local/state}/sidepulse/agent-monitor/event-status.jsonl`

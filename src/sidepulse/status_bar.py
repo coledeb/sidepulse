@@ -119,11 +119,13 @@ from .install import (
     install_cursor_hooks,
     install_grok_hooks,
     install_junie_hooks,
+    install_opencode_hooks,
     uninstall_claude_hooks,
     uninstall_codex_hooks,
     uninstall_cursor_hooks,
     uninstall_grok_hooks,
     uninstall_junie_hooks,
+    uninstall_opencode_hooks,
 )
 from .led_status import (
     AgentLedController,
@@ -161,6 +163,7 @@ from .providers import (
     detect_cursor_config,
     detect_grok_config,
     detect_junie_config,
+    detect_opencode_config,
     default_state_dir,
     parse_log_line,
 )
@@ -1114,6 +1117,14 @@ class StatusBarController(NSObject):
         self.update_hooks("junie", install=False)
 
     @objc.IBAction
+    def installOpenCodeHooks_(self, _sender):
+        self.update_hooks("opencode", install=True)
+
+    @objc.IBAction
+    def uninstallOpenCodeHooks_(self, _sender):
+        self.update_hooks("opencode", install=False)
+
+    @objc.IBAction
     def toggleCodexTranscripts_(self, sender):
         self.set_transcript_monitoring("codex", sender.state() == NSOnState)
 
@@ -1771,6 +1782,7 @@ class StatusBarController(NSObject):
         grok = detect_grok_config()
         cursor = detect_cursor_config()
         junie = detect_junie_config()
+        opencode = detect_opencode_config()
         set_field_value(
             self.settings_fields.get("codex_hook_status"),
             hook_status_text(codex),
@@ -1790,6 +1802,10 @@ class StatusBarController(NSObject):
         set_field_value(
             self.settings_fields.get("junie_hook_status"),
             hook_status_text(junie),
+        )
+        set_field_value(
+            self.settings_fields.get("opencode_hook_status"),
+            hook_status_text(opencode),
         )
         set_field_value(
             self.settings_fields.get("settings_path"),
@@ -2007,19 +2023,25 @@ class StatusBarController(NSObject):
                 result = install_junie_hooks()
             elif provider == "junie":
                 result = uninstall_junie_hooks()
+            elif provider == "opencode" and install:
+                result = install_opencode_hooks()
+            elif provider == "opencode":
+                result = uninstall_opencode_hooks()
             else:
                 raise ValueError(f"Unsupported hook provider: {provider}")
         except Exception as exc:
-            self.set_settings_message(f"{provider.title()} hooks failed: {exc}")
+            self.set_settings_message(f"{provider_label(provider)} hooks failed: {exc}")
             self.refresh_settings_window()
             return
 
         action = "installed" if install else "removed"
         if not result.changed:
             action = "already installed" if install else "already removed"
-        message = f"{provider.title()} hooks {action}."
+        message = f"{provider_label(provider)} hooks {action}."
         if provider == "codex" and install and result.changed:
             message += " Restart Codex to activate them in new sessions."
+        if provider == "opencode" and install and result.changed:
+            message += " Restart OpenCode's service and T3 Code to load them."
         self.set_settings_message(message)
         self.reload_monitor()
         self.refresh_settings_window()
@@ -5139,35 +5161,38 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
     junie_status = add_hook_row(
         "Junie", 260, "installJunieHooks:", "uninstallJunieHooks:"
     )
+    opencode_status = add_hook_row(
+        "OpenCode", 234, "installOpenCodeHooks:", "uninstallOpenCodeHooks:"
+    )
 
-    add_separator(agents_tab, section_x, 246, tab_width - 48)
-    add_label(agents_tab, "Session Opening", section_x, 220, 240, 24)
-    add_label(agents_tab, "Terminal App", primary_action_x, 220, 200, 24)
+    add_separator(agents_tab, section_x, 222, tab_width - 48)
+    add_label(agents_tab, "Session Opening", section_x, 196, 240, 24)
+    add_label(agents_tab, "Terminal App", primary_action_x, 196, 200, 24)
 
-    add_label(agents_tab, "Codex", label_x, 184, 90, 22)
+    add_label(agents_tab, "Codex", label_x, 166, 90, 22)
     codex_opener = add_provider_opener_popup(
-        agents_tab, "codex", value_x, 182, target, width=value_width
+        agents_tab, "codex", value_x, 164, target, width=value_width
     )
-    add_label(agents_tab, "Claude", label_x, 150, 90, 22)
+    add_label(agents_tab, "Claude", label_x, 136, 90, 22)
     claude_opener = add_provider_opener_popup(
-        agents_tab, "claude", value_x, 148, target, width=value_width
+        agents_tab, "claude", value_x, 134, target, width=value_width
     )
-    add_label(agents_tab, "Grok", label_x, 116, 90, 22)
+    add_label(agents_tab, "Grok", label_x, 106, 90, 22)
     grok_opener = add_provider_opener_popup(
-        agents_tab, "grok", value_x, 114, target, width=value_width
+        agents_tab, "grok", value_x, 104, target, width=value_width
     )
 
     terminal_popup = add_terminal_popup(
-        agents_tab, primary_action_x, 182, target, width=200
+        agents_tab, primary_action_x, 164, target, width=200
     )
     custom_terminal_path = add_label(
-        agents_tab, "", primary_action_x, 150, 200, 22
+        agents_tab, "", primary_action_x, 136, 200, 22
     )
     add_button(
         agents_tab,
         "Choose...",
         secondary_action_x,
-        114,
+        104,
         100,
         28,
         target,
@@ -5405,6 +5430,7 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
         "grok_hook_status": grok_status,
         "cursor_hook_status": cursor_status,
         "junie_hook_status": junie_status,
+        "opencode_hook_status": opencode_status,
         "debug_log_status": debug_log_status,
         "codex_session_opener": codex_opener,
         "claude_session_opener": claude_opener,

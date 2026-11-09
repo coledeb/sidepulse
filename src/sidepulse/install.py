@@ -25,7 +25,9 @@ from .providers import (
     default_cursor_hook_config_path,
     default_grok_hook_config_path,
     default_junie_hook_config_path,
+    default_opencode_plugin_path,
     detect_log_path,
+    OPENCODE_PLUGIN_MARKER,
 )
 
 MANAGED_START = "# >>> agent-monitor hooks >>>"
@@ -205,6 +207,48 @@ def install_junie_hooks(
     return InstallResult("junie", config, target_log, changed, backup, dry_run)
 
 
+def install_opencode_hooks(
+    log_path: Path | None = None,
+    config_path: Path | None = None,
+    dry_run: bool = False,
+    python_executable: str | None = None,
+) -> InstallResult:
+    """Write SidePulse's OpenCode plugin, which runs the hook command per event.
+
+    OpenCode loads it the next time its server starts: ``opencode service
+    restart`` for the background service, or a T3 Code restart for T3's.
+    """
+    config = config_path or default_opencode_plugin_path()
+    target_log = (log_path or detect_log_path("opencode")).expanduser()
+    original = read_text_or_empty(config)
+    if original and not original.startswith(OPENCODE_PLUGIN_MARKER):
+        raise ValueError(f"refusing to overwrite an OpenCode plugin SidePulse did not write: {config}")
+    command = hook_command("opencode", target_log, python_executable)
+    new_text = opencode_plugin_source(command)
+    changed = original != new_text
+    # Only SidePulse's own generated file is ever replaced, so no backup is kept:
+    # one would sit in the plugin's directory where OpenCode loads it.
+    if changed and not dry_run:
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(new_text)
+        target_log.parent.mkdir(parents=True, exist_ok=True)
+        target_log.touch(exist_ok=True)
+
+    return InstallResult("opencode", config, target_log, changed, None, dry_run)
+
+
+def opencode_plugin_source(command: str) -> str:
+    template = (Path(__file__).parent / "resources" / "opencode_plugin.js").read_text()
+    return template.replace("__SIDEPULSE_HOOK_COMMAND__", json.dumps(command), 1)
+
+
+def read_text_or_empty(path: Path) -> str:
+    try:
+        return path.read_text()
+    except FileNotFoundError:
+        return ""
+
+
 def uninstall_codex_hooks(
     log_path: Path | None = None,
     config_path: Path | None = None,
@@ -342,6 +386,24 @@ def uninstall_junie_hooks(
                 pass
 
     return InstallResult("junie", config, target_log, changed, backup, dry_run)
+
+
+def uninstall_opencode_hooks(
+    log_path: Path | None = None,
+    config_path: Path | None = None,
+    dry_run: bool = False,
+) -> InstallResult:
+    config = config_path or default_opencode_plugin_path()
+    target_log = (log_path or detect_log_path("opencode")).expanduser()
+    managed = read_text_or_empty(config).startswith(OPENCODE_PLUGIN_MARKER)
+    if managed and not dry_run:
+        config.unlink()
+        try:
+            config.parent.rmdir()
+        except OSError:
+            pass
+
+    return InstallResult("opencode", config, target_log, managed, None, dry_run)
 
 
 def install_cursor_hooks(

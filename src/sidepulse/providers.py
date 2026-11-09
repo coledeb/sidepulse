@@ -91,9 +91,26 @@ JUNIE_MONITOR_EVENTS = tuple(
     event for event in JUNIE_EVENTS if event != "PermissionRequest"
 )
 
-HOOK_PROVIDERS = ("codex", "claude", "grok", "cursor", "junie")
+# The events SidePulse's OpenCode plugin reports, translated from OpenCode's
+# own event stream.
+OPENCODE_EVENTS = (
+    "UserPromptSubmit",
+    "PreToolUse",
+    "PostToolUse",
+    "PostToolUseFailure",
+    "PermissionRequest",
+    "Stop",
+    "StopFailure",
+    "Interrupt",
+)
+# The first line of the plugin SidePulse installs; a plugin without it is the user's.
+OPENCODE_PLUGIN_MARKER = "// sidepulse-opencode-plugin"
+
+HOOK_PROVIDERS = ("codex", "claude", "grok", "cursor", "junie", "opencode")
 KNOWN_EVENTS = tuple(
-    dict.fromkeys(CODEX_EVENTS + CLAUDE_EVENTS + GROK_EVENTS + JUNIE_EVENTS)
+    dict.fromkeys(
+        CODEX_EVENTS + CLAUDE_EVENTS + GROK_EVENTS + JUNIE_EVENTS + OPENCODE_EVENTS
+    )
 )
 
 
@@ -154,6 +171,7 @@ def detect_provider_configs(home: Path | None = None) -> list[ProviderConfig]:
         detect_grok_config(home),
         detect_cursor_config(home),
         detect_junie_config(home),
+        detect_opencode_config(home),
     ]
 
 
@@ -413,6 +431,52 @@ def _paths_from_cursor_entries(entries: list[Any]) -> list[Path]:
     return paths
 
 
+def default_opencode_config_dir(home: Path | None = None) -> Path:
+    """OpenCode's global config directory, where it looks for ``plugins/<name>/``."""
+    if home is None:
+        explicit = os.environ.get("OPENCODE_CONFIG_DIR")
+        if explicit:
+            return Path(explicit).expanduser()
+        xdg_config_home = os.environ.get("XDG_CONFIG_HOME")
+        if xdg_config_home:
+            return Path(xdg_config_home).expanduser() / "opencode"
+    return (home or Path.home()) / ".config" / "opencode"
+
+
+def default_opencode_plugin_path(home: Path | None = None) -> Path:
+    # OpenCode 2 loads each plugin from its own directory under plugins/.
+    return default_opencode_config_dir(home) / "plugins" / "sidepulse" / "index.js"
+
+
+def detect_opencode_config(home: Path | None = None) -> ProviderConfig:
+    config_path = default_opencode_plugin_path(home)
+    if not config_path.exists():
+        return ProviderConfig("opencode", config_path, False, False, (), ())
+    try:
+        text = config_path.read_text()
+    except OSError:
+        return ProviderConfig("opencode", config_path, True, False, (), ())
+    if not text.startswith(OPENCODE_PLUGIN_MARKER):
+        return ProviderConfig("opencode", config_path, True, False, (), ())
+    paths: list[Path] = []
+    match = re.search(r"^const HOOK_COMMAND = (.+)$", text, flags=re.MULTILINE)
+    if match:
+        try:
+            command = json.loads(match.group(1))
+        except json.JSONDecodeError:
+            command = None
+        if isinstance(command, str):
+            paths.extend(extract_log_paths_from_command(command))
+    return ProviderConfig(
+        "opencode",
+        config_path,
+        True,
+        True,
+        OPENCODE_EVENTS,
+        _dedupe_paths(paths),
+    )
+
+
 def detect_log_path(provider: str, home: Path | None = None) -> Path:
     if provider == "codex":
         config = detect_codex_config(home)
@@ -424,6 +488,8 @@ def detect_log_path(provider: str, home: Path | None = None) -> Path:
         config = detect_cursor_config(home)
     elif provider == "junie":
         config = detect_junie_config(home)
+    elif provider == "opencode":
+        config = detect_opencode_config(home)
     else:
         config = ProviderConfig(provider, default_log_path(provider, home), False, False, (), ())
     if config.log_paths:
