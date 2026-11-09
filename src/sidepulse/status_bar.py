@@ -235,6 +235,8 @@ from .settings import (
     HISTORY_TIMEFRAME_24H_SECONDS,
     HISTORY_TIMEFRAME_48H_SECONDS,
     HISTORY_TIMEFRAME_CHOICES,
+    IDLE_PULSE_CHOICES,
+    DEFAULT_IDLE_PULSE_SECONDS,
     LED_DISPLAY_AGENT,
     LED_DISPLAY_BATTERY,
     LED_DISPLAY_CUSTOM,
@@ -998,6 +1000,26 @@ class StatusBarController(NSObject):
             self.refresh_settings_window()
             return
         self.set_session_terminal(terminal)
+
+    @objc.IBAction
+    def setIdlePulseSeconds_(self, sender):
+        selected = sender.selectedItem()
+        value = selected.representedObject() if selected is not None else None
+        if not isinstance(value, (int, float)):
+            return
+        try:
+            self.settings = self.settings.with_idle_pulse_seconds(float(value))
+            save_settings(self.settings)
+        except Exception as exc:
+            self.set_settings_message(f"Could not save idle pulse speed: {exc}")
+            self.settings = load_settings()
+            self.refresh_settings_window()
+            return
+        self.refresh_settings_window()
+        self.refresh_(None)
+        self.set_settings_message(
+            f"Idle pulse: every {self.settings.idle_pulse_seconds:g} seconds."
+        )
 
     @objc.IBAction
     def setHistoryTimeframe_(self, sender):
@@ -1924,6 +1946,13 @@ class StatusBarController(NSObject):
             self.settings_fields.get("sleep_prevention_min_battery_percent"),
             f"{self.settings.sleep_prevention_min_battery_percent:g}",
         )
+        idle_pulse_popup = self.settings_fields.get("idle_pulse_seconds")
+        if idle_pulse_popup is not None:
+            # Same float matching as the history popup; tolerance is ample.
+            refresh_history_timeframe_popup(
+                idle_pulse_popup,
+                self.settings.idle_pulse_seconds,
+            )
         timeframe_popup = self.settings_fields.get("status_history_timeframe")
         if timeframe_popup is not None:
             refresh_history_timeframe_popup(
@@ -2706,6 +2735,7 @@ class StatusBarController(NSObject):
         thread = threading.Thread(
             target=self.show_agent_animation_on_device_worker,
             args=(mode, animation.style, animation.custom_program, devices, token),
+            kwargs={"idle_pulse_seconds": self.settings.idle_pulse_seconds},
             daemon=True,
         )
         thread.start()
@@ -2717,6 +2747,7 @@ class StatusBarController(NSObject):
         custom_program: str,
         devices: list[StatusBarDevice],
         token: int,
+        idle_pulse_seconds: float | None = None,
     ) -> None:
         for device in devices:
             try:
@@ -2726,6 +2757,7 @@ class StatusBarController(NSObject):
                     brightness=device.brightness,
                     animation_style=animation_style,
                     custom_program=custom_program,
+                    idle_pulse_seconds=idle_pulse_seconds,
                 )
                 log_status_bar(
                     f"animation device preview={MODE_LABELS[mode]} "
@@ -3358,6 +3390,7 @@ class StatusBarController(NSObject):
                     brightness=device.brightness,
                     animation_style=animation.style,
                     custom_program=animation.custom_program,
+                    idle_pulse_seconds=self.settings.idle_pulse_seconds,
                 )
             except DeviceWriteError as exc:
                 log_status_bar(f"virtual animation error {MODE_LABELS[mode]}: {exc}")
@@ -3427,6 +3460,7 @@ class StatusBarController(NSObject):
                             brightness=255,
                             animation_style=animation.style,
                             custom_program=animation.custom_program,
+                            idle_pulse_seconds=self.settings.idle_pulse_seconds,
                         )
                     except DeviceWriteError as exc:
                         active_errors[device.device_id] = str(exc)
@@ -3471,6 +3505,7 @@ class StatusBarController(NSObject):
                     mode,
                     animation_style=animation.style,
                     custom_program=animation.custom_program,
+                    idle_pulse_seconds=self.settings.idle_pulse_seconds,
                 )
                 label = f"{device.name} {result.label}"
 
@@ -3618,7 +3653,11 @@ class StatusBarController(NSObject):
             ]
         for target in targets:
             try:
-                result = write_mode_to_leds(AgentMode.IDLE_READY, device_path=target)
+                result = write_mode_to_leds(
+                    AgentMode.IDLE_READY,
+                    device_path=target,
+                    idle_pulse_seconds=self.settings.idle_pulse_seconds,
+                )
                 log_status_bar(f"device disconnected target={result.target}")
             except Exception as exc:
                 log_status_bar(f"device disconnect error: {exc}")
@@ -5385,6 +5424,8 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
         target,
         "setBatteryPowerPreviewFromCheckbox:",
     )
+    add_label(behavior_tab, "Idle pulse every", 380, 106, 110, 22)
+    idle_pulse = add_idle_pulse_popup(behavior_tab, 494, 102, target)
     add_separator(behavior_tab, 24, 96, tab_width - 48)
     show_menu_bar_icon = add_checkbox(
         behavior_tab, "Show menu bar icon", 32, 60, 280, 24,
@@ -5456,6 +5497,7 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
         "completed_visible_seconds": completed_seconds,
         "sleep_prevention_min_battery_percent": min_battery_percent,
         "status_history_timeframe": history_timeframe,
+        "idle_pulse_seconds": idle_pulse,
         "status_history_status": history_status,
         "status_history_chart": history_chart,
         "agent_animation_profile": animation_profile,
@@ -5822,6 +5864,7 @@ def agent_animation_catalog_program(
         led_count=8,
         animation_style=animation.style,
         custom_program=animation.custom_program,
+        idle_pulse_seconds=selected.idle_pulse_seconds,
     )
 
 
@@ -5838,6 +5881,7 @@ def animation_state_program(
         led_count=led_count,
         animation_style=animation.style,
         custom_program=animation.custom_program,
+        idle_pulse_seconds=settings.idle_pulse_seconds,
     )
 
 
@@ -5916,6 +5960,26 @@ def add_terminal_popup(parent, x: int, y: int, target, *, width: int = 150):
         item = popup.lastItem()
         item.setRepresentedObject_(terminal_app)
         item.setEnabled_(terminal_app_selectable(terminal_app))
+    parent.addSubview_(popup)
+    return popup
+
+
+def idle_pulse_label(seconds: float) -> str:
+    label = f"{seconds:g} seconds"
+    if abs(seconds - DEFAULT_IDLE_PULSE_SECONDS) < 0.05:
+        label += " (default)"
+    return label
+
+
+def add_idle_pulse_popup(parent, x: int, y: int, target):
+    popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(
+        ((x, y), (142, 26)), False
+    )
+    popup.setTarget_(target)
+    popup.setAction_("setIdlePulseSeconds:")
+    for seconds in IDLE_PULSE_CHOICES:
+        popup.addItemWithTitle_(idle_pulse_label(seconds))
+        popup.lastItem().setRepresentedObject_(float(seconds))
     parent.addSubview_(popup)
     return popup
 

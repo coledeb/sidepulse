@@ -66,6 +66,12 @@ COUNT_SPECIFIC_ANIMATIONS = frozenset(
         "lid-closed",
     }
 )
+# Built-in idle breaths whose cycle length follows the "Idle pulse" setting.
+# Their authored programs fade out and back in over 2s each, a 4s cycle.
+IDLE_PULSE_ANIMATIONS = frozenset({"idle-pulse", "ember-idle", "purple-idle"})
+IDLE_PULSE_AUTHORED_SECONDS = 4.0
+MAX_STEP_MS = 65535
+_TIMING_TOKEN = re.compile(r"(?<![#\w.])(\d+(?:\.\d+)?)(ms|s)\b", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -123,6 +129,48 @@ def program_for_agent_mode(
     brightness: int | float = 255,
     animation_style: str = "default",
     custom_program: str = "",
+    idle_pulse_seconds: float | None = None,
+) -> str:
+    program = _program_for_agent_mode(
+        mode,
+        led_count=led_count,
+        brightness=brightness,
+        animation_style=animation_style,
+        custom_program=custom_program,
+    )
+    if idle_pulse_seconds is not None and _is_idle_pulse(mode, animation_style):
+        program = retime_program(
+            program, float(idle_pulse_seconds) / IDLE_PULSE_AUTHORED_SECONDS
+        )
+    return program
+
+
+def _is_idle_pulse(mode: AgentMode, animation_style: str) -> bool:
+    if animation_style == "default":
+        return display_state_for_mode(mode) == LedDisplayState.IDLE
+    return animation_style in IDLE_PULSE_ANIMATIONS
+
+
+def retime_program(program: str, factor: float) -> str:
+    """Scale every duration and delay in an LED program by ``factor``."""
+    if factor <= 0 or abs(factor - 1.0) < 1e-9:
+        return program
+
+    def scale(match: re.Match[str]) -> str:
+        value = float(match.group(1))
+        ms = value if match.group(2).lower() == "ms" else value * 1000
+        return f"{max(1, min(MAX_STEP_MS, round(ms * factor)))}ms"
+
+    return _TIMING_TOKEN.sub(scale, program)
+
+
+def _program_for_agent_mode(
+    mode: AgentMode,
+    *,
+    led_count: int,
+    brightness: int | float,
+    animation_style: str,
+    custom_program: str,
 ) -> str:
     state = display_state_for_mode(mode)
     if animation_style == "custom":
@@ -268,6 +316,7 @@ def write_mode_to_leds(
     brightness: int | float = 255,
     animation_style: str = "default",
     custom_program: str = "",
+    idle_pulse_seconds: float | None = None,
 ) -> LedStatusWrite:
     target = resolve_target_path(device_path=device_path, file_name=file_name)
     state = display_state_for_mode(mode)
@@ -277,6 +326,7 @@ def write_mode_to_leds(
         brightness=brightness,
         animation_style=animation_style,
         custom_program=custom_program,
+        idle_pulse_seconds=idle_pulse_seconds,
     )
     written_target = write_led_program(
         program,
@@ -353,7 +403,7 @@ class AgentLedController:
         self.brightness = normalize_brightness(brightness)
         self.last_state: LedDisplayState | None = None
         self.last_brightness: int | None = None
-        self.last_animation_signature: tuple[str, str] | None = None
+        self.last_animation_signature: tuple[str, str, float | None] | None = None
         self.last_program: str | None = None
         self.last_error: str | None = None
         self.last_target: Path | None = None
@@ -389,12 +439,14 @@ class AgentLedController:
         *,
         animation_style: str = "default",
         custom_program: str = "",
+        idle_pulse_seconds: float | None = None,
     ) -> LedStatusWrite:
         state = display_state_for_mode(mode)
         brightness = normalize_brightness(self.brightness)
         animation_signature = (
             animation_style,
             custom_program if animation_style == "custom" else "",
+            idle_pulse_seconds,
         )
         now = time.monotonic()
         if (
@@ -435,6 +487,7 @@ class AgentLedController:
                 brightness=brightness,
                 animation_style=animation_style,
                 custom_program=custom_program,
+                idle_pulse_seconds=idle_pulse_seconds,
             )
         except (DeviceWriteError, OSError) as exc:
             self.last_error_busy = isinstance(exc, DeviceBusyError)

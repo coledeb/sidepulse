@@ -174,6 +174,7 @@ class SidePulseService:
                         brightness=settings.brightness_for_device(device_id),
                         animation_style=animation.style,
                         custom_program=animation.custom_program,
+                        idle_pulse_seconds=settings.idle_pulse_seconds,
                     )
                 except DeviceWriteError:
                     continue
@@ -203,6 +204,7 @@ class SidePulseService:
                     led_count=8,
                     animation_style=animation.style,
                     custom_program=animation.custom_program,
+                    idle_pulse_seconds=settings.idle_pulse_seconds,
                 )
             except DeviceWriteError:
                 continue

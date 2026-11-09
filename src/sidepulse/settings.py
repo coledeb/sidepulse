@@ -200,6 +200,9 @@ VISUALIZER_COLOR_PRESETS = (
     ("White", "#FFFFFF"),
 )
 VISUALIZER_DEFAULT_COLOR = "#00E5FF"
+# Full fade-out/fade-in cycle of the built-in idle animations, in seconds.
+DEFAULT_IDLE_PULSE_SECONDS = 4.0
+IDLE_PULSE_CHOICES = (4.0, 6.0, 8.0, 12.0, 20.0, 30.0)
 HISTORY_TIMEFRAME_CHOICES = (
     HISTORY_TIMEFRAME_1H_SECONDS,
     HISTORY_TIMEFRAME_6H_SECONDS,
@@ -350,6 +353,7 @@ class AgentMonitorSettings:
     visualizer_source: str = ""
     visualizer_color: str = VISUALIZER_DEFAULT_COLOR
     completed_visible_seconds: float = DEFAULT_COMPLETED_VISIBLE_SECONDS
+    idle_pulse_seconds: float = DEFAULT_IDLE_PULSE_SECONDS
 
     def transcript_enabled(self, provider: str) -> bool:
         if provider == "codex":
@@ -838,6 +842,9 @@ class AgentMonitorSettings:
     def with_history_timeframe(self, seconds: float) -> "AgentMonitorSettings":
         return replace(self, history_timeframe_seconds=normalize_history_timeframe(seconds))
 
+    def with_idle_pulse_seconds(self, seconds: float) -> "AgentMonitorSettings":
+        return replace(self, idle_pulse_seconds=normalize_idle_pulse_seconds(seconds))
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "led_display": self.led_display,
@@ -874,6 +881,7 @@ class AgentMonitorSettings:
             "history": {
                 "timeframe_seconds": self.history_timeframe_seconds,
             },
+            "idle_pulse_seconds": self.idle_pulse_seconds,
             "visualizer": {
                 "style": self.visualizer_style,
                 "source": self.visualizer_source,
@@ -1057,6 +1065,7 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
                 ),
             )
         ),
+        idle_pulse_seconds=normalize_idle_pulse_seconds(data.get("idle_pulse_seconds")),
         history_timeframe_seconds=normalize_history_timeframe(
             history.get(
                 "timeframe_seconds",
@@ -1541,6 +1550,15 @@ def normalize_history_timeframe(value: object) -> float:
             if abs(candidate - float(choice)) < 0.5:
                 return float(choice)
     return float(DEFAULT_HISTORY_TIMEFRAME_SECONDS)
+
+
+def normalize_idle_pulse_seconds(value: object) -> float:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        candidate = float(value)
+        for choice in IDLE_PULSE_CHOICES:
+            if abs(candidate - choice) < 0.05:
+                return choice
+    return DEFAULT_IDLE_PULSE_SECONDS
 
 
 def normalize_brightness(value: object) -> int:
