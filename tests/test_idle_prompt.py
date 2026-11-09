@@ -6,7 +6,13 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from sidepulse.collector import AgentMonitor, LiveAgentMonitor, SourceSpec, status_from_event
+from sidepulse.collector import (
+    PERMISSION_PROMPT_SETTLE_SECONDS,
+    AgentMonitor,
+    LiveAgentMonitor,
+    SourceSpec,
+    status_from_event,
+)
 from sidepulse.models import AgentMode
 from sidepulse.providers import parse_log_line
 
@@ -154,7 +160,8 @@ class ClaudeIdlePromptTests(unittest.TestCase):
         self.assertEqual(snapshot.aggregate.active_count, 1)
 
     def test_permission_prompt_permission_request_and_explicit_ask_are_not_suppressed(self) -> None:
-        now = datetime.now(timezone.utc)
+        # Older than the PermissionRequest settle window, so the request reads as Ask.
+        now = datetime.now(timezone.utc) - timedelta(seconds=PERMISSION_PROMPT_SETTLE_SECONDS + 10)
         session_id = "asking-claude-session"
         permission = self.event(
             "PermissionRequest",

@@ -7636,7 +7636,11 @@ class AgentMonitorTests(unittest.TestCase):
                 stale_after_seconds=3600,
                 latest_state_path=latest,
             )
-            now = datetime.now(timezone.utc)
+            # Age the requests past the Codex permission settle window so a
+            # pending request reads as Ask rather than in-progress work.
+            now = datetime.now(timezone.utc) - timedelta(
+                seconds=collector_module.PERMISSION_PROMPT_SETTLE_SECONDS + 10
+            )
             child_a = "child-a"
             child_b = "child-b"
 
