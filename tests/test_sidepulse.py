@@ -10,6 +10,7 @@ import sys
 import tempfile
 import time
 import unittest
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -7898,6 +7899,60 @@ class AgentMonitorTests(unittest.TestCase):
 
             self.assertEqual(snapshot.aggregate.mode, AgentMode.IDLE_READY)
             self.assertEqual(snapshot.statuses, ())
+
+    def test_t3_title_generation_sessions_are_ignored(self) -> None:
+        prompt = (
+            "Generate a title that will help the user recognize this T3 Code thread.\n"
+            "Return only the title."
+        )
+        for provider in ("claude", "codex"):
+            with self.subTest(provider=provider), tempfile.TemporaryDirectory() as tmp:
+                log = Path(tmp) / f"{provider}.jsonl"
+                now = datetime.now(timezone.utc).isoformat()
+                events = [
+                    {"hook_event_name": "UserPromptSubmit", "prompt": prompt},
+                    {"hook_event_name": "Stop"},
+                ]
+                log.write_text(
+                    "".join(
+                        json.dumps(
+                            {
+                                "logged_at": now,
+                                "event": {
+                                    **event,
+                                    "session_id": f"{provider}-title",
+                                    "cwd": "/Users/example/pgit/sidepulse",
+                                    "t3code_thread_id": "thread-1",
+                                },
+                            }
+                        )
+                        + "\n"
+                        for event in events
+                    )
+                )
+
+                monitor = AgentMonitor(
+                    sources=(SourceSpec(provider, log),),
+                    stale_after_seconds=3600,
+                )
+
+                self.assertEqual(monitor.snapshot().statuses, ())
+
+    def test_saved_t3_title_generation_rows_are_dropped(self) -> None:
+        status = AgentStatus(
+            provider="codex",
+            agent_id="codex:session:01a1beee",
+            display_name="Generate a title that will help the user recognize this T3 Code... (01a1beee)",
+            mode=AgentMode.COMPLETED,
+            updated_at=datetime.now(timezone.utc),
+            event_name="Stop",
+            session_id="01a1beee",
+            origin="Codex in T3 Code",
+        )
+        self.assertTrue(collector_module.is_internal_status(status))
+        self.assertFalse(
+            collector_module.is_internal_status(replace(status, display_name="Sidepulse"))
+        )
 
     def test_codex_transcript_fallback_marks_recent_user_turn_active(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

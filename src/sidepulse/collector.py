@@ -502,7 +502,7 @@ class LiveAgentMonitor:
         loaded: dict[str, AgentStatus] = {}
         for status_data in statuses:
             status = agent_status_from_dict(status_data)
-            if status is not None and not is_orphan_status(status):
+            if status is not None and not is_orphan_status(status) and not is_internal_status(status):
                 loaded[status.agent_id] = status
         self.statuses_by_key.update(loaded)
 
@@ -1074,6 +1074,12 @@ def is_orphan_status(status: AgentStatus) -> bool:
     return status.provider == "claude" or is_t3code_origin(status.origin)
 
 
+def is_internal_status(status: AgentStatus) -> bool:
+    """A saved row for a host's background prompt, such as T3 Code's title request."""
+    name = status.display_name.lower()
+    return any(prompt in name for prompt in HOST_INTERNAL_PROMPTS)
+
+
 def metadata_for_record(
     record: HookEvent,
     metadata_by_session: dict[str, StatusMetadata],
@@ -1568,9 +1574,22 @@ def should_ignore_status_transition(
     )
 
 
+# Background prompts that hosts send to an agent on their own, not on the
+# user's behalf; their sessions are not shown. T3 Code names each thread by
+# asking an agent (Claude or Codex) for a title.
+HOST_INTERNAL_PROMPTS = (
+    "generate a title that will help the user recognize this t3 code",
+)
+CODEX_INTERNAL_PROMPTS = (
+    "generate 0 to 3 hyperpersonalized suggestions",
+    "you are an expert at upholding safety and compliance standards",
+)
+
+
 def should_ignore_record(record: HookEvent, metadata: StatusMetadata) -> bool:
-    if record.provider != "codex":
-        return False
+    internal_prompts = HOST_INTERNAL_PROMPTS
+    if record.provider == "codex":
+        internal_prompts += CODEX_INTERNAL_PROMPTS
 
     raw = record.raw
     text = " ".join(
@@ -1585,11 +1604,6 @@ def should_ignore_record(record: HookEvent, metadata: StatusMetadata) -> bool:
     ).lower()
     if not text:
         return False
-
-    internal_prompts = (
-        "generate 0 to 3 hyperpersonalized suggestions",
-        "you are an expert at upholding safety and compliance standards",
-    )
     return any(prompt in text for prompt in internal_prompts)
 
 
