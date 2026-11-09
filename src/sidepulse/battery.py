@@ -32,6 +32,7 @@ CHARGING_FILL_SLOW_STEP_MS = 320
 CHARGING_FILL_FAST_STEP_MS = 120
 CHARGING_FILL_REST_MS = 600
 CHARGING_FILL_HOLD_MS = 500
+CHARGING_PREVIEW_FADE_OUT_MS = 300
 
 
 @dataclass(frozen=True)
@@ -300,12 +301,7 @@ def program_for_battery(
     pulse_index = min(fill.full, count - 1)
     transition = max(0, int(transition_ms))
 
-    if (
-        not snapshot.is_plugged
-        or not snapshot.is_charging
-        or snapshot.is_charged
-        or percent >= 100
-    ):
+    if not snapshot_shows_charging_fill(snapshot):
         color = battery_color(percent)
         if snapshot.is_charged or percent >= 100:
             return apply_brightness(
@@ -323,8 +319,43 @@ def program_for_battery(
             brightness,
         )
 
-    # Charging: hold the current level, then light the LEDs from the level
-    # to the end one by one, as if the bar were filling, and fall back.
+    lines, _cycle_ms = charging_fill_cycle(
+        snapshot,
+        led_count=count,
+        full_charge_watts=full_charge_watts,
+        transition_ms=transition,
+    )
+    lines.append("repeat")
+    return apply_brightness("\n".join(lines), brightness)
+
+
+def snapshot_shows_charging_fill(snapshot: BatterySnapshot) -> bool:
+    """Whether the battery display animates the mint charging fill."""
+    return (
+        snapshot.is_plugged
+        and snapshot.is_charging
+        and not snapshot.is_charged
+        and int(snapshot.percent) < 100
+    )
+
+
+def charging_fill_cycle(
+    snapshot: BatterySnapshot,
+    *,
+    led_count: int = 8,
+    full_charge_watts: float | None = None,
+    transition_ms: int = 360,
+) -> tuple[list[str], int]:
+    """One pass of the charging fill and how long it takes, in milliseconds.
+
+    Hold the current level, then light the LEDs from the level to the end one
+    by one, as if the bar were filling, and fall back.
+    """
+    count = max(1, min(8, int(led_count)))
+    percent = max(0, min(100, int(snapshot.percent)))
+    fill = battery_fill(percent, count)
+    pulse_index = min(fill.full, count - 1)
+    transition = max(0, int(transition_ms))
     color = BATTERY_CHARGING_MINT
     ratio = snapshot.charge_speed_ratio(full_charge_watts)
     step_ms = charging_fill_step_ms(ratio)
@@ -344,8 +375,41 @@ def program_for_battery(
         f"{index}:{color} {step_ms}ms ease-out" for index in range(pulse_index, count)
     )
     lines.append(f"{count - 1}:{color} {CHARGING_FILL_HOLD_MS}ms none")
-    lines.append("repeat")
-    return apply_brightness("\n".join(lines), brightness)
+    cycle_ms = (
+        transition
+        + CHARGING_FILL_REST_MS
+        + step_ms * (count - pulse_index)
+        + CHARGING_FILL_HOLD_MS
+    )
+    return lines, cycle_ms
+
+
+def program_for_charging_preview(
+    snapshot: BatterySnapshot,
+    seconds: float,
+    *,
+    led_count: int = 8,
+    full_charge_watts: float | None = None,
+    brightness: int | float = 255,
+) -> tuple[str, float] | None:
+    """A self-ending charging fill: repeat it for about ``seconds``, then go dark.
+
+    The device plays it to the end on its own, so the LEDs still turn off if
+    the Mac falls asleep partway through. Returns the program and how long it
+    runs, or ``None`` when the battery is not charging.
+    """
+    if not snapshot_shows_charging_fill(snapshot):
+        return None
+    lines, cycle_ms = charging_fill_cycle(
+        snapshot,
+        led_count=led_count,
+        full_charge_watts=full_charge_watts,
+    )
+    repeats = max(1, round(max(0.0, float(seconds)) * 1000 / max(1, cycle_ms)))
+    lines.append(f"repeat {repeats}")
+    lines.append(f"off {CHARGING_PREVIEW_FADE_OUT_MS}ms ease")
+    duration = (repeats * cycle_ms + CHARGING_PREVIEW_FADE_OUT_MS) / 1000
+    return apply_brightness("\n".join(lines), brightness), duration
 
 
 @dataclass(frozen=True)

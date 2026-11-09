@@ -86,7 +86,9 @@ from .battery import (
     DEFAULT_POWER_CHANGE_PREVIEW_SECONDS,
     format_watts,
     program_for_battery,
+    program_for_charging_preview,
     read_battery_snapshot,
+    snapshot_shows_charging_fill,
 )
 from .power_source_notifications import PowerSourceNotifier
 from .status_icon import NativeStatusIconRenderer
@@ -412,6 +414,8 @@ STATUS_BAR_HISTORY_CHART_RECORD_LIMIT_MULTIPLIER = 3.0
 MAC_SLEEP_POLL_SECONDS = 60.0
 SYSTEM_POLL_ERROR_BACKOFF_SECONDS = 30.0
 LID_ANIMATION_RESTORE_FUDGE_SECONDS = 0.15
+# Skip the lid-close charging fill when its write would land this late.
+LID_CHARGING_PREVIEW_MAX_LATE_SECONDS = 2.0
 AGENT_ANIMATION_DEVICE_PREVIEW_SECONDS = 3.0
 AGENT_ANIMATION_EDITOR_DEVICE_PREVIEW_SECONDS = 10.0
 AGENT_ANIMATION_PROFILE_CUSTOM = ""
@@ -3605,16 +3609,38 @@ class StatusBarController(NSObject):
         if not devices:
             return
 
+        charging_snapshot = None
+        charging_seconds = 0.0
+        if kind == LID_ANIMATION_CLOSED and self.lid_close_charging_preview_enabled():
+            charging_snapshot = self.last_battery_snapshot
+            charging_seconds = self.settings.battery_power_change_preview_seconds
+
         self.led_animation_token += 1
         token = self.led_animation_token
-        duration = animation.duration_seconds + LID_ANIMATION_RESTORE_FUDGE_SECONDS
+        duration = (
+            animation.duration_seconds
+            + charging_seconds
+            + LID_ANIMATION_RESTORE_FUDGE_SECONDS
+        )
         self.led_animation_until_monotonic = time.monotonic() + duration
         thread = threading.Thread(
             target=self.play_lid_animation_worker,
-            args=(kind, animation, devices, token),
+            args=(kind, animation, devices, token, charging_snapshot, charging_seconds),
             daemon=True,
         )
         thread.start()
+
+    def lid_close_charging_preview_enabled(self) -> bool:
+        """Follow the lid-close animation with the charging fill while charging.
+
+        Shares the plug/unplug preview checkbox and length.
+        """
+        snapshot = self.last_battery_snapshot
+        return (
+            self.settings.battery_show_on_power_change
+            and snapshot is not None
+            and snapshot_shows_charging_fill(snapshot)
+        )
 
     def should_hold_lid_closed_led_state(self) -> bool:
         agents_active = None
@@ -3642,6 +3668,8 @@ class StatusBarController(NSObject):
         animation: LedAnimationSetting,
         devices: list[StatusBarDevice],
         token: int,
+        charging_snapshot: BatterySnapshot | None = None,
+        charging_seconds: float = 0.0,
     ) -> None:
         label = LID_ANIMATION_LABELS[kind]
         for device in devices:
@@ -3652,12 +3680,61 @@ class StatusBarController(NSObject):
             except Exception as exc:
                 log_status_bar(f"animation error {label} {device.name}: {exc}")
 
+        # Wall-clock time, because the monotonic clock stops while the Mac sleeps.
+        started = time.time()
         time.sleep(animation.duration_seconds + LID_ANIMATION_RESTORE_FUDGE_SECONDS)
+        if charging_snapshot is not None and charging_seconds > 0:
+            self.play_lid_close_charging_preview(
+                devices,
+                token,
+                charging_snapshot,
+                charging_seconds,
+                late=time.time() - started > animation.duration_seconds
+                + LID_CHARGING_PREVIEW_MAX_LATE_SECONDS,
+            )
         self.performSelectorOnMainThread_withObject_waitUntilDone_(
             "restoreLedDisplay:",
             str(token),
             False,
         )
+
+    def play_lid_close_charging_preview(
+        self,
+        devices: list[StatusBarDevice],
+        token: int,
+        snapshot: BatterySnapshot,
+        seconds: float,
+        *,
+        late: bool,
+    ) -> None:
+        label = "Lid Closed Charging"
+        if token != self.led_animation_token:
+            return
+        if late:
+            # The Mac slept before the follow-up; lighting up on a later
+            # background wake would be the wrong moment.
+            log_status_bar(f"animation={label} skipped reason=late")
+            return
+        duration = 0.0
+        for device in devices:
+            try:
+                preview = program_for_charging_preview(
+                    snapshot,
+                    seconds,
+                    full_charge_watts=self.settings.battery_full_charge_watts,
+                    brightness=device.brightness,
+                )
+                if preview is None:
+                    return
+                program, duration = preview
+                target = write_led_program(program, device_path=device.target)
+                log_status_bar(
+                    f"animation={label} device={device.name} "
+                    f"seconds={duration:g} target={target}"
+                )
+            except Exception as exc:
+                log_status_bar(f"animation error {label} {device.name}: {exc}")
+        time.sleep(duration)
 
     @objc.IBAction
     def restoreLedDisplay_(self, token_value):
@@ -5464,6 +5541,10 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
         24,
         target,
         "setBatteryPowerPreviewFromCheckbox:",
+    )
+    battery_power_preview.setToolTip_(
+        "Also shows the charging fill after the lid-close animation "
+        "when the lid is closed while charging."
     )
     battery_preview_seconds = add_editable_field(behavior_tab, "", 272, 106, 58, 24)
     battery_preview_seconds.setTarget_(target)
