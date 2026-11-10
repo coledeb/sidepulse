@@ -1317,7 +1317,12 @@ def mode_for_event(record: HookEvent) -> AgentMode | None:
         if _tool_response_looks_failed(raw.get("tool_response")):
             return AgentMode.BLOCKED_ERROR
         return AgentMode.WORKING
-    if event in {"UserPromptSubmit", "PreCompact", "PostCompact", "SubagentStart"}:
+    if event in {"PreCompact", "PostCompact"}:
+        # Compaction says nothing about what the agent is doing: mid-turn the
+        # previous working status stays, after a manual /compact a finished
+        # turn or a pending question stays.
+        return None
+    if event in {"UserPromptSubmit", "SubagentStart"}:
         return AgentMode.WORKING
     if event in {"Stop", "SubagentStop"}:
         if _assistant_message_asks_question(
@@ -1334,6 +1339,8 @@ def mode_for_event(record: HookEvent) -> AgentMode | None:
     if event in {"SessionEnd"}:
         return AgentMode.COMPLETED
     if event == "SessionStart":
+        if str(raw.get("source", "")).strip().lower() == "compact":
+            return None  # the same session continues after compaction
         return AgentMode.IDLE_READY
     return None
 

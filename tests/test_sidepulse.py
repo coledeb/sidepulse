@@ -8209,6 +8209,69 @@ class AgentMonitorTests(unittest.TestCase):
         # promoted back to Waiting for Input once it outlives the settle window.
         self.assertEqual(snapshot.aggregate.mode, AgentMode.WAITING_FOR_INPUT)
 
+    def _compaction_record(self, session_id: str, event_name: str, logged_at: datetime | None = None, **extra):
+        payload = {"hook_event_name": event_name, "session_id": session_id, **extra}
+        line = format_hook_payload(
+            "claude",
+            json.dumps(payload),
+            logged_at=(logged_at or datetime.now(timezone.utc)).isoformat(),
+            include_origin=False,
+        )
+        parsed = parse_log_line("claude", json.dumps(line))
+        self.assertIsNotNone(parsed, event_name)
+        return parsed
+
+    def test_context_compaction_does_not_change_the_agent_status(self) -> None:
+        record = lambda name, **extra: self._compaction_record("compacting", name, **extra)
+        for event_name in ("PreCompact", "PostCompact"):
+            self.assertIsNone(collector_module.mode_for_event(record(event_name)), event_name)
+        self.assertIsNone(collector_module.mode_for_event(record("SessionStart", source="compact")))
+        self.assertEqual(
+            collector_module.mode_for_event(record("SessionStart", source="startup")),
+            AgentMode.IDLE_READY,
+        )
+        self.assertEqual(collector_module.mode_for_event(record("SessionStart")), AgentMode.IDLE_READY)
+
+    def test_automatic_compaction_mid_turn_keeps_the_tool_status(self) -> None:
+        # The sequence Claude Code emits around a compaction: the status the
+        # session had before stays, and a PostToolUse still decays on its own.
+        monitor = LiveAgentMonitor()
+        started = datetime.now(timezone.utc) - timedelta(minutes=5)
+        for offset, (event_name, extra) in enumerate(
+            (
+                ("PostToolUse", {"tool_name": "Bash", "tool_response": "{}"}),
+                ("PreCompact", {"trigger": "auto"}),
+                ("SessionStart", {"source": "compact"}),
+                ("PostCompact", {"trigger": "auto"}),
+            )
+        ):
+            monitor.ingest_record(
+                self._compaction_record("auto-compact", event_name, started + timedelta(seconds=offset), **extra)
+            )
+
+        snapshot = monitor.snapshot()
+        self.assertEqual(snapshot.aggregate.mode, AgentMode.COMPLETED)
+        self.assertEqual(snapshot.statuses[0].event_name, "PostToolUse")
+
+    def test_manual_compact_keeps_a_pending_question(self) -> None:
+        monitor = LiveAgentMonitor()
+        started = datetime.now(timezone.utc) - timedelta(seconds=30)
+        for offset, (event_name, extra) in enumerate(
+            (
+                ("Stop", {"last_assistant_message": "Done. Should I push it?"}),
+                ("PreCompact", {"trigger": "manual"}),
+                ("SessionStart", {"source": "compact"}),
+                ("PostCompact", {"trigger": "manual"}),
+            )
+        ):
+            monitor.ingest_record(
+                self._compaction_record("manual-compact", event_name, started + timedelta(seconds=offset), **extra)
+            )
+
+        snapshot = monitor.snapshot()
+        self.assertEqual(snapshot.statuses[0].mode, AgentMode.WAITING_FOR_INPUT)
+        self.assertEqual(snapshot.statuses[0].event_name, "Stop")
+
     def test_internal_codex_helper_sessions_are_ignored(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             log = Path(tmp) / "codex.jsonl"
