@@ -1239,18 +1239,9 @@ class IconTests(StatusBarTestCase):
             with self.subTest(provider=provider):
                 sb.provider_icon_for_provider(provider)
 
-    def test_grok_looks_up_its_own_bundle(self):
-        """The generic fallback would absorb a deleted branch without failing."""
-        looked_up: list[str] = []
-        sb._provider_icon_cache.pop("grok", None)
-        self.addCleanup(sb._provider_icon_cache.pop, "grok", None)
-        with patch.object(sb, "app_icon", lambda path: looked_up.append(path) and None):
-            sb.provider_icon_for_provider("grok")
-        self.assertIn("/Applications/Grok.app", looked_up)
-
     def test_bundled_provider_marks_win_over_app_lookup(self):
-        """Claude, Codex, Cursor and Antigravity draw T3 Code's marks, app or not."""
-        for provider in ("claude", "codex", "cursor", "antigravity"):
+        """Providers T3 Code has a mark for draw it, app or not."""
+        for provider in ("claude", "codex", "cursor", "antigravity", "grok", "opencode"):
             with self.subTest(provider=provider):
                 sb._provider_icon_cache.pop(provider, None)
                 self.addCleanup(sb._provider_icon_cache.pop, provider, None)
@@ -1267,14 +1258,14 @@ class IconTests(StatusBarTestCase):
                     bool(image.isTemplate()), provider in sb.MONOCHROME_PROVIDER_MARKS
                 )
 
-    def test_opencode_uses_generic_app_resolution(self):
-        """OpenCode may be registered outside the system Applications directory."""
+    def test_provider_without_a_mark_uses_generic_app_resolution(self):
+        """Junie's app may be registered outside the system Applications directory."""
         expected = NSImage.alloc().initWithSize_((18, 18))
-        sb._provider_icon_cache.pop("opencode", None)
-        self.addCleanup(sb._provider_icon_cache.pop, "opencode", None)
+        sb._provider_icon_cache.pop("junie", None)
+        self.addCleanup(sb._provider_icon_cache.pop, "junie", None)
         with patch.object(sb, "provider_app_icon", return_value=expected) as resolve:
-            image = sb.provider_icon_for_provider("opencode")
-        resolve.assert_called_once_with("opencode")
+            image = sb.provider_icon_for_provider("junie")
+        resolve.assert_called_once_with("junie")
         self.assertIs(image, expected)
 
     def test_unmapped_provider_tries_its_own_app_before_the_glyph(self):

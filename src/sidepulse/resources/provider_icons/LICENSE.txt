@@ -1,8 +1,10 @@
-These provider marks (claude.svg, codex.svg, cursor.svg, antigravity.png) are
-taken from T3 Code's icon set, apps/web/src/components/Icons.tsx in
-github.com/pingdotgg/t3code, and are used under its MIT license, reproduced
-below. The logos themselves remain trademarks of their owners (Anthropic,
-OpenAI, Anysphere, Google) and are used here only to identify each agent.
+These provider marks are taken from T3 Code (github.com/pingdotgg/t3code):
+claude.svg, codex.svg, cursor.svg and antigravity.png from
+apps/web/src/components/Icons.tsx, and grok.svg and opencode.svg from the
+icons declared in packages/provider-grok and packages/provider-opencode. They
+are used under T3 Code's MIT license, reproduced below. The logos themselves
+remain trademarks of their owners (Anthropic, OpenAI, Anysphere, Google, xAI,
+Anomaly) and are used here only to identify each agent.
 
 MIT License
 

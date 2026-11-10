@@ -6859,9 +6859,7 @@ def provider_icon_for_provider(provider: str):
     if provider in _provider_icon_cache:
         return _provider_icon_cache[provider]
     image = provider_mark_icon(provider)
-    if image is None and provider == "grok":
-        image = app_icon("/Applications/Grok.app") or grok_badge_icon()
-    elif image is None:
+    if image is None:
         # Any other provider resolves its own app by name, so a new agent needs no branch
         # here. Only providers with an alias or a custom glyph need one.
         image = provider_app_icon(provider)
@@ -6997,7 +6995,6 @@ def normalized_origin_text(origin: str | None) -> str:
     return " ".join(str(origin or "").strip().lower().replace("-", " ").split())
 
 
-_grok_badge_icon = None
 _app_icon_cache = {}
 _provider_icon_cache = {}
 _origin_icon_cache = {}
@@ -7005,42 +7002,12 @@ _session_row_icon_cache = {}
 _symbol_icon_cache = {}
 
 
-def grok_badge_icon():
-    global _grok_badge_icon
-    if _grok_badge_icon is not None:
-        return _grok_badge_icon
-
-    image = NSImage.alloc().initWithSize_((18, 18))
-    try:
-        image.lockFocus()
-        NSColor.colorWithCalibratedRed_green_blue_alpha_(0.05, 0.055, 0.065, 1.0).set()
-        badge = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-            ((1.0, 1.0), (16.0, 16.0)),
-            4.0,
-            4.0,
-        )
-        badge.fill()
-
-        attrs = {
-            NSFontAttributeName: NSFont.boldSystemFontOfSize_(12.0),
-            NSForegroundColorAttributeName: NSColor.whiteColor(),
-        }
-        NSString.stringWithString_("G").drawInRect_withAttributes_(
-            ((4.6, 1.8), (10.0, 14.0)),
-            attrs,
-        )
-    finally:
-        image.unlockFocus()
-    image.setSize_((18, 18))
-    _grok_badge_icon = image
-    return image
-
-
-# Provider marks taken from T3 Code's icon set (MIT), so a row shows the agent's
-# own logo whether or not its desktop app is installed. Single-color marks are
-# templates, filled with the menu's text color like an SF Symbol.
+# Provider marks taken from T3 Code (MIT), from its icon set and the icons its
+# provider packages declare, so a row shows the agent's own logo whether or not
+# its desktop app is installed. Single-color marks are templates, filled with
+# the menu's text color like an SF Symbol; a fainter part keeps its opacity.
 PROVIDER_MARKS_DIR = Path(__file__).parent / "resources" / "provider_icons"
-MONOCHROME_PROVIDER_MARKS = frozenset({"codex", "cursor"})
+MONOCHROME_PROVIDER_MARKS = frozenset({"codex", "cursor", "grok", "opencode"})
 PROVIDER_MARK_CANVAS = 32.0
 PROVIDER_MARK_INSET = 3.5  # matches the margin around a macOS app icon's artwork
 

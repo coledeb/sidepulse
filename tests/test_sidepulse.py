@@ -1452,7 +1452,7 @@ class AgentMonitorTests(unittest.TestCase):
 
         self.assertEqual(status_bar.menu_title_for_status(status, now), "Ask  ai_food")
 
-    def test_status_bar_grok_provider_uses_badge_icon(self) -> None:
+    def test_status_bar_grok_provider_uses_its_mark(self) -> None:
         try:
             from sidepulse import status_bar
         except SystemExit as exc:
@@ -1470,8 +1470,8 @@ class AgentMonitorTests(unittest.TestCase):
         image = status_bar.provider_icon_for_status(status)
 
         self.assertIsNotNone(image)
-        self.assertEqual(image.size().width, 18)
-        self.assertEqual(image.size().height, 18)
+        self.assertEqual(image.size().width, status_bar.PROVIDER_MARK_CANVAS)
+        self.assertTrue(image.isTemplate())
 
     def test_status_bar_vscode_origin_uses_composite_app_icon(self) -> None:
         try:
