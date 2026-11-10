@@ -65,6 +65,7 @@ class SourceSpec:
 @dataclass
 class StatusMetadata:
     cwd: str | None = None
+    project: str | None = None
     title: str | None = None
     origin: str | None = None
 
@@ -1382,6 +1383,7 @@ def metadata_for_record(
         return status_metadata
     return StatusMetadata(
         cwd=status_metadata.cwd or session_metadata.cwd,
+        project=status_metadata.project or session_metadata.project,
         title=status_metadata.title or session_metadata.title,
         origin=status_metadata.origin or session_metadata.origin,
     )
@@ -1390,6 +1392,9 @@ def metadata_for_record(
 def update_metadata(metadata: StatusMetadata, record: HookEvent) -> None:
     if record.cwd:
         metadata.cwd = record.cwd
+    project = _string_or_none(record.raw.get("sidepulse_project"))
+    if project:
+        metadata.project = project
 
     title = title_from_event(record)
     if title and (metadata.title is None or is_provider_session_title(record, title)):
@@ -1460,6 +1465,7 @@ def status_from_event(
         tool_name=record.tool_name,
         message=record.message,
         origin=record.origin or metadata.origin or origin_label_from_payload(record.provider, record.raw),
+        project=metadata.project,
     )
 
 
@@ -1761,6 +1767,7 @@ def agent_status_from_dict(data: object) -> AgentStatus | None:
         agent_id = str(data["agent_id"])
         session_id = _string_or_none(data.get("session_id"))
         cwd = _string_or_none(data.get("cwd"))
+        project = _string_or_none(data.get("project"))
         display_name = str(data["display_name"])
         if provider == "codex" and session_id:
             title = codex_session_title(session_id)
@@ -1768,7 +1775,7 @@ def agent_status_from_dict(data: object) -> AgentStatus | None:
                 # A row saved before injected AGENTS.md context stopped naming
                 # threads falls back to the project name.
                 display_name = display_name_from_parts(
-                    project_name(cwd),
+                    project or project_name(cwd),
                     title,
                     session_id[:8],
                     display_name,
@@ -1789,6 +1796,7 @@ def agent_status_from_dict(data: object) -> AgentStatus | None:
             message=_string_or_none(data.get("message")),
             origin=_string_or_none(data.get("origin")),
             stale=bool(data.get("stale", False)),
+            project=project,
         )
     except Exception:
         return None
@@ -2120,7 +2128,7 @@ def display_name_for_record(
     short_id: str,
     fallback: str,
 ) -> str:
-    project = project_name(metadata.cwd or record.cwd)
+    project = metadata.project or project_name(metadata.cwd or record.cwd)
     title = metadata.title
 
     return display_name_from_parts(project, title, short_id, fallback)
@@ -2145,6 +2153,11 @@ def display_name_from_parts(
 
 def normalized_name_part(text: str) -> str:
     return " ".join(text.replace("_", " ").replace("-", " ").split()).casefold()
+
+
+def status_project(status: AgentStatus) -> str | None:
+    """The project a row names: its host's name for it, else its folder's."""
+    return status.project or project_name(status.cwd)
 
 
 def project_name(cwd: str | None) -> str | None:

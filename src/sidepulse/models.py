@@ -78,6 +78,9 @@ class AgentStatus:
     message: str | None = None
     origin: str | None = None
     stale: bool = False
+    # The project's own name where its host gives one (T3 Code); otherwise the
+    # row is named after its folder.
+    project: str | None = None
 
     @property
     def priority(self) -> int:
@@ -108,6 +111,7 @@ class AgentStatus:
             "message": self.message,
             "origin": self.origin,
             "stale": self.stale,
+            "project": self.project,
         }
 
 

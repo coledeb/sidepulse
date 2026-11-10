@@ -1893,6 +1893,29 @@ class AgentMonitorTests(unittest.TestCase):
             self.assertEqual(title("Sidepulse: Fix the icons (1b52cf70)"), "Fix the icons  [Sidepulse]")
             self.assertEqual(title("Sidepulse (1b52cf70)"), "[Sidepulse]")
 
+        # A host's name for the project wins over its folder, and survives a save.
+        named = AgentStatus(
+            provider="claude",
+            agent_id="claude:session:c9ee1325",
+            display_name="Plex: Check Marshals S2E03 Replacement (c9ee1325)",
+            mode=AgentMode.COMPLETED,
+            updated_at=datetime.now(timezone.utc),
+            event_name="T3ThreadStatus",
+            session_id="c9ee1325-31d1-48c4-b3c2-1f492b095fcd",
+            cwd="/home/karly/docker/DUMB",
+            project="Plex",
+        )
+        reloaded = collector_module.agent_status_from_dict(named.to_dict())
+        self.assertEqual(reloaded.project, "Plex")
+        self.assertEqual(
+            status_bar.native_session_menu_title(reloaded),
+            "Check Marshals S2E03 Replacement  [Plex]",
+        )
+        self.assertEqual(
+            status_bar.native_session_menu_title(replace(named, display_name="Plex (c9ee1325)")),
+            "[Plex]",
+        )
+
     def test_project_name_reads_a_windows_folder(self) -> None:
         self.assertEqual(project_name("C:\\Users\\karly\\Sidepulse"), "Sidepulse")
         self.assertEqual(project_name("/home/karly/Sidepulse"), "Sidepulse")

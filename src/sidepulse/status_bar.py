@@ -103,7 +103,7 @@ from .audit import (
     read_status_history_records,
     status_history_record,
 )
-from .collector import LiveAgentMonitor, SourceSpec, default_sources, project_name
+from .collector import LiveAgentMonitor, SourceSpec, default_sources, status_project
 from .device_writer import (
     DEFAULT_FILE_NAME,
     MOUNT_ROOT,
@@ -6677,7 +6677,7 @@ def build_session_menu_item(
 
 def native_session_menu_title(status: AgentStatus, *, disambiguate: bool = False) -> str:
     title, project = session_title_parts(status)
-    cwd_project = project_name(status.cwd)
+    cwd_project = status_project(status)
     if (
         project is None
         and cwd_project
@@ -7256,7 +7256,7 @@ def primary_session_open_action(status: AgentStatus | object) -> str | None:
 
 
 def session_title_parts(status: AgentStatus) -> tuple[str, str | None]:
-    project = project_name(status.cwd)
+    project = status_project(status)
     title = strip_session_short_id(status.display_name, status.session_id)
     if project and title.startswith(f"{project}: "):
         title = title[len(project) + 2 :]

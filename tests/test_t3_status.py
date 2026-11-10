@@ -152,14 +152,28 @@ class PollerTests(unittest.TestCase):
 
     def test_rows_name_their_project_on_the_linked_machine(self) -> None:
         self.client.projects[KARLY_WSL] = [
-            {"id": "p1", "title": "Sidepulse (KARLY-WSL)", "workspaceRoot": "/home/karly/Sidepulse"},
+            {"id": "p1", "title": "Plex", "workspaceRoot": "/home/karly/docker/DUMB"},
+            {"id": "scratch", "title": "No project", "workspaceRoot": "/home/karly/.t3/scratch"},
         ]
         self.client.threads[KARLY_WSL] = [
             {**thread("t1", "running"), "projectId": "p1"},
-            {**thread("t2", "running"), "projectId": "unknown"},
+            {**thread("t2", "running"), "projectId": "scratch"},
+            {**thread("t3", "running"), "projectId": "unknown"},
         ]
         self.poller.poll_once()
-        self.assertEqual([record.cwd for record in self.records], ["/home/karly/Sidepulse", None])
+        self.assertEqual(
+            [(record.cwd, record.raw.get("sidepulse_project")) for record in self.records],
+            [("/home/karly/docker/DUMB", "Plex"), (None, None), (None, None)],
+        )
+
+        # The row is named after T3's project, not its folder.
+        monitor = LiveAgentMonitor()
+        for record in self.records:
+            monitor.ingest_record(record)
+        rows = {status.session_id: status for status in monitor.statuses_by_key.values()}
+        self.assertEqual(rows["t1"].project, "Plex")
+        self.assertEqual(rows["t1"].display_name, "Plex: Fix the build (t1)")
+        self.assertIsNone(rows["t2"].project)
 
         # A project T3 doesn't list is retried, but not on every poll.
         def project_fetches() -> int:
