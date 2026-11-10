@@ -8,7 +8,7 @@ import threading
 import time
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Callable, Iterable
 
 from .claude_session_state import confirmed_idle_at
@@ -2150,6 +2150,9 @@ def normalized_name_part(text: str) -> str:
 def project_name(cwd: str | None) -> str | None:
     if not cwd:
         return None
+    if "\\" in cwd and "/" not in cwd:
+        # A Windows folder on a linked machine, read from T3.
+        return PureWindowsPath(cwd).name or cwd
     path = Path(cwd)
     for candidate in (path, *path.parents):
         if (candidate / ".git").exists():

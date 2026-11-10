@@ -39,6 +39,7 @@ class FakeClient:
     def __init__(self) -> None:
         self.links = [{"environmentId": KARLY_WSL, "label": "KARLY-WSL", "status": "reachable"}]
         self.threads: dict[str, list[dict]] = {KARLY_WSL: []}
+        self.projects: dict[str, list[dict]] = {KARLY_WSL: []}
         self.fail: dict[str, Exception] = {}
         self.calls: list[tuple[str, dict]] = []
 
@@ -54,6 +55,8 @@ class FakeClient:
                 raise self.fail[environment]
             assert arguments["settled"] is False and arguments["allProjects"] is True
             return {"threads": list(self.threads.get(environment, [])), "nextCursor": None}
+        if name == "t3_project_list":
+            return {"projects": list(self.projects.get(arguments["environmentId"], [])), "nextCursor": None}
         raise AssertionError(name)
 
 
@@ -146,6 +149,35 @@ class PollerTests(unittest.TestCase):
         self.assertEqual(self.statuses(), ["working", "waiting", "completed"])
         self.assertFalse(self.poller.any_active)
         self.assertEqual(self.poller.next_interval(), t3_status.T3_IDLE_POLL_SECONDS)
+
+    def test_rows_name_their_project_on_the_linked_machine(self) -> None:
+        self.client.projects[KARLY_WSL] = [
+            {"id": "p1", "title": "Sidepulse (KARLY-WSL)", "workspaceRoot": "/home/karly/Sidepulse"},
+        ]
+        self.client.threads[KARLY_WSL] = [
+            {**thread("t1", "running"), "projectId": "p1"},
+            {**thread("t2", "running"), "projectId": "unknown"},
+        ]
+        self.poller.poll_once()
+        self.assertEqual([record.cwd for record in self.records], ["/home/karly/Sidepulse", None])
+
+        # A project T3 doesn't list is retried, but not on every poll.
+        def project_fetches() -> int:
+            return sum(1 for name, _args in self.client.calls if name == "t3_project_list")
+
+        self.clock.advance(10)
+        self.poller.poll_once()
+        self.assertEqual(project_fetches(), 1)
+        self.clock.advance(t3_status.T3_PROJECTS_REFRESH_SECONDS)
+        self.poller.poll_once()
+        self.assertEqual(project_fetches(), 2)
+
+    def test_project_list_failure_still_reports_the_thread(self) -> None:
+        self.client.fail["t3_project_list"] = t3_status.T3Error("timed out")
+        self.client.threads[KARLY_WSL] = [{**thread("t1", "running"), "projectId": "p1"}]
+        self.poller.poll_once()
+        self.assertEqual([(record.session_id, record.cwd) for record in self.records], [("t1", None)])
+        self.assertEqual(self.poller.state, t3_status.STATE_CONNECTED)
 
     def test_a_thread_seen_in_t3_clears_with_its_own_provider(self) -> None:
         self.client.threads[KARLY_WSL] = [thread("t1", "completed", provider="codex")]

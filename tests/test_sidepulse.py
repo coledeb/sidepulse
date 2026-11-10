@@ -1893,6 +1893,10 @@ class AgentMonitorTests(unittest.TestCase):
             self.assertEqual(title("Sidepulse: Fix the icons (1b52cf70)"), "Fix the icons  [Sidepulse]")
             self.assertEqual(title("Sidepulse (1b52cf70)"), "[Sidepulse]")
 
+    def test_project_name_reads_a_windows_folder(self) -> None:
+        self.assertEqual(project_name("C:\\Users\\karly\\Sidepulse"), "Sidepulse")
+        self.assertEqual(project_name("/home/karly/Sidepulse"), "Sidepulse")
+
     def test_status_bar_native_session_row_uses_task_title(self) -> None:
         try:
             from sidepulse import status_bar

@@ -58,6 +58,9 @@ T3_CONNECT_TIMEOUT_SECONDS = 15 * 60.0
 T3_ACTIVE_POLL_SECONDS = 3.0
 T3_IDLE_POLL_SECONDS = 15.0
 T3_LINKS_REFRESH_SECONDS = 60.0
+# A thread in a project SidePulse hasn't seen refetches that machine's project
+# list, but no more often than this.
+T3_PROJECTS_REFRESH_SECONDS = 60.0
 # An unchanged active thread is re-reported this often, so it never ages into
 # the monitor's stale window while it keeps running.
 T3_ACTIVE_HEARTBEAT_SECONDS = 60.0
@@ -457,6 +460,7 @@ def t3_thread_record(
     environment_label: str,
     status: str,
     observed_at: datetime,
+    cwd: str | None = None,
 ) -> HookEvent | None:
     thread_id = thread.get("threadId")
     if not isinstance(thread_id, str) or not thread_id:
@@ -476,12 +480,16 @@ def t3_thread_record(
         "t3code_environment_id": environment_id,
         "t3code_status": thread.get("status"),
     }
+    if cwd:
+        # The project's folder on that machine, so the row names its project.
+        raw["cwd"] = cwd
     return HookEvent(
         provider=provider,
         logged_at=logged_at,
         event_name=T3_EVENT_NAME,
         raw=raw,
         session_id=thread_id,
+        cwd=cwd,
         origin=origin,
     )
 
@@ -577,6 +585,8 @@ class T3StatusPoller:
         self.environments: tuple[tuple[str, str], ...] = ()
         self.links_checked_at: float | None = None
         self.tracked: dict[str, _Tracked] = {}
+        # environment id -> (monotonic time fetched, project id -> workspace root)
+        self.project_roots: dict[str, tuple[float, dict[str, str]]] = {}
         self.any_active = False
         self._stop = threading.Event()
         self._wake = threading.Event()
@@ -721,6 +731,44 @@ class T3StatusPoller:
             environments.append((environment_id, label))
         return tuple(environments)
 
+    def _project_roots(self, environment_id: str, threads: list[dict[str, Any]]) -> dict[str, str]:
+        """Each project's folder on that machine, refetched when a new project shows up."""
+        fetched_at, roots = self.project_roots.get(environment_id, (None, {}))
+        wanted = {
+            project_id
+            for thread in threads
+            if isinstance(project_id := thread.get("projectId"), str) and project_id
+        }
+        now = self.monotonic()
+        if wanted <= roots.keys() or (
+            fetched_at is not None and now - fetched_at < T3_PROJECTS_REFRESH_SECONDS
+        ):
+            return roots
+        fresh: dict[str, str] = {}
+        cursor: int | None = 0
+        try:
+            while cursor is not None and len(fresh) < 1000:
+                page = self.client.call_tool(
+                    "t3_project_list",
+                    {"environmentId": environment_id, "limit": 100, "cursor": cursor},
+                )
+                for project in page.get("projects") or ():
+                    if not isinstance(project, dict):
+                        continue
+                    project_id, root = project.get("id"), project.get("workspaceRoot")
+                    if isinstance(project_id, str) and isinstance(root, str) and root:
+                        fresh[project_id] = root
+                next_cursor = page.get("nextCursor")
+                cursor = next_cursor if isinstance(next_cursor, int) and next_cursor > cursor else None
+        except T3AuthError:
+            raise
+        except T3Error:
+            # Rows still show without a project; try again after the wait.
+            self.project_roots[environment_id] = (now, roots)
+            return roots
+        self.project_roots[environment_id] = (now, fresh)
+        return fresh
+
     def _unsettled_threads(self, environment_id: str) -> list[dict[str, Any]]:
         threads: list[dict[str, Any]] = []
         cursor: int | None = 0
@@ -829,6 +877,8 @@ class T3StatusPoller:
         prefix = f"{environment_id}/"
         seen: set[str] = set()
         any_active = False
+        threads = list(threads)
+        roots = self._project_roots(environment_id, threads)
         for thread in threads:
             thread_id = thread.get("threadId")
             if not isinstance(thread_id, str) or not thread_id:
@@ -854,6 +904,7 @@ class T3StatusPoller:
                 environment_label=label,
                 status=status,
                 observed_at=observed_at,
+                cwd=roots.get(str(thread.get("projectId") or "")),
             )
             if record is None:
                 continue
