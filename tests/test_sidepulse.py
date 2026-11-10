@@ -7675,6 +7675,57 @@ class AgentMonitorTests(unittest.TestCase):
             self.assertEqual(snapshot.aggregate.mode, AgentMode.WORKING)
             self.assertEqual(snapshot.statuses[0].event_name, "PostToolUse")
 
+    def test_a_failed_permission_gated_tool_does_not_pin_every_later_status(self) -> None:
+        """``PostToolUseFailure`` must clear its permission signature too.
+
+        ``track_pending_permissions`` only discarded a signature on ``PostToolUse``.
+        A gated command that fails logs ``PostToolUseFailure`` instead, so its
+        signature never left ``pending_permissions_by_key`` -- and since nothing
+        here ever fires ``SessionEnd`` to empty that set, every later status change
+        was swallowed by ``should_ignore_status_transition``, no matter how many
+        other permission prompts were granted and resolved cleanly afterward.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "claude.jsonl"
+            now = datetime.now(timezone.utc)
+            session_id = "claude-orphaned-failed-permission"
+
+            def event(offset: int, hook_event_name: str, command: str) -> dict:
+                return {
+                    "logged_at": (now + timedelta(seconds=offset)).isoformat(),
+                    "hook_event_name": hook_event_name,
+                    "session_id": session_id,
+                    "cwd": "/tmp/project",
+                    "tool_name": "Bash",
+                    "tool_input": {"command": command},
+                }
+
+            command_a = "gh pr view 317 --repo amp/example --json number 2>&1"
+            command_b = "gh auth status 2>&1"
+            command_c = "git status"
+            events = [
+                event(0, "PreToolUse", command_a),
+                event(1, "PermissionRequest", command_a),
+                event(2, "PostToolUseFailure", command_a),
+                event(3, "PreToolUse", command_b),
+                event(4, "PermissionRequest", command_b),
+                event(5, "PostToolUse", command_b),
+                event(6, "PreToolUse", command_c),
+                event(7, "PostToolUse", command_c),
+            ]
+            log.write_text("\n".join(json.dumps(e) for e in events) + "\n")
+
+            monitor = AgentMonitor(
+                sources=(SourceSpec("claude", log),),
+                stale_after_seconds=3600,
+            )
+            snapshot = monitor.snapshot()
+
+            self.assertEqual(len(snapshot.statuses), 1)
+            self.assertEqual(snapshot.statuses[0].event_name, "PostToolUse")
+            self.assertEqual(snapshot.statuses[0].mode, AgentMode.WORKING)
+
+
     def test_live_subagent_stop_clears_only_its_pending_permissions(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)

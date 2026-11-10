@@ -1577,7 +1577,7 @@ def track_pending_permissions(
         pending_permissions_by_key.setdefault(record.status_key, set()).add(signature)
         return
 
-    if record.event_name == "PostToolUse" and signature:
+    if record.event_name in {"PostToolUse", "PostToolUseFailure", "PermissionDenied"} and signature:
         pending = pending_permissions_by_key.get(record.status_key)
         if pending is not None:
             pending.discard(signature)
