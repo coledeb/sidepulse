@@ -35,6 +35,7 @@ try:
         NSCompositingOperationSourceOver,
         NSCompositingOperationSourceIn,
         NSEventTrackingRunLoopMode,
+        NSEventTypeLeftMouseUp,
         NSFont,
         NSFontAttributeName,
         NSFontWeightBold,
@@ -1273,10 +1274,44 @@ class StatusBarController(NSObject):
 
     @objc.IBAction
     def setDeviceBrightness_(self, sender):
+        """Continuous slider: update the percentage label on every drag tick, but
+        only apply/save the brightness on mouse-up (or after a short pause for
+        keyboard/scroll changes) so dragging doesn't flood the device."""
         device_id = sender.identifier()
         if device_id is None:
             return
-        self.set_device_brightness(str(device_id), sender.doubleValue())
+        value = normalize_brightness(sender.doubleValue())
+        update_brightness_label(sender, value)
+        self.pending_brightness = (str(device_id), value)
+        NSObject.cancelPreviousPerformRequestsWithTarget_selector_object_(
+            self, "commitPendingBrightness:", None
+        )
+        event = NSApplication.sharedApplication().currentEvent()
+        if event is not None and event.type() == NSEventTypeLeftMouseUp:
+            self.commitPendingBrightness_(None)
+            return
+        self.performSelector_withObject_afterDelay_inModes_(
+            "commitPendingBrightness:", None, 0.35, [NSRunLoopCommonModes]
+        )
+
+    @objc.IBAction
+    def commitPendingBrightness_(self, _sender):
+        pending = getattr(self, "pending_brightness", None)
+        self.pending_brightness = None
+        if pending is None:
+            return
+        device_id, value = pending
+        current = next(
+            (
+                device.brightness
+                for device in self.status_bar_devices(remember=False)
+                if device.device_id == device_id
+            ),
+            None,
+        )
+        if current is not None and normalize_brightness(current) == value:
+            return
+        self.set_device_brightness(device_id, value)
 
     @objc.IBAction
     def toggleVirtualStatusDevice_(self, _sender):
@@ -4390,7 +4425,7 @@ def build_device_menu_item(device: StatusBarDevice, target: StatusBarController)
 
     if device.device_id != VIRTUAL_DEVICE_ID and device.remote_link is None:
         submenu.addItem_(NSMenuItem.separatorItem())
-        submenu.addItem_(disabled_menu_item(f"Brightness {brightness_percent(device.brightness)}%"))
+        submenu.addItem_(disabled_menu_item(brightness_label_title(device.brightness)))
         submenu.addItem_(build_brightness_slider_item(device, target))
 
     if device.remote_link is not None:
@@ -4443,13 +4478,32 @@ def build_brightness_slider_item(
     slider.setMinValue_(0.0)
     slider.setMaxValue_(255.0)
     slider.setDoubleValue_(float(normalize_brightness(device.brightness)))
-    slider.setContinuous_(False)
+    slider.setContinuous_(True)
     slider.setTarget_(target)
     slider.setAction_("setDeviceBrightness:")
     slider.setIdentifier_(device.device_id)
     view.addSubview_(slider)
     item.setView_(view)
     return item
+
+
+def brightness_label_title(value: int | float | None) -> str:
+    return f"Brightness {brightness_percent(value)}%"
+
+
+def update_brightness_label(slider, value: int | float | None) -> None:
+    """Retitle the disabled "Brightness N%" row just above the slider's menu item,
+    in place, so it tracks the slider while the menu stays open."""
+    item = slider.enclosingMenuItem()
+    menu = item.menu() if item is not None else None
+    if menu is None:
+        return
+    index = menu.indexOfItem_(item) - 1
+    if index < 0:
+        return
+    label = menu.itemAtIndex_(index)
+    if label.title().startswith("Brightness "):
+        label.setTitle_(brightness_label_title(value))
 
 
 def build_setup_window(target: StatusBarController) -> NSWindow:

@@ -2048,6 +2048,17 @@ class AgentMonitorTests(unittest.TestCase):
         self.assertIn("Manual", titles)
         self.assertEqual(custom_view_count, 1)
 
+        slider_item = next(
+            submenu.itemAtIndex_(index)
+            for index in range(submenu.numberOfItems())
+            if submenu.itemAtIndex_(index).view() is not None
+        )
+        slider = slider_item.view().subviews()[0]
+        self.assertTrue(slider.isContinuous())
+        status_bar.update_brightness_label(slider, 191)
+        label = submenu.itemAtIndex_(submenu.indexOfItem_(slider_item) - 1)
+        self.assertEqual(label.title(), "Brightness 75%")
+
         custom_device = status_bar.StatusBarDevice(
             device_id="/Volumes/SidePulseDot",
             name="SidePulse Dot",
