@@ -243,6 +243,9 @@ class AgentMonitor:
                 metadata_by_status,
             )
             previous = statuses_by_key.get(record.status_key)
+            if is_empty_session_end(record, previous):
+                statuses_by_key.pop(record.status_key, None)
+                continue
             status = status_from_event(record, metadata, previous=previous)
             if status is not None:
                 track_pending_permissions(record, pending_permissions_by_key)
@@ -481,6 +484,10 @@ class LiveAgentMonitor:
                 self.metadata_by_status,
             )
             previous = self.statuses_by_key.get(record.status_key)
+            if is_empty_session_end(record, previous):
+                if self.statuses_by_key.pop(record.status_key, None) is not None:
+                    self.write_latest_state()
+                return
             status = status_from_event(record, metadata, previous=previous)
             if status is None:
                 return
@@ -1319,6 +1326,21 @@ def resolve_record_session(
     if thread_key or record.provider == "claude":
         return None
     return record
+
+
+def is_empty_session_end(record: HookEvent, previous: AgentStatus | None) -> bool:
+    """A session that ended without doing anything since it started.
+
+    Apps that bundle an agent (Tinycast, for one) start a session just to check
+    it works and close it a moment later: no prompt, no tool, no Stop. Nobody
+    used it, so it gets no row; the SessionStart row it left is removed too.
+    """
+    return (
+        record.event_name == "SessionEnd"
+        and previous is not None
+        and previous.event_name == "SessionStart"
+        and previous.mode == AgentMode.IDLE_READY
+    )
 
 
 def is_orphan_status(status: AgentStatus) -> bool:

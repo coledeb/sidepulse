@@ -6821,8 +6821,6 @@ def session_origin_icon_for_status(status: AgentStatus, *, dark_mode: bool | Non
     # fallback SF Symbol must be colored for the menu's appearance up front.
     provider_icon = appearance_colored_icon(provider_icon_for_status(status), dark_mode)
     host_icon = appearance_colored_icon(host_icon_for_origin(status.origin), dark_mode)
-    if host_icon is None:
-        return provider_icon
     return composite_app_icons(host_icon, provider_icon)
 
 
@@ -6919,30 +6917,52 @@ def first_app_icon(paths: tuple[str, ...]):
     return None
 
 
-def composite_app_icons(host_icon, provider_icon):
-    if provider_icon is None:
-        return host_icon
-    if host_icon is None:
-        return provider_icon
+ORIGIN_ICON_SIZE = 15.5
+ORIGIN_ICON_GAP = 2.0
+ORIGIN_ICON_WIDTH = ORIGIN_ICON_SIZE * 2 + ORIGIN_ICON_GAP
 
-    # Host app, then the agent it runs, side by side.
-    icon_size = 15.5
-    gap = 2.0
-    width = icon_size * 2 + gap
-    image = NSImage.alloc().initWithSize_((width, 18.0))
+
+def composite_app_icons(host_icon, provider_icon):
+    if host_icon is None and provider_icon is None:
+        return None
+
+    # Host app, then the agent it runs, side by side. Every row gets the same
+    # two-slot canvas, so a row without a host keeps the provider logo (and the
+    # status glyph before it) in the same column as rows that have one.
+    height = 18.0
+    image = NSImage.alloc().initWithSize_((ORIGIN_ICON_WIDTH, height))
     try:
         image.lockFocus()
-        for x, icon in ((0.0, host_icon), (icon_size + gap, provider_icon)):
+        for x, icon in (
+            (0.0, host_icon),
+            (ORIGIN_ICON_SIZE + ORIGIN_ICON_GAP, provider_icon),
+        ):
+            if icon is None:
+                continue
             icon.drawInRect_fromRect_operation_fraction_(
-                ((x, 1.25), (icon_size, icon_size)),
+                aspect_fit_rect(icon, (x, (height - ORIGIN_ICON_SIZE) / 2), ORIGIN_ICON_SIZE),
                 image_source_rect(icon),
                 NSCompositingOperationSourceOver,
                 1.0,
             )
     finally:
         image.unlockFocus()
-    image.setSize_((width, 18.0))
+    image.setSize_((ORIGIN_ICON_WIDTH, height))
     return image
+
+
+def aspect_fit_rect(icon, origin: tuple[float, float], box: float):
+    """Center ``icon`` in a ``box``-sized square at ``origin`` without stretching it."""
+    size = icon.size()
+    width, height = float(size.width), float(size.height)
+    if width <= 0 or height <= 0:
+        return (origin, (box, box))
+    scale = min(box / width, box / height)
+    draw_width, draw_height = width * scale, height * scale
+    return (
+        (origin[0] + (box - draw_width) / 2, origin[1] + (box - draw_height) / 2),
+        (draw_width, draw_height),
+    )
 
 
 def is_dark_appearance(appearance=None) -> bool:
@@ -6956,7 +6976,11 @@ def horizontal_icon_pair(left_icon, right_icon, *, dark_mode: bool | None = None
     if dark_mode is None:
         dark_mode = is_dark_appearance()
     left_width = GLYPH_CANVAS
-    right_width = float(right_icon.size().width)
+    # Scale the badge down to the row height if needed, never stretch it.
+    right_size = right_icon.size()
+    right_scale = min(1.0, 18.0 / max(float(right_size.height), 1.0))
+    right_width = float(right_size.width) * right_scale
+    right_height = float(right_size.height) * right_scale
     width = left_width + 3.0 + right_width
     height = 18.0
     image = NSImage.alloc().initWithSize_((width, height))
@@ -6975,7 +6999,7 @@ def horizontal_icon_pair(left_icon, right_icon, *, dark_mode: bool | None = None
             ((0.0, 0.0), (left_width, height)), NSCompositingOperationSourceIn,
         )
         right_icon.drawInRect_fromRect_operation_fraction_(
-            ((left_width + 3.0, 0.0), (right_width, height)),
+            ((left_width + 3.0, (height - right_height) / 2), (right_width, right_height)),
             image_source_rect(right_icon),
             NSCompositingOperationSourceOver,
             1.0,

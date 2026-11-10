@@ -1205,6 +1205,47 @@ class AgentMonitorTests(unittest.TestCase):
             self.assertEqual(reloaded.snapshot().aggregate.mode, AgentMode.TOOL_RUNNING)
             self.assertEqual(reloaded.snapshot().statuses[0].origin, "Codex UI")
 
+    def test_session_that_ends_without_doing_anything_gets_no_row(self) -> None:
+        """Apps that bundle Claude start and close a session just to probe it."""
+        start = datetime.now(timezone.utc)
+        events = [
+            ("probe", "SessionStart", {"source": "startup"}),
+            ("probe", "SessionEnd", {"reason": "other"}),
+            ("real", "SessionStart", {"source": "startup"}),
+            ("real", "UserPromptSubmit", {"prompt": "Fix the icons"}),
+            ("real", "Stop", {}),
+            ("real", "SessionEnd", {"reason": "other"}),
+        ]
+        lines = [
+            json.dumps({
+                "logged_at": (start + timedelta(seconds=index)).isoformat(),
+                "hook_event_name": event,
+                "session_id": session,
+                "cwd": "/tmp/Workspace",
+                **extra,
+            })
+            for index, (session, event, extra) in enumerate(events)
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "claude.jsonl"
+            log.write_text("\n".join(lines) + "\n")
+            replayed = AgentMonitor(
+                sources=(SourceSpec("claude", log),),
+                stale_after_seconds=999999999,
+            )
+            self.assertEqual(
+                [status.session_id for status in replayed.snapshot().statuses], ["real"],
+            )
+
+            live = LiveAgentMonitor(latest_state_path=Path(tmp) / "latest.json")
+            for line in lines:
+                record = parse_log_line("claude", line)
+                self.assertIsNotNone(record)
+                live.ingest_record(record)
+            self.assertEqual(
+                [status.session_id for status in live.snapshot().statuses], ["real"],
+            )
+
     def test_sessionless_t3_hook_joins_its_threads_session(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             latest = Path(tmp) / "latest.json"
@@ -1494,6 +1535,39 @@ class AgentMonitorTests(unittest.TestCase):
         self.assertIsNotNone(image)
         self.assertEqual(image.size().width, 33)
         self.assertEqual(image.size().height, 18)
+
+    def test_status_bar_hostless_origin_icon_keeps_the_two_slot_width(self) -> None:
+        """A row without a host app must line up with rows that have one."""
+        try:
+            from sidepulse import status_bar
+        except SystemExit as exc:
+            self.skipTest(str(exc))
+
+        def row_image(origin: str):
+            return status_bar.session_row_icon_for_status(AgentStatus(
+                provider="claude",
+                agent_id=f"claude:session:{origin}",
+                display_name="Claude abc",
+                mode=AgentMode.COMPLETED,
+                updated_at=datetime.now(timezone.utc),
+                event_name="Stop",
+                origin=origin,
+            ), dark_mode=False)
+
+        hosted = row_image("Claude in VS Code")
+        hostless = row_image("Claude")
+        self.assertEqual(hostless.size().width, hosted.size().width)
+        self.assertEqual(hostless.size().height, 18)
+
+    def test_status_bar_aspect_fit_rect_never_stretches(self) -> None:
+        try:
+            from sidepulse import status_bar
+        except SystemExit as exc:
+            self.skipTest(str(exc))
+
+        wide = SimpleNamespace(size=lambda: SimpleNamespace(width=32.0, height=16.0))
+        (x, y), (width, height) = status_bar.aspect_fit_rect(wide, (10.0, 1.0), 16.0)
+        self.assertEqual((x, y, width, height), (10.0, 5.0, 16.0, 8.0))
 
     def test_status_bar_session_row_icon_combines_status_and_origin(self) -> None:
         try:
