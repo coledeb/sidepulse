@@ -193,6 +193,22 @@ class PollerTests(unittest.TestCase):
         self.assertEqual([(record.session_id, record.cwd) for record in self.records], [("t1", None)])
         self.assertEqual(self.poller.state, t3_status.STATE_CONNECTED)
 
+        # Once the list comes back, the row is sent again with its project,
+        # even for a finished thread that wouldn't otherwise be re-reported.
+        del self.client.fail["t3_project_list"]
+        self.client.projects[KARLY_WSL] = [
+            {"id": "p1", "title": "Plex", "workspaceRoot": "/home/karly/docker/DUMB"},
+        ]
+        self.client.threads[KARLY_WSL] = [{**thread("t1", "completed"), "projectId": "p1"}]
+        self.poller.poll_once()
+        self.clock.advance(t3_status.T3_PROJECTS_REFRESH_SECONDS)
+        self.poller.poll_once()
+        self.poller.poll_once()
+        self.assertEqual(
+            [(record.raw["sidepulse_status"], record.raw.get("sidepulse_project")) for record in self.records],
+            [("working", None), ("completed", None), ("completed", "Plex")],
+        )
+
     def test_a_thread_seen_in_t3_clears_with_its_own_provider(self) -> None:
         self.client.threads[KARLY_WSL] = [thread("t1", "completed", provider="codex")]
         self.poller.poll_once()

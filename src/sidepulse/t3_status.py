@@ -571,6 +571,7 @@ class _Tracked:
     status: str
     provider: str
     reported_monotonic: float
+    project: T3Project = T3_UNKNOWN_PROJECT
 
 
 class T3StatusPoller:
@@ -789,8 +790,9 @@ class T3StatusPoller:
                 cursor = next_cursor if isinstance(next_cursor, int) and next_cursor > cursor else None
         except T3AuthError:
             raise
-        except T3Error:
+        except T3Error as exc:
             # Rows still show without a project; try again after the wait.
+            self.last_error = f"projects: {exc}"
             self.projects[environment_id] = (now, roots)
             return roots
         self.projects[environment_id] = (now, fresh)
@@ -922,10 +924,12 @@ class T3StatusPoller:
                     continue  # unseen for days: history, not news
             seen.add(key)
             any_active = any_active or active
-            if previous is not None and previous.status == status:
+            project = projects.get(str(thread.get("projectId") or ""), T3_UNKNOWN_PROJECT)
+            # A project learned after the row was reported (the list failed, or
+            # was renamed) is sent again even when nothing else changed.
+            if previous is not None and previous.status == status and previous.project == project:
                 if not active or now - previous.reported_monotonic < T3_ACTIVE_HEARTBEAT_SECONDS:
                     continue
-            project = projects.get(str(thread.get("projectId") or ""), T3_UNKNOWN_PROJECT)
             record = t3_thread_record(
                 thread,
                 environment_id=environment_id,
@@ -938,7 +942,7 @@ class T3StatusPoller:
             if record is None:
                 continue
             self.ingest(record)
-            self.tracked[key] = _Tracked(status, record.provider, now)
+            self.tracked[key] = _Tracked(status, record.provider, now, project)
 
         # A thread that left the unsettled list was looked at (or archived) in T3.
         for key in [key for key in self.tracked if key.startswith(prefix) and key not in seen]:
