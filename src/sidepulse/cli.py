@@ -204,6 +204,11 @@ def build_sidepulse_parser() -> argparse.ArgumentParser:
         help="Link an iPhone or Android phone, or connect this computer to a remote SidePulse receiver.",
     )
     link.add_argument("relay_code", nargs="?", help="Relay code printed by the receiving Mac.")
+    link.add_argument(
+        "--name",
+        help="Label the receiving Mac shows for this computer (default: Remote computer). "
+        "The hostname is never sent.",
+    )
     link.set_defaults(func=cmd_sidepulse_link)
 
     t3 = subparsers.add_parser(
@@ -760,7 +765,11 @@ def cmd_sidepulse_link(args: argparse.Namespace) -> int:
     relay_code = getattr(args, "relay_code", None)
     if relay_code:
         try:
-            config = configure_outbound_channel(relay_code, server=bridge_server())
+            config = configure_outbound_channel(
+                relay_code,
+                server=bridge_server(),
+                machine_name=getattr(args, "name", None),
+            )
         except LinkError as exc:
             print(f"sidepulse link: {exc}", file=sys.stderr)
             return 1
@@ -768,7 +777,11 @@ def cmd_sidepulse_link(args: argparse.Namespace) -> int:
             "Linked this computer to the remote SidePulse receiver "
             f"({config.outbound_channel[:12]})."
         )
-        print("Agent events will be relayed by the SidePulse background service.")
+        print("Agent status will be relayed by the SidePulse background service.")
+        print(
+            "Only the status, event name, ids, tool name and origin are sent; "
+            "prompts, tool input and output, and paths stay on this computer."
+        )
         return 0
 
     try:

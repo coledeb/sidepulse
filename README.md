@@ -316,7 +316,13 @@ sidepulse link AbCdEfGhIjKlMnOpQrStUv
 ```
 
 The VM stores that channel locally. Its agent hooks hand events to the
-background SidePulse service, which publishes them to the Mac. The Mac records
+background SidePulse service, which works out the agent status on the VM and
+publishes only that to the Mac: the event name, session/turn/agent ids, tool
+name, origin and status. Prompts, tool input and output, assistant messages
+and paths never leave the VM, and events that would not change the status are
+not sent. The Mac shows the VM as "Remote computer"; add `--name LABEL` to the
+`sidepulse link` command to pick another label. The hostname is not sent.
+The Mac records
 the remote events alongside its local agent history and updates its connected
 SidePulse hardware or linked iPhone. The VM is an event source, so it does not
 appear in the Devices menu.

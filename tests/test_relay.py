@@ -78,6 +78,20 @@ class RelayConfigTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(config.outbound_channel, "a" * 22)
 
+    def test_link_name_labels_this_computer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            environment = {
+                "HOME": str(home),
+                "XDG_CONFIG_HOME": str(home / ".config"),
+            }
+            with patch.dict(os.environ, environment):
+                result = sidepulse_main(["link", "a" * 22, "--name", "build-vm"])
+                config = load_relay_config()
+
+        self.assertEqual(result, 0)
+        self.assertEqual(config.machine_name, "build-vm")
+
     def test_link_without_a_code_creates_no_receiver(self) -> None:
         with self._isolated_config():
             with (
@@ -151,12 +165,52 @@ class RelayTransportTests(unittest.TestCase):
         provider, parsed_line, event_id = parsed
         self.assertEqual(provider, "claude")
         self.assertEqual(parsed_line["hook_event_name"], "Stop")
-        self.assertIn("sidepulse_relay_source", parsed_line)
+        self.assertEqual(parsed_line["sidepulse_status"], "completed")
+        self.assertEqual(parsed_line["sidepulse_relay_source"], "Remote computer")
         self.assertTrue(parsed_line["agent_id"].startswith("relay:"))
         self.assertTrue(event_id)
 
+    def test_event_message_carries_status_but_no_hook_content(self) -> None:
+        line = {
+            "hook_event_name": "PreToolUse",
+            "session_id": "vm-session",
+            "tool_name": "Bash",
+            "tool_input": {"command": "cat ~/.ssh/id_ed25519"},
+            "prompt": "secret prompt",
+            "cwd": "/Users/someone/private-project",
+            "transcript_path": "/Users/someone/.claude/projects/x.jsonl",
+        }
+        with patch("socket.gethostname", return_value="secret-host.local"):
+            message = relay_event_message("claude", line)
+
+        encoded = json.dumps(message)
+        for secret in ("id_ed25519", "secret prompt", "private-project", "x.jsonl", "secret-host"):
+            self.assertNotIn(secret, encoded)
+        self.assertEqual(message["line"]["tool_name"], "Bash")
+        self.assertEqual(message["line"]["sidepulse_status"], "tool_running")
+        self.assertEqual(message["source"]["name"], "Remote computer")
+
+    def test_question_ending_is_relayed_as_waiting(self) -> None:
+        line = {
+            "hook_event_name": "Stop",
+            "session_id": "vm-session",
+            "last_assistant_message": "Done. Should I push it?",
+        }
+        message = relay_event_message("claude", line)
+
+        self.assertEqual(message["line"]["sidepulse_status"], "waiting_for_input")
+        self.assertNotIn("push it", json.dumps(message))
+
+    def test_configured_machine_name_labels_the_source(self) -> None:
+        message = relay_event_message("claude", {"hook_event_name": "Stop"}, "build-vm")
+        self.assertEqual(message["source"]["name"], "build-vm")
+
+    def test_lines_without_an_event_are_not_relayed(self) -> None:
+        self.assertIsNone(relay_event_message("claude", {}))
+        self.assertIsNone(relay_event_message("codex", {"event": {"type": "task_complete"}}))
+
     def test_unknown_provider_is_rejected(self) -> None:
-        message = relay_event_message("claude", {})
+        message = relay_event_message("claude", {"hook_event_name": "Stop"})
         message["provider"] = "../../escape"
         self.assertIsNone(parse_relay_event(json.dumps(message)))
 
@@ -167,15 +221,24 @@ class RelayTransportTests(unittest.TestCase):
             server="https://bridge.sidepulse.io",
             outbound_channel="a" * 22,
         )
+        line = {"event": {"hook_event_name": "Stop", "session_id": "codex-session"}}
         with patch("sidepulse.relay.urllib.request.urlopen", return_value=response) as open_url:
-            publish_relay_event(config, "codex", {"event": {"type": "task_complete"}})
+            publish_relay_event(config, "codex", line)
 
         request = open_url.call_args.args[0]
         self.assertEqual(
             request.full_url,
             f"https://bridge.sidepulse.io/api/leds/{'a' * 22}",
         )
-        self.assertEqual(json.loads(request.data)["type"], "agent_event")
+        body = json.loads(request.data)
+        self.assertEqual(body["type"], "agent_event")
+        self.assertEqual(body["line"]["event"]["hook_event_name"], "Stop")
+
+    def test_publish_skips_lines_without_an_event(self) -> None:
+        config = RelayConfig(server="https://bridge.sidepulse.io", outbound_channel="a" * 22)
+        with patch("sidepulse.relay.urllib.request.urlopen") as open_url:
+            publish_relay_event(config, "codex", {"event": {"type": "task_complete"}})
+        open_url.assert_not_called()
 
     def test_hook_notifies_ui_and_background_service_sockets(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
