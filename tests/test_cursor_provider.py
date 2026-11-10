@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+import unittest.mock
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -170,6 +171,96 @@ class CursorProviderTests(unittest.TestCase):
         self.assertEqual(before["tool_name"], "read_file")
         self.assertEqual(failed["hook_event_name"], "StopFailure")
         self.assertEqual(failed["message"], "permission denied")
+
+
+
+class CursorT3HostTests(unittest.TestCase):
+    def _state_db(self, root: Path, agent_id: str, thread_id: str) -> Path:
+        import sqlite3
+
+        db = root / "statev2.sqlite"
+        connection = sqlite3.connect(db)
+        connection.execute(
+            "CREATE TABLE orchestration_v2_projection_provider_threads"
+            " (thread_id TEXT, driver TEXT, payload_json TEXT, updated_at TEXT)"
+        )
+        connection.execute(
+            "INSERT INTO orchestration_v2_projection_provider_threads VALUES (?, 'cursor', ?, ?)",
+            (thread_id, json.dumps({"nativeThreadRef": {"nativeId": agent_id}}), "2026-11-10T00:00:00Z"),
+        )
+        connection.commit()
+        connection.close()
+        return db
+
+    def test_t3_hosted_cursor_gets_t3_origin_and_thread_id(self) -> None:
+        from sidepulse.cursor_hook import detect_cursor_host
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db = self._state_db(Path(tmp), "agent-1", "thread-1")
+            host = detect_cursor_host(
+                {"conversation_id": "agent-1"},
+                env={"__CFBundleIdentifier": "com.t3tools.t3code.nightly"},
+                state_db=db,
+            )
+            self.assertEqual(host.label, "Cursor in T3 Code")
+            self.assertEqual(host.t3_thread_id, "thread-1")
+            event = normalize_payload("stop", {"conversation_id": "agent-1", "status": "completed"}, host)
+            self.assertEqual(event["agent_origin"], "Cursor in T3 Code")
+            self.assertEqual(event["t3code_thread_id"], "thread-1")
+
+    def test_cursor_app_keeps_cursor_origin(self) -> None:
+        from sidepulse.cursor_hook import CursorHost, detect_cursor_host
+
+        with unittest.mock.patch("sidepulse.cursor_hook.process_ancestry", return_value=()):
+            host = detect_cursor_host({"conversation_id": "a"}, env={"__CFBundleIdentifier": "com.todesktop.cursor"})
+        self.assertEqual(host, CursorHost())
+
+    def test_stop_reads_closing_question_from_transcript(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            transcript = Path(tmp) / "agent.jsonl"
+            transcript.write_text(
+                json.dumps({"role": "user", "message": {"content": [{"type": "text", "text": "Hi"}]}}) + "\n"
+                + json.dumps({"role": "assistant", "message": {"content": [
+                    {"type": "text", "text": "Checking."}, {"type": "tool_use", "name": "Read"}]}}) + "\n"
+                + json.dumps({"role": "assistant", "message": {"content": [
+                    {"type": "text", "text": "Hi. What would you like to work on?"}]}}) + "\n"
+            )
+            log = Path(tmp) / "cursor.jsonl"
+            stopped = normalize_payload(
+                "stop",
+                {"conversation_id": "c", "status": "completed", "transcript_path": str(transcript)},
+            )
+            self.assertEqual(stopped["last_assistant_message"], "Hi. What would you like to work on?")
+            stopped["logged_at"] = datetime.now(timezone.utc).isoformat()
+            log.write_text(json.dumps(stopped) + "\n")
+            snapshot = AgentMonitor(sources=(SourceSpec("cursor", log),), stale_after_seconds=3600).snapshot()
+            self.assertEqual(snapshot.statuses[0].mode, AgentMode.WAITING_FOR_INPUT)
+
+    def test_prompt_drops_what_t3_adds(self) -> None:
+        first = normalize_payload("beforeSubmitPrompt", {"prompt": (
+            "<t3_code_orchestration_instructions>## T3</t3_code_orchestration_instructions>\n"
+            "<user_request>\nTesting\n</user_request>\n<runtime_info>In case</runtime_info>\n"
+            "<pull_request_linking>\nLink <state>.\n</pull_request_linking>")})
+        self.assertEqual(first["prompt"], "Testing")
+        later = normalize_payload("beforeSubmitPrompt", {"prompt": (
+            "Nothing right now\n\n<runtime_info>In case</runtime_info>\n"
+            "<pull_request_linking>x</pull_request_linking>")})
+        self.assertEqual(later["prompt"], "Nothing right now")
+        plain = normalize_payload("beforeSubmitPrompt", {"prompt": "fix <div> tags"})
+        self.assertEqual(plain["prompt"], "fix <div> tags")
+
+    def test_per_turn_session_end_is_dropped(self) -> None:
+        self.assertIsNone(normalize_payload("sessionEnd", {"conversation_id": "c", "reason": "completed"}))
+        closed = normalize_payload("sessionEnd", {"conversation_id": "c", "reason": "window_close"})
+        self.assertEqual(closed["hook_event_name"], "SessionEnd")
+
+    def test_claude_hook_fired_by_cursor_is_ignored(self) -> None:
+        from sidepulse.hook import is_cursor_claude_compat_payload
+
+        self.assertTrue(is_cursor_claude_compat_payload(json.dumps(
+            {"conversation_id": "agent-1", "cursor_version": "1.0.0", "hook_event_name": "stop"})))
+        self.assertFalse(is_cursor_claude_compat_payload(json.dumps(
+            {"session_id": "s", "hook_event_name": "Stop"})))
 
 
 if __name__ == "__main__":

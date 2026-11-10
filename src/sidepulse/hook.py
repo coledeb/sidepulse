@@ -190,18 +190,36 @@ def latest_junie_hook_context(
     return fallback
 
 
+def is_cursor_claude_compat_payload(payload_text: str) -> bool:
+    """Whether a Claude hook was fired by Cursor running Claude-compatible hooks.
+
+    Cursor's agent (including in T3 Code) also runs the hooks in
+    ~/.claude/settings.json, with Cursor's payload. SidePulse's own Cursor hooks
+    report that turn already, so the Claude copy would only add a false Claude row.
+    """
+    try:
+        raw = json.loads(payload_text or "{}")
+    except json.JSONDecodeError:
+        return False
+    return isinstance(raw, dict) and "cursor_version" in raw
+
+
 def hook_log_main(provider: str, log_path: Path, event: str | None = None) -> int:
     try:
         payload_text = sys.stdin.read()
+        if provider == "claude" and is_cursor_claude_compat_payload(payload_text):
+            return 0
         if provider == "cursor" and event:
-            from .cursor_hook import normalize_payload
+            from .cursor_hook import detect_cursor_host, normalize_payload
 
             try:
                 raw = json.loads(payload_text or "{}")
             except json.JSONDecodeError:
                 raw = {}
             payload = raw if isinstance(raw, dict) else {}
-            normalized = normalize_payload(event, payload)
+            normalized = normalize_payload(event, payload, detect_cursor_host(payload))
+            if normalized is None:
+                return 0
             payload_text = json.dumps(normalized, separators=(",", ":"), ensure_ascii=False)
         elif provider == "antigravity" and event:
             from .antigravity_hook import normalize_payload as normalize_antigravity_payload
