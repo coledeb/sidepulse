@@ -4687,7 +4687,9 @@ class AgentMonitorTests(unittest.TestCase):
 
         with (
             patch.object(cli_module.sys, "platform", "darwin"),
-            patch.object(cli_module, "ensure_receiver_config", return_value=relay_config),
+            patch.object(
+                cli_module, "ensure_receiver_config", return_value=relay_config
+            ) as ensure_receiver,
             patch("sidepulse.service_launch.install_service", return_value=service_result) as service,
             patch.object(cli_module, "install_codex_hooks", return_value=codex_result) as codex,
             patch.object(cli_module, "install_claude_hooks", return_value=claude_result) as claude,
@@ -4726,6 +4728,7 @@ class AgentMonitorTests(unittest.TestCase):
         guard.assert_called_once_with(scope="auto", dry_run=False)
         launch.assert_called_once_with(start=True)
         service.assert_called_once_with(start=True, dry_run=False)
+        ensure_receiver.assert_not_called()
 
     def test_sidepulse_setup_no_status_bar_still_installs_guard(self) -> None:
         parser = cli_module.build_sidepulse_parser()

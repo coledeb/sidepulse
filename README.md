@@ -301,9 +301,15 @@ another bridge origin.
 
 ### Link a remote VM or computer (WIP)
 
-The receiving Mac gets a persistent, random relay channel during setup. Run
-`sidepulse link` on the Mac to see the short command for another computer, then
-paste that command into the VM. It looks like this:
+Setup does not turn the relay on. To let a Mac receive events, run this on
+the Mac:
+
+```sh
+sidepulse relay receive
+```
+
+It creates a persistent, random relay channel and prints the short command for
+the other computer. Paste that command into the VM. It looks like this:
 
 ```sh
 sidepulse link AbCdEfGhIjKlMnOpQrStUv
@@ -316,8 +322,11 @@ SidePulse hardware or linked iPhone. The VM is an event source, so it does not
 appear in the Devices menu.
 
 The channel is a 128-bit capability token: possession grants access, so treat
-the command like a password. There is no separate one-time code. Check the
-service on either computer with:
+the command like a password. There is no separate one-time code. If the code
+leaks, `sidepulse relay rotate` replaces it, and computers that use the old
+code stop reaching the Mac. `sidepulse relay off` removes the relay channel and
+any code set by `sidepulse link`, on either computer. Check the service on
+either computer with:
 
 ```sh
 sidepulse service status

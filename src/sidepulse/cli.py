@@ -66,9 +66,12 @@ from .links import (
     store_ios_link,
 )
 from .relay import (
+    clear_relay_channels,
     configure_outbound_channel,
     ensure_receiver_config,
+    load_relay_config,
     relay_link_command,
+    rotate_receiver_config,
 )
 from .lid_sleep import (
     install_sleep_helper,
@@ -221,6 +224,21 @@ def build_sidepulse_parser() -> argparse.ArgumentParser:
     )
     unlink.add_argument("link_id", nargs="?", help="Exact linked phone ID to remove.")
     unlink.set_defaults(func=cmd_sidepulse_unlink)
+
+    relay = subparsers.add_parser(
+        "relay",
+        help="Receive agent events from other computers through the SidePulse bridge.",
+    )
+    relay.add_argument(
+        "relay_command",
+        choices=("receive", "rotate", "off"),
+        help=(
+            "receive: create this Mac's relay code and show the link command; "
+            "rotate: replace the relay code so the old one stops working; "
+            "off: remove the relay code and any code set by `sidepulse link`."
+        ),
+    )
+    relay.set_defaults(func=cmd_sidepulse_relay)
 
     service = subparsers.add_parser(
         "service",
@@ -754,7 +772,7 @@ def cmd_sidepulse_link(args: argparse.Namespace) -> int:
         return 0
 
     try:
-        relay_config = ensure_receiver_config()
+        relay_config = load_relay_config()
         server = bridge_server()
         channel = new_pairing_channel()
         url = pairing_url(server, channel)
@@ -770,9 +788,12 @@ def cmd_sidepulse_link(args: argparse.Namespace) -> int:
 
     print("Link a remote computer")
     print()
-    print("Run this command on the VM or other computer:")
-    print()
-    print(f"  {relay_link_command(relay_config)}")
+    if relay_config.receives_events:
+        print("Run this command on the VM or other computer:")
+        print()
+        print(f"  {relay_link_command(relay_config)}")
+    else:
+        print("Run `sidepulse relay receive` to let this Mac receive agent events.")
     print()
 
     results: queue.Queue[IOSLink] = queue.Queue()
@@ -1138,15 +1159,32 @@ def cmd_sidepulse_sdejectguard_logs(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_sidepulse_relay(args: argparse.Namespace) -> int:
+    try:
+        if args.relay_command == "off":
+            clear_relay_channels()
+            print("Relay off: this computer no longer sends or receives agent events.")
+            return 0
+        if args.relay_command == "rotate":
+            config = rotate_receiver_config()
+            print("Replaced the relay code. Computers that use the old code stop reaching this Mac.")
+        else:
+            config = ensure_receiver_config()
+    except (LinkError, OSError) as exc:
+        print(f"sidepulse relay: {exc}", file=sys.stderr)
+        return 1
+    print("Run this command on the VM or other computer:")
+    print()
+    print(f"  {relay_link_command(config)}")
+    return 0
+
+
 def cmd_sidepulse_setup(args: argparse.Namespace) -> int:
     results = install_hook_results(args)
     print_install_results(results, dry_run=args.dry_run)
 
     from .service_launch import install_service
 
-    relay_config = None
-    if sys.platform == "darwin" and not args.dry_run:
-        relay_config = ensure_receiver_config()
     service_result = install_service(start=True, dry_run=args.dry_run)
     service_action = "would install" if args.dry_run else "installed"
     if service_result.started:
@@ -1156,8 +1194,6 @@ def cmd_sidepulse_setup(args: argparse.Namespace) -> int:
     print(f"background service: {service_action}")
     if str(service_result.path):
         print(f"  config: {service_result.path}")
-    if relay_config is not None:
-        print(f"remote computer: {relay_link_command(relay_config)}")
 
     if sys.platform != "darwin":
         print("macOS integrations: skipped (CLI-only setup on this platform)")

@@ -78,6 +78,63 @@ class RelayConfigTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(config.outbound_channel, "a" * 22)
 
+    def test_link_without_a_code_creates_no_receiver(self) -> None:
+        with self._isolated_config():
+            with (
+                patch("sidepulse.cli.PAIRING_TIMEOUT_SECONDS", 0),
+                patch("sidepulse.cli.listen_for_ios_registration"),
+                patch("sidepulse.cli.render_terminal_qr", return_value="QR"),
+                patch("sys.stdout", io.StringIO()) as output,
+            ):
+                sidepulse_main(["link"])
+            config = load_relay_config()
+
+        self.assertEqual(config.receiver_channel, "")
+        self.assertIn("sidepulse relay receive", output.getvalue())
+
+    def test_relay_receive_creates_a_receiver_and_prints_its_link_command(self) -> None:
+        with self._isolated_config():
+            with patch("sys.stdout", io.StringIO()) as output:
+                result = sidepulse_main(["relay", "receive"])
+            config = load_relay_config()
+
+        self.assertEqual(result, 0)
+        self.assertTrue(config.receiver_channel)
+        self.assertIn(f"sidepulse link {config.receiver_channel}", output.getvalue())
+
+    def test_relay_rotate_replaces_the_receiver_code(self) -> None:
+        with self._isolated_config():
+            first = ensure_receiver_config()
+            with patch("sys.stdout", io.StringIO()) as output:
+                result = sidepulse_main(["relay", "rotate"])
+            second = load_relay_config()
+
+        self.assertEqual(result, 0)
+        self.assertTrue(second.receiver_channel)
+        self.assertNotEqual(first.receiver_channel, second.receiver_channel)
+        self.assertIn(second.receiver_channel, output.getvalue())
+
+    def test_relay_off_removes_both_channels(self) -> None:
+        with self._isolated_config():
+            ensure_receiver_config()
+            configure_outbound_channel("a" * 22)
+            with patch("sys.stdout", io.StringIO()):
+                result = sidepulse_main(["relay", "off"])
+            config = load_relay_config()
+
+        self.assertEqual(result, 0)
+        self.assertFalse(config.receives_events)
+        self.assertFalse(config.publishes_events)
+
+    def _isolated_config(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        home = Path(tmp.name)
+        return patch.dict(
+            os.environ,
+            {"HOME": str(home), "XDG_CONFIG_HOME": str(home / ".config")},
+        )
+
     def test_long_state_paths_use_a_short_socket_path(self) -> None:
         path = relay_socket_path_for_state_dir(Path("/tmp") / ("very-long/" * 20))
         self.assertEqual(path.parent, Path("/tmp"))

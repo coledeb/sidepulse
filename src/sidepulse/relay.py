@@ -117,6 +117,18 @@ def ensure_receiver_config(path: Path | None = None) -> RelayConfig:
     return updated
 
 
+def rotate_receiver_config(path: Path | None = None) -> RelayConfig:
+    updated = replace(load_relay_config(path), receiver_channel=new_relay_channel())
+    save_relay_config(updated, path)
+    return updated
+
+
+def clear_relay_channels(path: Path | None = None) -> RelayConfig:
+    updated = replace(load_relay_config(path), receiver_channel="", outbound_channel="")
+    save_relay_config(updated, path)
+    return updated
+
+
 def configure_outbound_channel(
     channel: str,
     *,
