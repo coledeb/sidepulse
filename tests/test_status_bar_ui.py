@@ -1073,16 +1073,6 @@ class StatusIconAnimationTests(StatusBarTestCase):
             self.assertEqual(first.size(), later.size())
             self.assertIs(first, sb.animated_status_icon(state, 0))
 
-    def test_provider_badge_pixels_stay_stationary(self):
-        # Supply a real provider image independent of installed applications.
-        origin = sb.image_for_symbol("terminal", "Terminal")
-        frames = [sb.animated_session_row_icon(sb.STATE_WORKING, frame, origin) for frame in (0, 12)]
-        bitmaps = [NSBitmapImageRep.imageRepWithData_(frame.TIFFRepresentation()) for frame in frames]
-        start_x = int(19 * bitmaps[0].pixelsWide() / frames[0].size().width)
-        for y in range(bitmaps[0].pixelsHigh()):
-            for x in range(start_x, bitmaps[0].pixelsWide()):
-                self.assertEqual(bitmaps[0].colorAtX_y_(x, y), bitmaps[1].colorAtX_y_(x, y))
-
     def test_timer_stops_for_idle_done_and_hidden_icon(self):
         for state in (sb.STATE_WORKING, sb.STATE_ASK):
             self.target.status_item.isVisible.return_value = True
@@ -1109,25 +1099,21 @@ class StatusIconAnimationTests(StatusBarTestCase):
         self.target.update_status_icon_animation()
         self.assertEqual(self.renderer.update.call_count, 1)
 
-    def test_open_menu_animates_rows_and_closing_stops_row_animation(self):
+    def test_open_menu_keeps_rows_static_without_a_timer(self):
         self.target.current_state = sb.STATE_IDLE
         menu = NSMenu.alloc().init()
         for mode in (AgentMode.WORKING, AgentMode.WAITING_FOR_INPUT, AgentMode.COMPLETED):
             status = make_status(mode=mode, provider="nonsense")
             menu.addItem_(sb.build_session_menu_item(status, datetime.now(timezone.utc), self.target))
-        with patch.object(sb.time, "monotonic", return_value=0):
-            self.target.menuWillOpen_(menu)
         first = [bytes(item.image().TIFFRepresentation()) for item in menu.itemArray()]
+        self.target.menuWillOpen_(menu)
+        self.assertIsNone(self.target.status_icon_timer)
         with patch.object(sb.time, "monotonic", return_value=0.4):
             self.target.animateStatusIcons_(None)
         later = [bytes(item.image().TIFFRepresentation()) for item in menu.itemArray()]
-        self.assertNotEqual(first[0], later[0])
-        self.assertNotEqual(first[1], later[1])
-        self.assertEqual(first[2], later[2])
-        self.assertIsNotNone(self.target.status_icon_timer)
+        self.assertEqual(first, later)
         self.target.menuDidClose_(menu)
         self.assertIsNone(self.target.status_icon_timer)
-        self.assertIsNone(self.target.tracking_status_menu)
 
     def test_reduce_motion_keeps_static_icons(self):
         self.target.set_status(sb.STATE_WORKING)

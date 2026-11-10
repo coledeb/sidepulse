@@ -1428,17 +1428,8 @@ class StatusBarController(NSObject):
 
     def update_status_icon_animation(self) -> None:
         visible = self.status_item is not None and self.status_item.isVisible()
-        rows = []
-        if self.tracking_status_menu is not None:
-            for item in self.tracking_status_menu.itemArray():
-                status = item.representedObject()
-                if isinstance(status, AgentStatus):
-                    rows.append((item, status))
         motion = not NSWorkspace.sharedWorkspace().accessibilityDisplayShouldReduceMotion()
         animated_header = motion and visible and self.current_state in (STATE_WORKING, STATE_ASK)
-        animated_rows = motion and any(
-            state_for_mode(status.mode) in (STATE_WORKING, STATE_ASK) for _, status in rows
-        )
         frame = int(time.monotonic() / STATUS_ICON_FRAME_SECONDS) % STATUS_ICON_FRAME_COUNT
         renderer = getattr(self, "status_icon_renderer", None)
         native_failed = getattr(self, "status_icon_native_failed", False)
@@ -1472,9 +1463,9 @@ class StatusBarController(NSObject):
                 else image_for_symbol(state.symbol, state.label)
             )
 
-        # Header motion needs no Python frame timer. Menu rows retain their
-        # existing image animation while tracking, as does the error fallback.
-        animated = animated_rows or (animated_header and native_failed)
+        # Header motion runs in Core Animation with no Python frame timer. Menu
+        # rows stay static, so only the image fallback needs the timer.
+        animated = animated_header and native_failed
         if animated and self.status_icon_timer is None:
             self.status_icon_timer = NSTimer.timerWithTimeInterval_target_selector_userInfo_repeats_(
                 STATUS_ICON_FRAME_SECONDS, self, "animateStatusIcons:", None, True,
@@ -1485,13 +1476,6 @@ class StatusBarController(NSObject):
             run_loop.addTimer_forMode_(self.status_icon_timer, NSEventTrackingRunLoopMode)
         elif not animated:
             self.stop_status_icon_animation()
-
-        if rows:
-            dark_mode = is_dark_appearance(self.tracking_status_menu.effectiveAppearance())
-            for item, status in rows:
-                item.setImage_(session_row_icon_for_status(
-                    status, frame if animated_rows else None, dark_mode=dark_mode,
-                ))
 
     def build_monitor(self) -> LiveAgentMonitor:
         socket_path = default_event_socket_path()
@@ -6754,16 +6738,11 @@ def session_open_action_title(status: AgentStatus, action: str, settings=None) -
     return session_open_action_label(status, action)
 
 
-def session_row_icon_for_status(
-    status: AgentStatus, animation_frame: int | None = None, *, dark_mode: bool | None = None,
-):
+def session_row_icon_for_status(status: AgentStatus, *, dark_mode: bool | None = None):
+    # Rows are static: redrawing menu-item images per frame costs CPU while the
+    # menu is open, so only the menu-bar glyph (a Core Animation layer) moves.
     if dark_mode is None:
         dark_mode = is_dark_appearance()
-    state = state_for_mode(status.mode)
-    if animation_frame is not None and state in (STATE_WORKING, STATE_ASK):
-        return animated_session_row_icon(
-            state, animation_frame, session_origin_icon_for_status(status, dark_mode=dark_mode), dark_mode,
-        )
     cache_key = (
         status.mode.value,
         status.provider.lower(),
@@ -6822,17 +6801,6 @@ def animated_status_icon(state: StatusBarState, frame: int):
         image.unlockFocus()
     image.setTemplate_(True)
     return image
-
-
-@lru_cache(maxsize=512)
-def animated_session_row_icon(state: StatusBarState, frame: int, origin_icon, dark_mode: bool = False):
-    # Only the status glyph moves; the provider/host badge remains stationary.
-    icon = animated_status_icon(state, frame)
-    if origin_icon is None:
-        return icon
-    if icon is None:
-        return origin_icon
-    return horizontal_icon_pair(icon, origin_icon, dark_mode=dark_mode)
 
 
 def session_origin_icon_for_status(status: AgentStatus, *, dark_mode: bool | None = None):
