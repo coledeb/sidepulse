@@ -8704,6 +8704,184 @@ class AgentMonitorTests(unittest.TestCase):
             self.assertEqual(snapshot.aggregate.mode, AgentMode.COMPLETED)
             self.assertEqual(snapshot.statuses[0].event_name, "Stop")
 
+    def test_codex_guardian_rollout_folds_into_parent_thread(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            parent_id = "01a1c42b-ceb5-77a3-81f3-3b05bb40167d"
+            guardian_id = "01a1c42c-23f3-7693-a2bf-1b9ed5d3e816"
+            start = datetime.now(timezone.utc) - timedelta(seconds=30)
+
+            def at(seconds: int) -> str:
+                return (start + timedelta(seconds=seconds)).isoformat()
+
+            def write(path: Path, rows: list[dict[str, object]]) -> None:
+                path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+
+            write(
+                root / f"rollout-2026-11-10T00-36-07-{parent_id}.jsonl",
+                [
+                    {
+                        "timestamp": at(0),
+                        "type": "session_meta",
+                        "payload": {"id": parent_id, "source": "vscode"},
+                    },
+                    {
+                        "timestamp": at(0),
+                        "type": "turn_context",
+                        "payload": {"turn_id": "turn-1", "cwd": "/tmp/Vorssaint"},
+                    },
+                    {
+                        "timestamp": at(1),
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": "Ship the update"}],
+                        },
+                    },
+                    {
+                        "timestamp": at(2),
+                        "type": "response_item",
+                        "payload": {"type": "function_call", "name": "exec_command"},
+                    },
+                ],
+            )
+            write(
+                root / f"rollout-2026-11-10T00-36-29-{guardian_id}.jsonl",
+                [
+                    {
+                        "timestamp": at(3),
+                        "type": "session_meta",
+                        "payload": {
+                            "id": guardian_id,
+                            "parent_thread_id": parent_id,
+                            "source": {"subagent": {"other": "guardian"}},
+                            "thread_source": "guardian_review",
+                        },
+                    },
+                    {
+                        "timestamp": at(3),
+                        "type": "turn_context",
+                        "payload": {"turn_id": "review-1", "cwd": "/tmp/Vorssaint"},
+                    },
+                    {
+                        "timestamp": at(4),
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": "Assess this action?"}],
+                        },
+                    },
+                    {
+                        "timestamp": at(5),
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": '{"outcome":"allow"}'}],
+                        },
+                    },
+                    {
+                        "timestamp": at(5),
+                        "type": "event_msg",
+                        "payload": {"type": "task_complete", "last_agent_message": "{}"},
+                    },
+                ],
+            )
+
+            monitor = AgentMonitor(
+                sources=(SourceSpec("codex-transcripts", root),),
+                stale_after_seconds=3600,
+            )
+            snapshot = monitor.snapshot()
+
+            self.assertEqual([status.session_id for status in snapshot.statuses], [parent_id])
+            status = snapshot.statuses[0]
+            # The guardian's verdict doesn't end the parent's turn.
+            self.assertEqual(status.mode, AgentMode.WORKING)
+            self.assertIn("Ship the update", status.display_name)
+            self.assertNotIn("Assess", status.display_name)
+
+    def test_codex_transcript_title_skips_injected_agents_md(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            session_id = "01a1c42b-ceb5-77a3-81f3-3b05bb40167e"
+            now = datetime.now(timezone.utc).isoformat()
+
+            def user(text: str) -> dict[str, object]:
+                return {
+                    "timestamp": now,
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": text}],
+                    },
+                }
+
+            (root / f"rollout-2026-11-10T00-36-07-{session_id}.jsonl").write_text(
+                "\n".join(
+                    json.dumps(row)
+                    for row in (
+                        {
+                            "timestamp": now,
+                            "type": "turn_context",
+                            "payload": {"turn_id": "turn-1", "cwd": "/tmp/Vorssaint"},
+                        },
+                        user(
+                            "# AGENTS.md instructions for /tmp/Vorssaint\n\n"
+                            "<INSTRUCTIONS>\nIn this space, you are not working alone"
+                        ),
+                        user("<environment_context>\n  <cwd>/tmp/Vorssaint</cwd>"),
+                        user("Yo lets do the thing"),
+                    )
+                )
+                + "\n"
+            )
+
+            monitor = AgentMonitor(
+                sources=(SourceSpec("codex-transcripts", root),),
+                stale_after_seconds=3600,
+            )
+            snapshot = monitor.snapshot()
+
+            self.assertEqual(len(snapshot.statuses), 1)
+            self.assertIn("Yo lets do the thing", snapshot.statuses[0].display_name)
+            self.assertNotIn("AGENTS.md", snapshot.statuses[0].display_name)
+
+    def test_saved_codex_guardian_and_agents_md_rows_are_cleaned_on_load(self) -> None:
+        def saved(session_id: str, display_name: str) -> dict[str, object]:
+            return {
+                "provider": "codex",
+                "agent_id": f"codex:session:{session_id}",
+                "display_name": display_name,
+                "mode": "completed",
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "event_name": "Stop",
+                "session_id": session_id,
+                "cwd": "/tmp/Vorssaint",
+            }
+
+        titles = {"01a1c42c-23f3-7693-a2bf-1b9ed5d3e816": "Guardian review"}
+        with patch.object(collector_module, "codex_session_titles", return_value=titles):
+            guardian = collector_module.agent_status_from_dict(
+                saved(
+                    "01a1c42c-23f3-7693-a2bf-1b9ed5d3e816",
+                    "Vorssaint: Guardian review (01a1c42c)",
+                )
+            )
+            parent = collector_module.agent_status_from_dict(
+                saved(
+                    "01a1c42b-ceb5-77a3-81f3-3b05bb40167d",
+                    "Vorssaint: AGENTS.md instructions for ... In this space (01a1c42b)",
+                )
+            )
+            assert guardian is not None and parent is not None
+            self.assertTrue(collector_module.is_internal_status(guardian))
+            self.assertFalse(collector_module.is_internal_status(parent))
+            self.assertEqual(parent.display_name, "Vorssaint (01a1c42b)")
+
     def test_claude_transcript_fallback_marks_tool_calls_running(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

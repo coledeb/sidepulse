@@ -721,6 +721,14 @@ def iter_codex_transcript_file(path: Path) -> Iterable[HookEvent]:
     if session_id is None:
         return
 
+    # A subagent Codex starts on its own, such as the guardian that reviews
+    # approval requests in auto-review mode, writes its own rollout. Its work
+    # belongs to the thread that started it, not a row of its own.
+    parent_id = codex_subagent_parent_id(path)
+    if parent_id is not None:
+        yield from iter_codex_subagent_events(path, parent_id)
+        return
+
     cwd = None
     turn_id = None
     for line in read_recent_lines(path, CODEX_TRANSCRIPT_MAX_LINES):
@@ -754,6 +762,122 @@ def iter_codex_transcript_file(path: Path) -> Iterable[HookEvent]:
             yield event
 
 
+def codex_subagent_parent_id(path: Path) -> str | None:
+    """The parent thread of a subagent rollout, read from its session_meta line."""
+    try:
+        with path.open("rb") as handle:
+            first_line = handle.readline()
+    except OSError:
+        return None
+    try:
+        row = json.loads(first_line)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    if not isinstance(row, dict) or row.get("type") != "session_meta":
+        return None
+    meta = row.get("payload")
+    if not isinstance(meta, dict):
+        return None
+    source = meta.get("source")
+    if not isinstance(source, dict) or "subagent" not in source:
+        return None
+    return _string_or_none(meta.get("parent_thread_id"))
+
+
+def iter_codex_subagent_events(path: Path, parent_id: str) -> Iterable[HookEvent]:
+    """A subagent's activity as work on its parent thread.
+
+    The parent waits on the subagent, so a subagent turn starting or running a
+    tool shows as the parent working. Its prompt never titles the parent, and
+    its reply or finish is left out: the parent's own next event says where
+    the parent stands.
+    """
+    cwd = None
+    turn_id = None
+    for line in read_recent_lines(path, CODEX_TRANSCRIPT_MAX_LINES):
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(row, dict):
+            continue
+        payload = row.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        if row.get("type") == "turn_context":
+            cwd = _string_or_none(payload.get("cwd")) or cwd
+            turn_id = _string_or_none(payload.get("turn_id")) or turn_id
+            continue
+
+        payload_type = payload.get("type")
+        if payload_type == "message" and payload.get("role") == "user":
+            event_name = "SubagentStart"
+        elif payload_type == "function_call":
+            event_name = "PreToolUse"
+        elif payload_type == "function_call_output":
+            event_name = "PostToolUse"
+        else:
+            continue
+
+        tool_name = (
+            _string_or_none(payload.get("name")) if payload_type == "function_call" else None
+        )
+        raw: dict[str, Any] = {
+            "hook_event_name": event_name,
+            "session_id": parent_id,
+            "turn_id": turn_id,
+            "cwd": cwd,
+            "transcript_path": str(path),
+            "source": CODEX_TRANSCRIPT_PROVIDER,
+        }
+        if tool_name:
+            raw["tool_name"] = tool_name
+        if payload_type == "function_call_output":
+            raw["tool_response"] = payload.get("output")
+        yield HookEvent(
+            provider="codex",
+            logged_at=parse_transcript_timestamp(row),
+            event_name=event_name,
+            raw=raw,
+            session_id=parent_id,
+            turn_id=turn_id,
+            cwd=cwd,
+            tool_name=tool_name,
+        )
+
+
+# Context Codex adds to a thread as user messages before the user's own
+# prompt: the AGENTS.md text and the environment block. None of it is the
+# user's prompt, so none of it names a thread.
+CODEX_GUARDIAN_TITLE = "Guardian review"
+CODEX_AGENTS_MD_TITLE = "AGENTS.md instructions for"
+CODEX_INJECTED_CONTEXT_PREFIXES = (
+    "# agents.md instructions for",
+    "<environment_context>",
+    "<user_instructions>",
+    "<permissions instructions>",
+)
+
+
+def codex_user_prompt_text(content: object) -> str:
+    """A Codex user message's text without the context Codex injects."""
+    if isinstance(content, list):
+        content = [
+            item
+            for item in content
+            if not (
+                isinstance(item, dict)
+                and isinstance(item.get("text"), str)
+                and item["text"].lstrip().lower().startswith(CODEX_INJECTED_CONTEXT_PREFIXES)
+            )
+        ]
+    elif isinstance(content, str) and content.lstrip().lower().startswith(
+        CODEX_INJECTED_CONTEXT_PREFIXES
+    ):
+        return ""
+    return message_text_from_content(content)
+
+
 def codex_session_id_from_path(path: Path) -> str | None:
     match = re.search(
         r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})",
@@ -783,7 +907,9 @@ def codex_transcript_event(
     if payload_type == "message":
         role = payload.get("role")
         if role == "user":
-            prompt = message_text_from_content(payload.get("content"))
+            prompt = codex_user_prompt_text(payload.get("content"))
+            if not prompt.strip():
+                return None
             return HookEvent(
                 provider="codex",
                 logged_at=timestamp,
@@ -1183,7 +1309,13 @@ def is_orphan_status(status: AgentStatus) -> bool:
 def is_internal_status(status: AgentStatus) -> bool:
     """A saved row for a host's background prompt, such as T3 Code's title request."""
     name = status.display_name.lower()
-    return any(prompt in name for prompt in HOST_INTERNAL_PROMPTS)
+    if any(prompt in name for prompt in HOST_INTERNAL_PROMPTS):
+        return True
+    # Rows saved before Codex's guardian subagents were folded into their parent.
+    return (
+        status.provider == "codex"
+        and codex_session_title(status.session_id) == CODEX_GUARDIAN_TITLE
+    )
 
 
 def metadata_for_record(
@@ -1586,7 +1718,9 @@ def agent_status_from_dict(data: object) -> AgentStatus | None:
         display_name = str(data["display_name"])
         if provider == "codex" and session_id:
             title = codex_session_title(session_id)
-            if title:
+            if title or CODEX_AGENTS_MD_TITLE in display_name:
+                # A row saved before injected AGENTS.md context stopped naming
+                # threads falls back to the project name.
                 display_name = display_name_from_parts(
                     project_name(cwd),
                     title,
