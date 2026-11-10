@@ -155,6 +155,8 @@ def origin_from_processes(
         return surface_origin(provider, "app", "process:Claude.app")
     if provider == "opencode" and "opencode.app" in haystack:
         return surface_origin(provider, "app", "process:OpenCode.app")
+    if provider == "antigravity" and "antigravity.app" in haystack:
+        return surface_origin(provider, "app", "process:Antigravity.app")
     if provider == "grok" and "grok.app" in haystack:
         return surface_origin(provider, "app", "process:Grok.app")
     if provider == "junie" and any(
@@ -183,6 +185,8 @@ def origin_from_processes(
             return surface_origin(provider, "cli", "process:grok")
         if provider == "junie" and basename == "junie":
             return surface_origin(provider, "cli", "process:junie")
+        if provider == "antigravity" and basename == "agy":
+            return surface_origin(provider, "cli", "process:agy")
 
     return None
 
@@ -211,6 +215,8 @@ def surface_origin(provider: str, surface: str, source: str) -> AgentOrigin:
         ("junie", "ide"): "Junie in JetBrains IDE",
         ("junie", "transcript"): "Junie Transcript",
         ("opencode", "app"): "OpenCode Desktop",
+        ("antigravity", "app"): "Antigravity App",
+        ("antigravity", "cli"): "Antigravity CLI",
     }
     if surface == T3CODE_SURFACE:
         label = f"{provider_label(provider)} in T3 Code"

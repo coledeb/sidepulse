@@ -15,13 +15,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .antigravity_hook import ANTIGRAVITY_NATIVE_EVENTS, ANTIGRAVITY_TOOL_EVENTS
 from .providers import (
+    ANTIGRAVITY_HOOK_NAME,
     CLAUDE_EVENTS,
     CODEX_EVENTS,
     CURSOR_EVENTS,
     GROK_EVENTS,
     JUNIE_EVENTS,
     JUNIE_MONITOR_EVENTS,
+    antigravity_hook_config_paths,
     default_cursor_hook_config_path,
     default_grok_hook_config_path,
     default_junie_hook_config_path,
@@ -494,36 +497,140 @@ def cursor_hook_command(
     log_path: Path,
     python_executable: str | None = None,
 ) -> str:
+    return fail_open_command(
+        event_hook_command("cursor", event_name, log_path, python_executable)
+    )
+
+
+def event_hook_command(
+    provider: str,
+    event_name: str,
+    log_path: Path,
+    python_executable: str | None = None,
+) -> str:
+    """The hook-log command for a provider whose payload does not name its event."""
     executable = python_executable or sys.executable or "python3"
     if getattr(sys, "frozen", False) and python_executable is None:
-        command = " ".join(
-            [
-                shlex.quote(executable),
-                "agent-monitor",
-                "hook-log",
-                "--provider",
-                "cursor",
-                "--event",
-                shlex.quote(event_name),
-                "--log",
-                shlex.quote(str(log_path.expanduser())),
-            ]
-        )
-        return fail_open_command(command)
-    entry_point = Path(__file__).with_name("hook_entry.py")
-    command = " ".join(
+        head = [shlex.quote(executable), "agent-monitor", "hook-log"]
+    else:
+        head = [shlex.quote(executable), shlex.quote(str(Path(__file__).with_name("hook_entry.py")))]
+    return " ".join(
         [
-            shlex.quote(executable),
-            shlex.quote(str(entry_point)),
+            *head,
             "--provider",
-            "cursor",
+            shlex.quote(provider),
             "--event",
             shlex.quote(event_name),
             "--log",
             shlex.quote(str(log_path.expanduser())),
         ]
     )
-    return fail_open_command(command)
+
+
+# Antigravity waits on every hook before it continues the turn.
+ANTIGRAVITY_HOOK_TIMEOUT_SECONDS = 10
+
+
+def antigravity_hook_command(
+    event_name: str,
+    log_path: Path,
+    python_executable: str | None = None,
+) -> str:
+    # Antigravity reads a PreToolUse hook's stdout as a permission decision, and
+    # any JSON without one denies the tool, so nothing may reach stdout.
+    command = event_hook_command("antigravity", event_name, log_path, python_executable)
+    return f"{command} >/dev/null 2>&1 ; true"
+
+
+def antigravity_hook_spec(log_path: Path, python_executable: str | None = None) -> dict[str, Any]:
+    spec: dict[str, Any] = {}
+    for event_name in ANTIGRAVITY_NATIVE_EVENTS:
+        handler = {
+            "type": "command",
+            "command": antigravity_hook_command(event_name, log_path, python_executable),
+            "timeout": ANTIGRAVITY_HOOK_TIMEOUT_SECONDS,
+        }
+        if event_name in ANTIGRAVITY_TOOL_EVENTS:
+            spec[event_name] = [{"matcher": "*", "hooks": [handler]}]
+        else:
+            spec[event_name] = [handler]
+    return spec
+
+
+@dataclass(frozen=True)
+class AntigravityInstallResult(InstallResult):
+    """Antigravity has one hooks.json per GEMINI_HOME; ``config_paths`` lists each changed one."""
+
+    config_paths: tuple[Path, ...] = ()
+
+
+def install_antigravity_hooks(
+    log_path: Path | None = None,
+    config_paths: tuple[Path, ...] | None = None,
+    dry_run: bool = False,
+    python_executable: str | None = None,
+) -> AntigravityInstallResult:
+    configs = config_paths if config_paths is not None else antigravity_hook_config_paths()
+    target_log = (log_path or detect_log_path("antigravity")).expanduser()
+    spec = antigravity_hook_spec(target_log, python_executable)
+    changed_paths: list[Path] = []
+    backup = None
+    for config in configs:
+        data = read_json_config(config)
+        if data.get(ANTIGRAVITY_HOOK_NAME) == spec:
+            continue
+        data[ANTIGRAVITY_HOOK_NAME] = spec
+        changed_paths.append(config)
+        if dry_run:
+            continue
+        config.parent.mkdir(parents=True, exist_ok=True)
+        backup = backup_file(config) or backup
+        config.write_text(json.dumps(data, indent=2) + "\n")
+    if changed_paths and not dry_run:
+        target_log.parent.mkdir(parents=True, exist_ok=True)
+        target_log.touch(exist_ok=True)
+    return AntigravityInstallResult(
+        "antigravity",
+        configs[0],
+        target_log,
+        bool(changed_paths),
+        backup,
+        dry_run,
+        tuple(changed_paths),
+    )
+
+
+def uninstall_antigravity_hooks(
+    log_path: Path | None = None,
+    config_paths: tuple[Path, ...] | None = None,
+    dry_run: bool = False,
+) -> AntigravityInstallResult:
+    configs = config_paths if config_paths is not None else antigravity_hook_config_paths()
+    target_log = (log_path or detect_log_path("antigravity")).expanduser()
+    changed_paths: list[Path] = []
+    backup = None
+    for config in configs:
+        try:
+            data = read_json_config(config)
+        except (OSError, ValueError):
+            continue
+        if ANTIGRAVITY_HOOK_NAME not in data:
+            continue
+        data.pop(ANTIGRAVITY_HOOK_NAME)
+        changed_paths.append(config)
+        if dry_run:
+            continue
+        backup = backup_file(config) or backup
+        config.write_text(json.dumps(data, indent=2) + "\n")
+    return AntigravityInstallResult(
+        "antigravity",
+        configs[0],
+        target_log,
+        bool(changed_paths),
+        backup,
+        dry_run,
+        tuple(changed_paths),
+    )
 
 
 def remove_cursor_hook_entries(entries: list[Any]) -> list[Any]:

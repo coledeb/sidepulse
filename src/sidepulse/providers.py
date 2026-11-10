@@ -106,7 +106,22 @@ OPENCODE_EVENTS = (
 # The first line of the plugin SidePulse installs; a plugin without it is the user's.
 OPENCODE_PLUGIN_MARKER = "// sidepulse-opencode-plugin"
 
-HOOK_PROVIDERS = ("codex", "claude", "grok", "cursor", "junie", "opencode")
+# The SidePulse events SidePulse's Antigravity adapter reports, translated
+# from Antigravity's own hook events (see antigravity_hook.py).
+ANTIGRAVITY_EVENTS = (
+    "SessionStart",
+    "UserPromptSubmit",
+    "PreToolUse",
+    "PostToolUse",
+    "PostToolUseFailure",
+    "Stop",
+    "StopFailure",
+    "Interrupt",
+)
+# The named hook SidePulse owns in Antigravity's hooks.json.
+ANTIGRAVITY_HOOK_NAME = "sidepulse"
+
+HOOK_PROVIDERS = ("codex", "claude", "grok", "cursor", "junie", "opencode", "antigravity")
 KNOWN_EVENTS = tuple(
     dict.fromkeys(
         CODEX_EVENTS + CLAUDE_EVENTS + GROK_EVENTS + JUNIE_EVENTS + OPENCODE_EVENTS
@@ -172,6 +187,7 @@ def detect_provider_configs(home: Path | None = None) -> list[ProviderConfig]:
         detect_cursor_config(home),
         detect_junie_config(home),
         detect_opencode_config(home),
+        detect_antigravity_config(home),
     ]
 
 
@@ -477,6 +493,84 @@ def detect_opencode_config(home: Path | None = None) -> ProviderConfig:
     )
 
 
+def default_antigravity_hook_config_path(home: Path | None = None) -> Path:
+    """The hooks.json the agy CLI, the Antigravity IDE and the app all read."""
+    if home is None:
+        explicit = os.environ.get("GEMINI_HOME")
+        if explicit:
+            return Path(explicit).expanduser() / "config" / "hooks.json"
+    return (home or Path.home()) / ".gemini" / "config" / "hooks.json"
+
+
+def t3_antigravity_hook_config_paths(home: Path | None = None) -> tuple[Path, ...]:
+    """hooks.json in each private GEMINI_HOME T3 Code gives its Antigravity runtime.
+
+    T3 isolates Antigravity's credentials, hooks and MCP servers per provider
+    instance under ``~/.t3/userdata/providers/antigravity/<key>/``, so the global
+    hooks.json never reaches T3 threads.
+    """
+    root = (home or Path.home()) / ".t3" / "userdata" / "providers" / "antigravity"
+    try:
+        profiles = sorted(path for path in root.iterdir() if path.is_dir())
+    except OSError:
+        return ()
+    return tuple(profile / "config" / "hooks.json" for profile in profiles)
+
+
+def antigravity_hook_config_paths(home: Path | None = None) -> tuple[Path, ...]:
+    return (default_antigravity_hook_config_path(home), *t3_antigravity_hook_config_paths(home))
+
+
+def antigravity_managed_hook(data: Any) -> dict[str, Any] | None:
+    hook = data.get(ANTIGRAVITY_HOOK_NAME) if isinstance(data, dict) else None
+    return hook if isinstance(hook, dict) else None
+
+
+def antigravity_hook_commands(hook: dict[str, Any]) -> list[str]:
+    commands: list[str] = []
+    for entries in hook.values():
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            handlers = entry.get("hooks") if isinstance(entry.get("hooks"), list) else [entry]
+            commands.extend(
+                str(handler["command"])
+                for handler in handlers
+                if isinstance(handler, dict) and isinstance(handler.get("command"), str)
+            )
+    return commands
+
+
+def detect_antigravity_config(home: Path | None = None) -> ProviderConfig:
+    configs = antigravity_hook_config_paths(home)
+    config_path = configs[0]
+    exists = any(path.exists() for path in configs)
+    hook_events: list[str] = []
+    paths: list[Path] = []
+    for path in configs:
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        hook = antigravity_managed_hook(data)
+        if hook is None:
+            continue
+        if any(isinstance(entries, list) and entries for entries in hook.values()):
+            hook_events.extend(ANTIGRAVITY_EVENTS)
+        for command in antigravity_hook_commands(hook):
+            paths.extend(extract_log_paths_from_command(command))
+    return ProviderConfig(
+        "antigravity",
+        config_path,
+        exists,
+        bool(hook_events),
+        tuple(dict.fromkeys(hook_events)),
+        _dedupe_paths(paths),
+    )
+
+
 def detect_log_path(provider: str, home: Path | None = None) -> Path:
     if provider == "codex":
         config = detect_codex_config(home)
@@ -490,6 +584,8 @@ def detect_log_path(provider: str, home: Path | None = None) -> Path:
         config = detect_junie_config(home)
     elif provider == "opencode":
         config = detect_opencode_config(home)
+    elif provider == "antigravity":
+        config = detect_antigravity_config(home)
     else:
         config = ProviderConfig(provider, default_log_path(provider, home), False, False, (), ())
     if config.log_paths:

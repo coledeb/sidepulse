@@ -117,12 +117,14 @@ from .device_writer import (
 from .keep_awake import KEEPALIVE_FILE_NAME, KeepAwakeController
 from .ipc import HookEventServer, default_event_socket_path, default_latest_state_path
 from .install import (
+    install_antigravity_hooks,
     install_claude_hooks,
     install_codex_hooks,
     install_cursor_hooks,
     install_grok_hooks,
     install_junie_hooks,
     install_opencode_hooks,
+    uninstall_antigravity_hooks,
     uninstall_claude_hooks,
     uninstall_codex_hooks,
     uninstall_cursor_hooks,
@@ -161,6 +163,7 @@ from .lid_sleep import (
 from .models import AgentMode, AgentStatus, MODE_LABELS, provider_label
 from .providers import (
     ProviderConfig,
+    detect_antigravity_config,
     detect_claude_config,
     detect_codex_config,
     detect_cursor_config,
@@ -1136,6 +1139,14 @@ class StatusBarController(NSObject):
         self.update_hooks("opencode", install=False)
 
     @objc.IBAction
+    def installAntigravityHooks_(self, _sender):
+        self.update_hooks("antigravity", install=True)
+
+    @objc.IBAction
+    def uninstallAntigravityHooks_(self, _sender):
+        self.update_hooks("antigravity", install=False)
+
+    @objc.IBAction
     def toggleCodexTranscripts_(self, sender):
         self.set_transcript_monitoring("codex", sender.state() == NSOnState)
 
@@ -1809,6 +1820,7 @@ class StatusBarController(NSObject):
         cursor = detect_cursor_config()
         junie = detect_junie_config()
         opencode = detect_opencode_config()
+        antigravity = detect_antigravity_config()
         set_field_value(
             self.settings_fields.get("codex_hook_status"),
             hook_status_text(codex),
@@ -1832,6 +1844,10 @@ class StatusBarController(NSObject):
         set_field_value(
             self.settings_fields.get("opencode_hook_status"),
             hook_status_text(opencode),
+        )
+        set_field_value(
+            self.settings_fields.get("antigravity_hook_status"),
+            hook_status_text(antigravity),
         )
         set_field_value(
             self.settings_fields.get("settings_path"),
@@ -2064,6 +2080,10 @@ class StatusBarController(NSObject):
                 result = install_opencode_hooks()
             elif provider == "opencode":
                 result = uninstall_opencode_hooks()
+            elif provider == "antigravity" and install:
+                result = install_antigravity_hooks()
+            elif provider == "antigravity":
+                result = uninstall_antigravity_hooks()
             else:
                 raise ValueError(f"Unsupported hook provider: {provider}")
         except Exception as exc:
@@ -2079,6 +2099,8 @@ class StatusBarController(NSObject):
             message += " Restart Codex to activate them in new sessions."
         if provider == "opencode" and install and result.changed:
             message += " Restart OpenCode's service and T3 Code to load them."
+        if provider == "antigravity" and install and result.changed:
+            message += " New Antigravity sessions and T3 threads load them."
         self.set_settings_message(message)
         self.reload_monitor()
         self.refresh_settings_window()
@@ -5290,9 +5312,9 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
             agents_tab,
             "Install",
             primary_action_x,
-            y - 4,
+            y - 2,
             90,
-            28,
+            24,
             target,
             install_selector,
         )
@@ -5300,36 +5322,39 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
             agents_tab,
             "Uninstall",
             secondary_action_x,
-            y - 4,
+            y - 2,
             100,
-            28,
+            24,
             target,
             uninstall_selector,
         )
         return status
 
     codex_status = add_hook_row(
-        "Codex", 364, "installCodexHooks:", "uninstallCodexHooks:"
+        "Codex", 372, "installCodexHooks:", "uninstallCodexHooks:"
     )
     claude_status = add_hook_row(
-        "Claude", 338, "installClaudeHooks:", "uninstallClaudeHooks:"
+        "Claude", 348, "installClaudeHooks:", "uninstallClaudeHooks:"
     )
     grok_status = add_hook_row(
-        "Grok", 312, "installGrokHooks:", "uninstallGrokHooks:"
+        "Grok", 324, "installGrokHooks:", "uninstallGrokHooks:"
     )
     cursor_status = add_hook_row(
-        "Cursor", 286, "installCursorHooks:", "uninstallCursorHooks:"
+        "Cursor", 300, "installCursorHooks:", "uninstallCursorHooks:"
     )
     junie_status = add_hook_row(
-        "Junie", 260, "installJunieHooks:", "uninstallJunieHooks:"
+        "Junie", 276, "installJunieHooks:", "uninstallJunieHooks:"
     )
     opencode_status = add_hook_row(
-        "OpenCode", 234, "installOpenCodeHooks:", "uninstallOpenCodeHooks:"
+        "OpenCode", 252, "installOpenCodeHooks:", "uninstallOpenCodeHooks:"
+    )
+    antigravity_status = add_hook_row(
+        "Antigravity", 228, "installAntigravityHooks:", "uninstallAntigravityHooks:"
     )
 
-    add_separator(agents_tab, section_x, 222, tab_width - 48)
-    add_label(agents_tab, "Session Opening", section_x, 196, 240, 24)
-    add_label(agents_tab, "Terminal App", primary_action_x, 196, 200, 24)
+    add_separator(agents_tab, section_x, 218, tab_width - 48)
+    add_label(agents_tab, "Session Opening", section_x, 192, 240, 24)
+    add_label(agents_tab, "Terminal App", primary_action_x, 192, 200, 24)
 
     add_label(agents_tab, "Codex", label_x, 166, 90, 22)
     codex_opener = add_provider_opener_popup(
@@ -5618,6 +5643,7 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
         "cursor_hook_status": cursor_status,
         "junie_hook_status": junie_status,
         "opencode_hook_status": opencode_status,
+        "antigravity_hook_status": antigravity_status,
         "debug_log_status": debug_log_status,
         "codex_session_opener": codex_opener,
         "claude_session_opener": claude_opener,

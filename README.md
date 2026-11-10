@@ -370,7 +370,7 @@ SidePulse Pro and SidePulse Dot.
 
 #### AI Agent Monitoring
 
-SidePulse can monitor AI agents such as Codex, Claude, Grok, Cursor, Junie, and OpenCode through hooks, then
+SidePulse can monitor AI agents such as Codex, Claude, Grok, Cursor, Junie, OpenCode, and Antigravity through hooks, then
 translate the current agent state into a small, glanceable LED status.
 
 Agent status modes:
@@ -526,7 +526,7 @@ sidepulse setup
 ```
 
 `sidepulse setup` installs or refreshes all supported agent hooks, including
-Junie CLI and the OpenCode plugin, installs SidePulse Pro Eject Prevention, writes the status-bar
+Junie CLI, the OpenCode plugin and Antigravity, installs SidePulse Pro Eject Prevention, writes the status-bar
 LaunchAgent, starts both helpers immediately, and enables them at login. This is
 intentionally an explicit command instead of a `pip install` side effect. To set
 up only one provider, pass its name, for example `sidepulse setup junie`.
@@ -594,6 +594,7 @@ sidepulse agent-monitor install grok
 sidepulse agent-monitor install cursor
 sidepulse agent-monitor install junie
 sidepulse agent-monitor install opencode
+sidepulse agent-monitor install antigravity
 ```
 
 Each hook invokes a small, standard-library-only Python entry point. It writes
@@ -672,7 +673,7 @@ Codex `PermissionRequest` events are treated as Ask and remain sticky until the
 matching tool command finishes. This prevents unrelated same-session activity
 from hiding an approval prompt that is still waiting on the user.
 
-For Codex, Claude, Grok, Cursor, Junie, or OpenCode projects that should report this reliably, add
+For Codex, Claude, Grok, Cursor, Junie, OpenCode, or Antigravity projects that should report this reliably, add
 guidance like this to the relevant agent instructions:
 
 ```text
@@ -710,6 +711,7 @@ sidepulse agent-monitor uninstall grok
 sidepulse agent-monitor uninstall cursor
 sidepulse agent-monitor uninstall junie
 sidepulse agent-monitor uninstall opencode
+sidepulse agent-monitor uninstall antigravity
 ```
 
 Install and start the macOS status-bar app:
@@ -779,7 +781,7 @@ firmware/websim `sdled.wasm` engine, then AppKit only draws the returned RGB
 frames.
 
 Open `Settings...` from the dropdown to manage agent integrations. The settings
-window can install or uninstall Codex, Claude, Grok, Cursor, Junie, and OpenCode hooks. The transcript
+window can install or uninstall Codex, Claude, Grok, Cursor, Junie, OpenCode, and Antigravity hooks. The transcript
 checkboxes control the file-based CLI/debug fallback; the status-bar app gets
 live updates from the local hook event socket. Settings are stored at
 `${XDG_CONFIG_HOME:-~/.config}/sidepulse/agent-monitor/settings.json`.
@@ -802,6 +804,18 @@ clients, and restart T3 Code if it is already running OpenCode threads. Sessions
 in a server that T3 Code started show as "OpenCode in T3 Code". SidePulse checks
 the server's parent processes for this, not its environment, because the
 background service keeps whatever environment it was first started from.
+
+Antigravity support adds a `sidepulse` entry to `~/.gemini/config/hooks.json`,
+which the `agy` CLI, the Antigravity IDE and the app all read. T3 Code gives its
+Antigravity runtime a private home under
+`~/.t3/userdata/providers/antigravity/<id>/`, so the installer writes the same
+entry into each of those `config/hooks.json` files too; run the install again if
+T3 creates a new one (for example after changing Antigravity's sign-in). The hook
+only observes: Antigravity reads a `PreToolUse` hook's output as a permission
+decision, so SidePulse's hook prints nothing and approvals are unchanged.
+Antigravity has no hook for approval prompts, so a tool waiting for approval
+shows as Tool Running. A turn that ends on a question shows as Waiting for
+Input; SidePulse reads the reply from the session transcript.
 
 Settings can export the hook decision log as CSV or HTML. This log lives at
 `${XDG_STATE_HOME:-~/.local/state}/sidepulse/agent-monitor/event-status.jsonl`

@@ -36,12 +36,14 @@ from .hook import hook_log_main
 from .install import (
     install_claude_hooks,
     install_codex_hooks,
+    install_antigravity_hooks,
     install_cursor_hooks,
     install_grok_hooks,
     install_junie_hooks,
     install_opencode_hooks,
     uninstall_claude_hooks,
     uninstall_codex_hooks,
+    uninstall_antigravity_hooks,
     uninstall_cursor_hooks,
     uninstall_grok_hooks,
     uninstall_junie_hooks,
@@ -165,6 +167,7 @@ def build_sidepulse_parser() -> argparse.ArgumentParser:
     setup.add_argument("--cursor-log", type=Path, help="Cursor JSONL log path.")
     setup.add_argument("--junie-log", type=Path, help="Junie JSONL log path.")
     setup.add_argument("--opencode-log", type=Path, help="OpenCode JSONL log path.")
+    setup.add_argument("--antigravity-log", type=Path, help="Antigravity JSONL log path.")
     setup.add_argument("--dry-run", action="store_true", help="Show what would change.")
     setup.add_argument(
         "--sd-eject-guard-scope",
@@ -276,7 +279,7 @@ def add_hook_log_parser(subparsers: argparse._SubParsersAction) -> None:
     hook_log = subparsers.add_parser("hook-log", help="Internal hook logging entry point.")
     hook_log.add_argument("--provider", choices=HOOK_PROVIDERS, required=True)
     hook_log.add_argument("--log", type=Path, required=True)
-    hook_log.add_argument("--event", help="Provider-native lifecycle event name (used by cursor).")
+    hook_log.add_argument("--event", help="Provider-native lifecycle event name (used by cursor and antigravity).")
     hook_log.set_defaults(func=cmd_hook_log)
 
 
@@ -1304,6 +1307,7 @@ def build_parser(prog: str = "agent-monitor") -> argparse.ArgumentParser:
     install.add_argument("--cursor-log", type=Path, help="Cursor JSONL log path.")
     install.add_argument("--junie-log", type=Path, help="Junie JSONL log path.")
     install.add_argument("--opencode-log", type=Path, help="OpenCode JSONL log path.")
+    install.add_argument("--antigravity-log", type=Path, help="Antigravity JSONL log path.")
     install.add_argument("--dry-run", action="store_true", help="Show what would change.")
     install.set_defaults(func=cmd_install)
 
@@ -1315,6 +1319,7 @@ def build_parser(prog: str = "agent-monitor") -> argparse.ArgumentParser:
     uninstall.add_argument("--cursor-log", type=Path, help="Cursor JSONL log path.")
     uninstall.add_argument("--junie-log", type=Path, help="Junie JSONL log path.")
     uninstall.add_argument("--opencode-log", type=Path, help="OpenCode JSONL log path.")
+    uninstall.add_argument("--antigravity-log", type=Path, help="Antigravity JSONL log path.")
     uninstall.add_argument("--dry-run", action="store_true", help="Show what would change.")
     uninstall.set_defaults(func=cmd_uninstall)
 
@@ -1359,6 +1364,7 @@ def add_status_args(parser: argparse.ArgumentParser, include_json: bool = True) 
     parser.add_argument("--cursor-log", type=Path, help="Cursor JSONL log path.")
     parser.add_argument("--junie-log", type=Path, help="Junie JSONL log path.")
     parser.add_argument("--opencode-log", type=Path, help="OpenCode JSONL log path.")
+    parser.add_argument("--antigravity-log", type=Path, help="Antigravity JSONL log path.")
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
@@ -1518,6 +1524,8 @@ def install_hook_results(args: argparse.Namespace):
             results.append(install_grok_hooks(log_path=log_path, dry_run=args.dry_run))
         elif provider == "opencode":
             results.append(install_opencode_hooks(log_path=log_path, dry_run=args.dry_run))
+        elif provider == "antigravity":
+            results.append(install_antigravity_hooks(log_path=log_path, dry_run=args.dry_run))
         else:
             results.append(install_junie_hooks(log_path=log_path, dry_run=args.dry_run))
     return results
@@ -1530,9 +1538,14 @@ def print_install_results(results, *, dry_run: bool) -> None:
             action = "already configured"
         print(f"{result.provider}: {action}")
         print(f"  config: {result.config_path}")
+        for extra in getattr(result, "config_paths", ()):
+            if extra != result.config_path:
+                print(f"  config: {extra}")
         print(f"  log: {result.log_path}")
         if result.backup_path:
             print(f"  backup: {result.backup_path}")
+        if result.provider == "antigravity" and result.changed and not dry_run:
+            print("  Start a new Antigravity session (or T3 thread) to load the hooks.")
         if result.provider == "codex" and result.changed and not dry_run:
             print("  Restart Codex to activate these hooks in new sessions.")
         if result.provider == "opencode" and result.changed and not dry_run:
@@ -1556,6 +1569,8 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
             results.append(uninstall_grok_hooks(log_path=log_path, dry_run=args.dry_run))
         elif provider == "opencode":
             results.append(uninstall_opencode_hooks(log_path=log_path, dry_run=args.dry_run))
+        elif provider == "antigravity":
+            results.append(uninstall_antigravity_hooks(log_path=log_path, dry_run=args.dry_run))
         else:
             results.append(uninstall_junie_hooks(log_path=log_path, dry_run=args.dry_run))
 

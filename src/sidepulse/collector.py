@@ -623,6 +623,7 @@ def default_sources(settings: AgentMonitorSettings | None = None) -> tuple[Sourc
     sources.append(SourceSpec("grok", detect_log_path("grok")))
     sources.append(SourceSpec("junie", detect_log_path("junie")))
     sources.append(SourceSpec("opencode", detect_log_path("opencode")))
+    sources.append(SourceSpec("antigravity", detect_log_path("antigravity")))
     return unique_sources(sources)
 
 

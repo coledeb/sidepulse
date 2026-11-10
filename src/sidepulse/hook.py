@@ -203,6 +203,17 @@ def hook_log_main(provider: str, log_path: Path, event: str | None = None) -> in
             payload = raw if isinstance(raw, dict) else {}
             normalized = normalize_payload(event, payload)
             payload_text = json.dumps(normalized, separators=(",", ":"), ensure_ascii=False)
+        elif provider == "antigravity" and event:
+            from .antigravity_hook import normalize_payload as normalize_antigravity_payload
+
+            try:
+                raw = json.loads(payload_text or "{}")
+            except json.JSONDecodeError:
+                raw = {}
+            translated = normalize_antigravity_payload(event, raw if isinstance(raw, dict) else {})
+            if translated is None:
+                return 0
+            payload_text = json.dumps(translated, separators=(",", ":"), ensure_ascii=False)
         elif provider == "junie":
             try:
                 raw = json.loads(payload_text or "{}")
