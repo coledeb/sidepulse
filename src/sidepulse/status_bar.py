@@ -6858,20 +6858,10 @@ def provider_icon_for_provider(provider: str):
     provider = provider.lower()
     if provider in _provider_icon_cache:
         return _provider_icon_cache[provider]
-    image = None
-    if provider == "codex":
-        for path in ("/Applications/Codex.app", "/Applications/ChatGPT.app"):
-            image = app_icon(path)
-            if image is not None:
-                break
-        image = image or image_for_symbol("sparkles", "Codex")
-    elif provider == "claude":
-        image = app_icon("/Applications/Claude.app")
-        image = image or image_for_symbol("brain.head.profile", "Claude")
-    elif provider == "grok":
-        image = app_icon("/Applications/Grok.app")
-        image = image or grok_badge_icon()
-    else:
+    image = provider_mark_icon(provider)
+    if image is None and provider == "grok":
+        image = app_icon("/Applications/Grok.app") or grok_badge_icon()
+    elif image is None:
         # Any other provider resolves its own app by name, so a new agent needs no branch
         # here. Only providers with an alias or a custom glyph need one.
         image = provider_app_icon(provider)
@@ -7043,6 +7033,55 @@ def grok_badge_icon():
         image.unlockFocus()
     image.setSize_((18, 18))
     _grok_badge_icon = image
+    return image
+
+
+# Provider marks taken from T3 Code's icon set (MIT), so a row shows the agent's
+# own logo whether or not its desktop app is installed. Single-color marks are
+# templates, filled with the menu's text color like an SF Symbol.
+PROVIDER_MARKS_DIR = Path(__file__).parent / "resources" / "provider_icons"
+MONOCHROME_PROVIDER_MARKS = frozenset({"codex", "cursor"})
+PROVIDER_MARK_CANVAS = 32.0
+PROVIDER_MARK_INSET = 3.5  # matches the margin around a macOS app icon's artwork
+
+
+def provider_mark_icon(provider: str):
+    for suffix in (".svg", ".png"):
+        path = PROVIDER_MARKS_DIR / f"{provider}{suffix}"
+        if path.exists():
+            break
+    else:
+        return None
+    source = NSImage.alloc().initWithContentsOfFile_(str(path))
+    if source is None:
+        return None
+
+    # Fit the artwork, keeping its aspect ratio, inside an app-icon-sized margin
+    # so it sits level with the host app icon beside it.
+    width, height = source.size().width, source.size().height
+    if width <= 0 or height <= 0:
+        return None
+    box = PROVIDER_MARK_CANVAS - 2 * PROVIDER_MARK_INSET
+    scale = min(box / width, box / height)
+    draw_width, draw_height = width * scale, height * scale
+    image = NSImage.alloc().initWithSize_((PROVIDER_MARK_CANVAS, PROVIDER_MARK_CANVAS))
+    try:
+        image.lockFocus()
+        source.drawInRect_fromRect_operation_fraction_(
+            (
+                (
+                    (PROVIDER_MARK_CANVAS - draw_width) / 2,
+                    (PROVIDER_MARK_CANVAS - draw_height) / 2,
+                ),
+                (draw_width, draw_height),
+            ),
+            image_source_rect(source),
+            NSCompositingOperationSourceOver,
+            1.0,
+        )
+    finally:
+        image.unlockFocus()
+    image.setTemplate_(provider in MONOCHROME_PROVIDER_MARKS)
     return image
 
 

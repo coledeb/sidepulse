@@ -1239,28 +1239,33 @@ class IconTests(StatusBarTestCase):
             with self.subTest(provider=provider):
                 sb.provider_icon_for_provider(provider)
 
-    def test_mapped_providers_look_up_their_own_bundle(self):
-        """The generic fallback would absorb a deleted branch without failing.
+    def test_grok_looks_up_its_own_bundle(self):
+        """The generic fallback would absorb a deleted branch without failing."""
+        looked_up: list[str] = []
+        sb._provider_icon_cache.pop("grok", None)
+        self.addCleanup(sb._provider_icon_cache.pop, "grok", None)
+        with patch.object(sb, "app_icon", lambda path: looked_up.append(path) and None):
+            sb.provider_icon_for_provider("grok")
+        self.assertIn("/Applications/Grok.app", looked_up)
 
-        provider_app_icon("codex") resolves ChatGPT.app by name on its own, so removing
-        the codex branch still yields an icon and no test notices. Pin the bundle that
-        each explicit branch reads.
-        """
-        wanted = {
-            "codex": "/Applications/Codex.app",
-            "claude": "/Applications/Claude.app",
-            "grok": "/Applications/Grok.app",
-        }
-        for provider, bundle in wanted.items():
+    def test_bundled_provider_marks_win_over_app_lookup(self):
+        """Claude, Codex, Cursor and Antigravity draw T3 Code's marks, app or not."""
+        for provider in ("claude", "codex", "cursor", "antigravity"):
             with self.subTest(provider=provider):
-                looked_up: list[str] = []
                 sb._provider_icon_cache.pop(provider, None)
                 self.addCleanup(sb._provider_icon_cache.pop, provider, None)
-                with patch.object(
-                    sb, "app_icon", lambda path: looked_up.append(path) and None
-                ):
-                    sb.provider_icon_for_provider(provider)
-                self.assertIn(bundle, looked_up)
+                with patch.object(sb, "provider_app_icon") as resolve, patch.object(
+                    sb, "app_icon"
+                ) as app:
+                    image = sb.provider_icon_for_provider(provider)
+                resolve.assert_not_called()
+                app.assert_not_called()
+                self.assertIsInstance(image, NSImage)
+                self.assertEqual(image.size().width, sb.PROVIDER_MARK_CANVAS)
+                # Single-color marks follow the menu's appearance; Claude keeps its color.
+                self.assertEqual(
+                    bool(image.isTemplate()), provider in sb.MONOCHROME_PROVIDER_MARKS
+                )
 
     def test_opencode_uses_generic_app_resolution(self):
         """OpenCode may be registered outside the system Applications directory."""
