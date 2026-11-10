@@ -8826,6 +8826,11 @@ class AgentMonitorTests(unittest.TestCase):
                     for row in (
                         {
                             "timestamp": now,
+                            "type": "session_meta",
+                            "payload": {"id": session_id, "originator": "T3 Code"},
+                        },
+                        {
+                            "timestamp": now,
                             "type": "turn_context",
                             "payload": {"turn_id": "turn-1", "cwd": "/tmp/Vorssaint"},
                         },
@@ -8849,6 +8854,33 @@ class AgentMonitorTests(unittest.TestCase):
             self.assertEqual(len(snapshot.statuses), 1)
             self.assertIn("Yo lets do the thing", snapshot.statuses[0].display_name)
             self.assertNotIn("AGENTS.md", snapshot.statuses[0].display_name)
+            # The rollout names T3 Code as its originator.
+            self.assertEqual(snapshot.statuses[0].origin, "Codex in T3 Code")
+
+    def test_transcript_origin_does_not_replace_hook_origin(self) -> None:
+        metadata = collector_module.StatusMetadata()
+        now = datetime.now(timezone.utc)
+        hook = collector_module.HookEvent(
+            provider="codex",
+            logged_at=now,
+            event_name="PreToolUse",
+            raw={"session_id": "s1", "agent_origin": "Codex in T3 Code"},
+            session_id="s1",
+        )
+        transcript = collector_module.HookEvent(
+            provider="codex",
+            logged_at=now,
+            event_name="Stop",
+            raw={"session_id": "s1", "source": "codex-transcripts"},
+            session_id="s1",
+        )
+        collector_module.update_metadata(metadata, hook)
+        collector_module.update_metadata(metadata, transcript)
+        self.assertEqual(metadata.origin, "Codex in T3 Code")
+
+        fresh = collector_module.StatusMetadata()
+        collector_module.update_metadata(fresh, transcript)
+        self.assertEqual(fresh.origin, "Codex Transcript")
 
     def test_saved_codex_guardian_and_agents_md_rows_are_cleaned_on_load(self) -> None:
         def saved(session_id: str, display_name: str) -> dict[str, object]:

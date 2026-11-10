@@ -338,6 +338,11 @@ def is_relayed_origin(origin: str | None) -> bool:
     return RELAY_ORIGIN_SEPARATOR in str(origin or "")
 
 
+def is_transcript_origin(origin: str | None) -> bool:
+    """Whether an origin label only says SidePulse read the session's transcript."""
+    return str(origin or "").strip().lower().endswith(" transcript")
+
+
 def origin_label_from_payload(provider: str, raw: Mapping[str, Any]) -> str | None:
     for key in ("agent_origin", "agentOrigin", "agent_origin_label", "origin_label"):
         label = clean_label(raw.get(key))

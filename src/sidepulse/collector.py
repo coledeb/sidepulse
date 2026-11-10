@@ -23,9 +23,12 @@ from .models import (
 )
 from .origin import (
     RELAY_ORIGIN_SEPARATOR,
+    T3CODE_SURFACE,
     T3CODE_THREAD_KEY,
     is_t3code_origin,
+    is_transcript_origin,
     origin_label_from_payload,
+    surface_origin,
 )
 from .ipc import ensure_private_dir
 from .jsonl_log import DEFAULT_BACKUP_COUNT, backup_path
@@ -724,10 +727,12 @@ def iter_codex_transcript_file(path: Path) -> Iterable[HookEvent]:
     # A subagent Codex starts on its own, such as the guardian that reviews
     # approval requests in auto-review mode, writes its own rollout. Its work
     # belongs to the thread that started it, not a row of its own.
-    parent_id = codex_subagent_parent_id(path)
+    meta = codex_session_meta(path)
+    parent_id = codex_subagent_parent_id(meta)
     if parent_id is not None:
         yield from iter_codex_subagent_events(path, parent_id)
         return
+    origin = codex_transcript_origin(meta)
 
     cwd = None
     turn_id = None
@@ -759,11 +764,13 @@ def iter_codex_transcript_file(path: Path) -> Iterable[HookEvent]:
             path=path,
         )
         if event is not None:
+            if origin:
+                event.raw["agent_origin"] = origin
             yield event
 
 
-def codex_subagent_parent_id(path: Path) -> str | None:
-    """The parent thread of a subagent rollout, read from its session_meta line."""
+def codex_session_meta(path: Path) -> dict[str, Any] | None:
+    """The session_meta payload on a rollout's first line."""
     try:
         with path.open("rb") as handle:
             first_line = handle.readline()
@@ -776,7 +783,22 @@ def codex_subagent_parent_id(path: Path) -> str | None:
     if not isinstance(row, dict) or row.get("type") != "session_meta":
         return None
     meta = row.get("payload")
-    if not isinstance(meta, dict):
+    return meta if isinstance(meta, dict) else None
+
+
+def codex_transcript_origin(meta: dict[str, Any] | None) -> str | None:
+    """The host a rollout names as its originator, when SidePulse knows it."""
+    if meta is None:
+        return None
+    originator = _string_or_none(meta.get("originator"))
+    if originator and is_t3code_origin(originator):
+        return surface_origin("codex", T3CODE_SURFACE, "transcript:originator").label
+    return None
+
+
+def codex_subagent_parent_id(meta: dict[str, Any] | None) -> str | None:
+    """The parent thread of a subagent rollout."""
+    if meta is None:
         return None
     source = meta.get("source")
     if not isinstance(source, dict) or "subagent" not in source:
@@ -1352,7 +1374,9 @@ def update_metadata(metadata: StatusMetadata, record: HookEvent) -> None:
         metadata.title = title
 
     origin = record.origin or origin_label_from_payload(record.provider, record.raw)
-    if origin:
+    # Reading a transcript says nothing about the app the agent runs in, so
+    # it never replaces a host a hook already named.
+    if origin and not (metadata.origin and is_transcript_origin(origin)):
         metadata.origin = origin
 
 
