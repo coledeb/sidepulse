@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -423,6 +424,36 @@ class CleanInstallTests(unittest.TestCase):
             f"{output.strip()[:300]}"
         )
 
+
+    def test_status_bar_foreground_quits_on_ctrl_c_and_kill(self):
+        """Ctrl-C and `kill` must stop the Cocoa event loop, not be swallowed by it."""
+        config_dir = self.home / ".config/sidepulse/agent-monitor"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "settings.json").write_text(
+            json.dumps({"setup_screen_completed": True}), encoding="utf-8"
+        )
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            with self.subTest(signal=signum.name):
+                process = subprocess.Popen(
+                    [str(self.venv / "bin" / "sidepulse"), "status-bar", "start", "--foreground"],
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                    env=self.env(), cwd=str(self.home),
+                )
+                try:
+                    # Give it time to reach the Cocoa event loop.
+                    process.communicate(timeout=8)
+                except subprocess.TimeoutExpired:
+                    pass
+                else:
+                    self.skipTest(f"status-bar could not run a GUI here (rc={process.returncode})")
+                process.send_signal(signum)
+                try:
+                    process.communicate(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.communicate()
+                    self.fail(f"status-bar ignored {signum.name}")
+                self.assertEqual(process.returncode, 0)
 
 if __name__ == "__main__":
     unittest.main()

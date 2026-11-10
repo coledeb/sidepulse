@@ -192,6 +192,47 @@ class StatusBarTestCase(unittest.TestCase):
             raise unittest.SkipTest("StatusBarController could not be created")
 
 
+class QuitClearsLedsTests(StatusBarTestCase):
+    def setUp(self):
+        self.target = sb.StatusBarController.alloc().init()
+        self.targets = [Path("/Volumes/SidePulse/LEDS.LED"), Path("/Volumes/PulseDot/LEDS.LED")]
+        for context in (
+            patch.object(sb.StatusBarController, "current_led_targets", return_value=self.targets),
+            patch.object(sb, "log_status_bar"),
+        ):
+            context.start()
+            self.addCleanup(context.stop)
+
+    def test_terminate_turns_off_every_driven_device_and_stops_syncing(self):
+        with (
+            patch.object(sb, "write_led_program") as write,
+            patch.object(self.target.closed_lid_awake, "release"),
+            patch.object(self.target.keep_awake, "release"),
+        ):
+            self.target.applicationWillTerminate_(None)
+        self.assertEqual(
+            [(call.args, call.kwargs) for call in write.call_args_list],
+            [(("off",), {"device_path": target}) for target in self.targets],
+        )
+        with patch.object(sb.threading, "Thread") as thread:
+            self.target.sync_leds(AgentMode.WORKING, None, sb.LED_DISPLAY_AGENT)
+        thread.assert_not_called()
+
+    def test_one_failing_device_does_not_skip_the_others(self):
+        with patch.object(sb, "write_led_program", side_effect=[OSError("gone"), None]) as write:
+            self.target.clear_leds_on_quit()
+        self.assertEqual(write.call_count, 2)
+
+    def test_waits_for_an_in_flight_sync_and_respects_disabled_leds(self):
+        self.target.led_sync_in_flight = True
+        with patch.object(sb, "write_led_program") as write:
+            self.target.clear_leds_on_quit(wait_seconds=0.05)
+            self.assertEqual(write.call_count, 2)
+            self.target.leds_enabled = False
+            self.target.clear_leds_on_quit()
+            self.assertEqual(write.call_count, 2)
+
+
 class MenuBarVisibilityTests(StatusBarTestCase):
     def test_status_updates_keep_only_icon_with_accessible_state(self):
         controller = sb.StatusBarController.alloc().init()

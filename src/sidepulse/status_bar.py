@@ -4,6 +4,7 @@ import colorsys
 import json
 import math
 import shlex
+import signal
 import socket
 import subprocess
 import threading
@@ -664,6 +665,7 @@ class StatusBarController(NSObject):
         self.visualizer = VisualizerControl(default_state_dir() / "visualizer.log")
         self.leds_enabled = True
         self.led_sync_in_flight = False
+        self.terminating = False
         self.last_led_error = None
         self.last_led_display_kind = LED_DISPLAY_AGENT
         self.last_connected_device_signature = None
@@ -1359,7 +1361,11 @@ class StatusBarController(NSObject):
         NSApp.terminate_(self)
 
     def applicationWillTerminate_(self, _notification):
+        self.terminating = True
         NSWorkspace.sharedWorkspace().notificationCenter().removeObserver_(self)
+        self.stop_agent_animation_preview_timer()
+        self.visualizer.stop(own_only=True)
+        self.clear_leds_on_quit()
         self.stop_status_icon_animation()
         if self.status_icon_renderer is not None:
             self.status_icon_renderer.close()
@@ -3419,7 +3425,7 @@ class StatusBarController(NSObject):
         battery_snapshot: BatterySnapshot | None,
         display_kind: str,
     ) -> None:
-        if not self.leds_enabled:
+        if not self.leds_enabled or self.terminating:
             return
 
         self.sync_virtual_status_device(mode, battery_snapshot)
@@ -3628,7 +3634,7 @@ class StatusBarController(NSObject):
         *,
         animation: LedAnimationSetting | None = None,
     ) -> None:
-        if not self.leds_enabled:
+        if not self.leds_enabled or self.terminating:
             return
         if animation is None:
             state = (
@@ -3843,6 +3849,26 @@ class StatusBarController(NSObject):
             and self.last_led_error is None
             and not self.device_errors
         )
+
+    def clear_leds_on_quit(self, *, wait_seconds: float = 1.0) -> None:
+        """Turn off the local LEDs this app drives, so they stop showing a stale state.
+
+        One file write per quit, like a single status change. Linked phones are
+        left alone: no network on the way out.
+        """
+        if not self.leds_enabled:
+            return
+        # A sync started just before quitting would overwrite the "off".
+        deadline = time.monotonic() + wait_seconds
+        while self.led_sync_in_flight and time.monotonic() < deadline:
+            time.sleep(0.02)
+        for target in self.current_led_targets():
+            try:
+                write_led_program("off", device_path=target)
+            except Exception as exc:
+                log_status_bar(f"quit clear error target={target}: {exc}")
+            else:
+                log_status_bar(f"quit clear target={target}")
 
     def current_led_target(self) -> Path | None:
         targets = self.current_led_targets()
@@ -7826,12 +7852,29 @@ def applescript_quote(value: str) -> str:
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
+def install_termination_signals() -> None:
+    """Quit through NSApp on Ctrl-C and `kill`, so applicationWillTerminate_ cleans up.
+
+    Python signal handlers only run between bytecodes and never fire while
+    NSApplication.run() sits in the Cocoa event loop; MachSignals delivers the
+    signal to the run loop instead.
+    """
+    from PyObjCTools import MachSignals
+
+    def terminate(_signum: int) -> None:
+        NSApp.terminate_(None)
+
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        MachSignals.signal(signum, terminate)
+
+
 def run_status_bar(*, show_settings: bool = False) -> None:
     app = NSApplication.sharedApplication()
     app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
     controller = StatusBarController.alloc().init()
     controller.open_settings_on_launch = show_settings
     app.setDelegate_(controller)
+    install_termination_signals()
     app.run()
 
 
