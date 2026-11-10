@@ -65,7 +65,10 @@ def relay_socket_path_for_state_dir(state_dir: Path) -> Path:
     if len(str(path).encode("utf-8")) <= 96:
         return path
     digest = hashlib.sha256(str(path).encode("utf-8")).hexdigest()[:16]
-    return Path("/tmp") / f"sidepulse-relay-{os.getuid()}-{digest}.sock"
+    # A fixed per-user directory, not TMPDIR: hooks run in agent sandboxes that
+    # change TMPDIR, and both ends must name the same path. The server creates
+    # it 0700 and refuses one it does not own; senders skip it unless private.
+    return Path("/tmp") / f"sidepulse-{os.getuid()}" / f"relay-{digest}.sock"
 
 
 def new_relay_channel() -> str:

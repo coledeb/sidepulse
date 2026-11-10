@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
+import stat
 import threading
 import time
 from pathlib import Path
@@ -12,6 +14,37 @@ from .providers import candidate_state_dirs, default_state_dir
 
 MAX_EVENT_BYTES = 1024 * 1024
 HOOK_EVENT_SEND_TIMEOUT_SECONDS = 0.2
+PRIVATE_DIR_MODE = 0o700
+PRIVATE_SOCKET_MODE = 0o600
+
+
+def ensure_private_dir(path: Path) -> Path:
+    """Create ``path`` (new directories 0700) and refuse one this user does not own.
+
+    Hook payloads hold prompts and tool input, so the sockets that carry them
+    live in owner-only directories. A directory someone else created, or a
+    symlink planted in a shared location, is rejected rather than used.
+    """
+    path.mkdir(parents=True, exist_ok=True, mode=PRIVATE_DIR_MODE)
+    info = path.lstat()
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+        raise OSError(f"{path} is not a directory owned by this user")
+    if info.st_mode & 0o777 != PRIVATE_DIR_MODE:
+        path.chmod(PRIVATE_DIR_MODE)
+    return path
+
+
+def directory_is_private(path: Path) -> bool:
+    """True when ``path`` is a real directory owned by this user that only it can enter."""
+    try:
+        info = path.lstat()
+    except OSError:
+        return False
+    return (
+        stat.S_ISDIR(info.st_mode)
+        and info.st_uid == os.getuid()
+        and info.st_mode & 0o077 == 0
+    )
 
 
 def default_event_socket_path() -> Path:
@@ -70,6 +103,9 @@ def send_hook_event(
 
 
 def _send_payload(target: Path, payload: bytes, timeout: float) -> bool:
+    # Never hand a hook payload to a socket another user could have bound.
+    if not directory_is_private(target.parent):
+        return False
     client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     client.settimeout(timeout)
     try:
@@ -98,7 +134,7 @@ class HookEventServer:
         self.running = False
 
     def start(self) -> Path:
-        self.socket_path.parent.mkdir(parents=True, exist_ok=True)
+        ensure_private_dir(self.socket_path.parent)
         try:
             self.socket_path.unlink()
         except FileNotFoundError:
@@ -106,6 +142,9 @@ class HookEventServer:
 
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         server.bind(str(self.socket_path))
+        # The 0700 parent already keeps other users out; this covers a socket
+        # left behind if the directory is ever loosened.
+        os.chmod(self.socket_path, PRIVATE_SOCKET_MODE)
         server.listen(16)
         server.settimeout(0.5)
         self.socket = server

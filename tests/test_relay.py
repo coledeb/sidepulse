@@ -151,7 +151,7 @@ class RelayConfigTests(unittest.TestCase):
 
     def test_long_state_paths_use_a_short_socket_path(self) -> None:
         path = relay_socket_path_for_state_dir(Path("/tmp") / ("very-long/" * 20))
-        self.assertEqual(path.parent, Path("/tmp"))
+        self.assertEqual(path.parent, Path("/tmp") / f"sidepulse-{os.getuid()}")
         self.assertLessEqual(len(str(path).encode("utf-8")), 96)
 
 
