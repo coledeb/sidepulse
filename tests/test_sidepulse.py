@@ -1868,6 +1868,31 @@ class AgentMonitorTests(unittest.TestCase):
         self.assertIn("Open in VS Code", titles)
         self.assertIn("Resume in Terminal", titles)
 
+    def test_status_bar_native_session_row_brackets_the_project(self) -> None:
+        try:
+            from sidepulse import status_bar
+        except SystemExit as exc:
+            self.skipTest(str(exc))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cwd = Path(tmp) / "Sidepulse"
+            (cwd / ".git").mkdir(parents=True)
+
+            def title(display_name: str) -> str:
+                return status_bar.native_session_menu_title(AgentStatus(
+                    provider="claude",
+                    agent_id="claude:session:abc",
+                    display_name=display_name,
+                    mode=AgentMode.COMPLETED,
+                    updated_at=datetime.now(timezone.utc),
+                    event_name="Stop",
+                    session_id="1b52cf70-f938-42a2-9e2f-97c7b50bb0f7",
+                    cwd=str(cwd),
+                ))
+
+            self.assertEqual(title("Sidepulse: Fix the icons (1b52cf70)"), "Fix the icons  [Sidepulse]")
+            self.assertEqual(title("Sidepulse (1b52cf70)"), "[Sidepulse]")
+
     def test_status_bar_native_session_row_uses_task_title(self) -> None:
         try:
             from sidepulse import status_bar
@@ -2053,8 +2078,8 @@ class AgentMonitorTests(unittest.TestCase):
             if menu.itemAtIndex_(index).title()
         ]
 
-        self.assertIn("What is here (019ffd37)  msdosfs", titles)
-        self.assertIn("What is here (019ffd2e)  msdosfs", titles)
+        self.assertIn("What is here (019ffd37)  [msdosfs]", titles)
+        self.assertIn("What is here (019ffd2e)  [msdosfs]", titles)
 
     def test_status_bar_recent_statuses_coalesce_subagents_by_session(self) -> None:
         try:

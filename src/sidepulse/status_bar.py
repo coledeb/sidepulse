@@ -6677,11 +6677,19 @@ def build_session_menu_item(
 
 def native_session_menu_title(status: AgentStatus, *, disambiguate: bool = False) -> str:
     title, project = session_title_parts(status)
+    cwd_project = project_name(status.cwd)
+    if (
+        project is None
+        and cwd_project
+        and normalized_menu_part(cwd_project) == normalized_menu_part(title)
+    ):
+        # A session with no title of its own is named after its project.
+        title = f"[{title}]"
     if disambiguate and status.session_id:
         title = f"{title} ({status.session_id[:8]})"
     parts = [title]
     if project:
-        parts.append(project)
+        parts.append(f"[{project}]")
     return "  ".join(parts)
 
 
