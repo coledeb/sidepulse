@@ -1115,12 +1115,12 @@ def save_settings(
             file_name = animation.file_name or custom_agent_animation_file_name(
                 animation_id
             )
-            animation_path = animation_dir / file_name
-            if not animation_path.exists():
-                animation_path.write_text(
-                    normalize_animation_file_program(animation.program) + "\n",
-                    encoding="utf-8",
-                )
+            # The file is the only store of the program: to_dict writes the name
+            # and file name, and load_settings reads the program back from here.
+            (animation_dir / file_name).write_text(
+                normalize_animation_file_program(animation.program) + "\n",
+                encoding="utf-8",
+            )
     target.write_text(json.dumps(settings.to_dict(), indent=2, sort_keys=True) + "\n")
     return target
 

@@ -191,6 +191,7 @@ from sidepulse.settings import (
     agent_animation_profile_document,
     agent_animation_profile_id,
     builtin_agent_animation_profiles,
+    custom_agent_animation_file_name,
     custom_agent_animation_id,
     default_agent_animation_id,
     default_config_dir,
@@ -6530,6 +6531,44 @@ class AgentMonitorTests(unittest.TestCase):
                 reloaded.agent_animation(AgentMode.BLOCKED_ERROR).custom_program,
                 "brightness 128\n#123456",
             )
+
+    def test_settings_save_an_edited_custom_animation_program(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings_path = Path(tmp) / "settings.json"
+            animation_id = "custom:custom-working"
+            first = AgentMonitorSettings().with_custom_agent_animation(
+                animation_id, name="Custom working", program="#111111"
+            )
+            save_settings(first, settings_path)
+
+            edited = load_settings(settings_path).with_custom_agent_animation(
+                animation_id, name="Custom working", program="#222222"
+            )
+            save_settings(edited, settings_path)
+            loaded = load_settings(settings_path)
+
+        self.assertEqual(
+            loaded.custom_agent_animations[animation_id].program,
+            "#222222",
+        )
+
+    def test_settings_do_not_revive_a_stale_file_for_a_reused_animation_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings_path = Path(tmp) / "settings.json"
+            animation_id = "custom:imported"
+            stale = settings_path.parent / "animations" / custom_agent_animation_file_name(
+                animation_id
+            )
+            stale.parent.mkdir(parents=True)
+            stale.write_text("#DEAD00\n")
+
+            imported = AgentMonitorSettings().with_custom_agent_animation(
+                animation_id, name="Imported", program="#00BEEF"
+            )
+            save_settings(imported, settings_path)
+            loaded = load_settings(settings_path)
+
+        self.assertEqual(loaded.custom_agent_animations[animation_id].program, "#00BEEF")
 
     def test_agent_animation_catalog_is_shared_by_every_state(self) -> None:
         settings = AgentMonitorSettings()
