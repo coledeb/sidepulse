@@ -8,6 +8,12 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from .battery import BatterySnapshot
+from .jsonl_log import (
+    DEFAULT_BACKUP_COUNT,
+    DEFAULT_MAX_BYTES,
+    append_jsonl_line,
+    backup_path,
+)
 from .lid_sleep import MacSleepSnapshot
 from .models import AgentStatus, HookEvent
 from .providers import default_state_dir
@@ -17,6 +23,21 @@ STATUS_AUDIT_LOG_NAME = "event-status.jsonl"
 STATUS_HISTORY_LOG_NAME = "status-history.jsonl"
 RAW_PREVIEW_LIMIT = 2000
 MESSAGE_PREVIEW_LIMIT = 240
+LOG_BACKUP_COUNT = DEFAULT_BACKUP_COUNT
+STATUS_AUDIT_MAX_BYTES = DEFAULT_MAX_BYTES
+# The settings chart reads up to 48h of history and the status bar appends a
+# record every refresh, so a rollover clips the graph -- read_status_history_records
+# opens the live file only, which no cap can prevent. The history log keeps no
+# backups because a backup would be retained bytes the chart cannot reach.
+#
+# This cap does not cover the widest chart window. A record measures about 1 KiB,
+# so 16 MiB holds roughly 16,800 of them. The 15s refresh timer alone writes
+# 11,520 records in 48h, and StatusBarController.refresh_ also runs once per
+# inbound hook event, so an active machine reaches the cap well inside the 48h
+# the chart offers. Raising the cap or teaching the chart to read a backup is
+# what would close that; until then the 48h window empties at each rollover.
+STATUS_HISTORY_MAX_BYTES = 16 * 1024 * 1024
+STATUS_HISTORY_BACKUP_COUNT = 0
 AUDIT_COLUMNS = (
     "audited_at",
     "logged_at",
@@ -51,16 +72,12 @@ def append_status_audit_record(
 ) -> None:
     target = path or default_status_audit_log_path()
     try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        with target.open("a", encoding="utf-8") as handle:
-            handle.write(
-                json.dumps(
-                    status_audit_record(event, status),
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                )
-                + "\n"
-            )
+        append_jsonl_line(
+            target,
+            status_audit_record(event, status),
+            max_bytes=STATUS_AUDIT_MAX_BYTES,
+            backup_count=LOG_BACKUP_COUNT,
+        )
     except OSError:
         pass
 
@@ -71,17 +88,12 @@ def append_status_history_record(
     path: Path | None = None,
 ) -> None:
     target = path or default_status_history_log_path()
-    target.parent.mkdir(parents=True, exist_ok=True)
-    with target.open("a", encoding="utf-8") as handle:
-        handle.write(
-            json.dumps(
-                record,
-                ensure_ascii=False,
-                separators=(",", ":"),
-                default=str,
-            )
-            + "\n"
-        )
+    append_jsonl_line(
+        target,
+        record,
+        max_bytes=STATUS_HISTORY_MAX_BYTES,
+        backup_count=STATUS_HISTORY_BACKUP_COUNT,
+    )
 
 
 def status_history_record(
@@ -218,19 +230,25 @@ def read_status_audit_records(path: Path | None = None) -> list[dict[str, str]]:
 
 def iter_status_audit_records(path: Path | None = None) -> Iterator[dict[str, str]]:
     source = path or default_status_audit_log_path()
-    try:
-        handle = source.open(encoding="utf-8")
-    except OSError:
-        return
 
-    with handle:
-        for line in handle:
-            try:
-                obj = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(obj, dict):
-                yield {column: str(obj.get(column, "")) for column in AUDIT_COLUMNS}
+    # Oldest first: rotation moves the live file to .1 and shifts .1 to .2, so a
+    # higher index is older. The export is the diagnostics path, so it reads the
+    # whole retention window rather than stopping at the last rollover.
+    sources = [backup_path(source, index) for index in range(LOG_BACKUP_COUNT, 0, -1)]
+    sources.append(source)
+    for candidate in sources:
+        try:
+            handle = candidate.open(encoding="utf-8")
+        except OSError:
+            continue
+        with handle:
+            for line in handle:
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(obj, dict):
+                    yield {column: str(obj.get(column, "")) for column in AUDIT_COLUMNS}
 
 
 def read_status_history_records(

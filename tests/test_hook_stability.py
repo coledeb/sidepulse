@@ -16,6 +16,7 @@ call. The contract is therefore narrow and absolute:
 
 from __future__ import annotations
 
+import errno
 import io
 import json
 import os
@@ -27,10 +28,13 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
+from sidepulse import audit as audit_module
 from sidepulse import hook as hook_module
+from sidepulse import jsonl_log
 from sidepulse.cli import build_parser, build_sidepulse_parser, cmd_hook_log
 from sidepulse.hook import format_hook_payload, hook_log_main, routed_hook_payload
 from sidepulse.install import fail_open_command, hook_command
+from sidepulse.providers import parse_log_line
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = REPO_ROOT / "src"
@@ -128,6 +132,7 @@ class FailOpenTests(HookIsolationMixin, unittest.TestCase):
             "write_hook_line",
             "write_hook_status_audit",
             "hook_event_socket_disabled",
+            "append_jsonl_line",
         ]
         for name in collaborators:
             with self.subTest(raises=name):
@@ -243,6 +248,306 @@ class HappyPathTests(HookIsolationMixin, unittest.TestCase):
                 self.assertTrue(provider)
                 self.assertIsInstance(path, Path)
                 self.assertIsInstance(line, dict)
+
+
+class LogHygieneTests(HookIsolationMixin, unittest.TestCase):
+    """The hook log holds tool inputs, so it must stay private and bounded.
+
+    ``tool_input`` carries whole file contents and shell commands, so this log
+    accumulates a verbatim copy of everything the agents do. Two properties
+    keep that from becoming a liability: nobody but the owner can read it, and
+    it cannot grow without limit.
+    """
+
+    def write_records(self, count: int, *, filler: int = 0) -> None:
+        for index in range(count):
+            payload = json.dumps(
+                {
+                    "hook_event_name": "Stop",
+                    "session_id": f"s{index}",
+                    "message": "x" * filler,
+                }
+            )
+            run_hook("claude", self.log_path, payload)
+
+    def mode_of(self, path: Path) -> int:
+        return path.stat().st_mode & 0o777
+
+    def test_new_log_is_owner_only(self):
+        self.write_records(1)
+        self.assertEqual(0o600, self.mode_of(self.log_path))
+
+    def test_a_user_chosen_log_directory_keeps_its_own_permissions(self):
+        """The log path is user-configurable, so its parent is not ours to set.
+
+        `--claude-log ~/hook.jsonl` makes $HOME the parent. Tightening it to 0700
+        is an unrequested change to a directory the user owns the policy for, and
+        the hook does it on every agent event.
+        """
+        chosen = self.home / "user-chosen"
+        chosen.mkdir(parents=True, exist_ok=True)
+        chosen.chmod(0o755)
+
+        run_hook("claude", chosen / "hook.jsonl", '{"hook_event_name": "Stop"}')
+
+        self.assertEqual(0o755, self.mode_of(chosen))
+        self.assertEqual(0o600, self.mode_of(chosen / "hook.jsonl"))
+
+    def test_the_state_dir_is_still_tightened_in_place(self):
+        """The directory sidepulse creates is ours, including on upgrades.
+
+        Installs from older versions left it 0755, so the repair has to keep
+        working for the default path even though a chosen path is left alone.
+        """
+        state_dir = self.home / ".local" / "state" / "sidepulse" / "agent-monitor"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        state_dir.chmod(0o755)
+
+        audit_module.append_status_history_record(
+            {"recorded_at": "t0", "status": "idle"},
+            path=state_dir / "status-history.jsonl",
+        )
+
+        self.assertEqual(0o700, self.mode_of(state_dir))
+
+    def test_a_short_write_still_lands_a_whole_record(self):
+        """os.write is one write(2) and may return short.
+
+        A dropped trailing newline makes the next append share a physical line,
+        so two records become unparseable instead of zero. The write has to loop
+        until the payload is out.
+        """
+        path = self.home / "short.jsonl"
+        real_write = os.write
+        chunks: list[int] = []
+
+        def one_byte_at_a_time(fd: int, data: bytes) -> int:
+            written = real_write(fd, data[:1])
+            chunks.append(written)
+            return written
+
+        with patch.object(jsonl_log.os, "write", side_effect=one_byte_at_a_time):
+            jsonl_log.append_jsonl_line(path, {"index": 0})
+            jsonl_log.append_jsonl_line(path, {"index": 1})
+
+        self.assertGreater(len(chunks), 2, "os.write was not exercised short")
+        lines = path.read_text(encoding="utf-8").splitlines()
+        self.assertEqual([{"index": 0}, {"index": 1}], [json.loads(x) for x in lines])
+
+    def test_a_failed_write_damages_only_the_record_it_was_writing(self):
+        """ENOSPC part-way through must not take the next record with it.
+
+        Without a trailing newline the next append shares that physical line and
+        ``parse_log_line`` drops both records. The hook still exits 0, so the
+        loss is silent. Bounding it to the truncated record is what keeps the
+        rest of the log parseable.
+        """
+        path = self.home / "enospc.jsonl"
+        jsonl_log.append_jsonl_line(path, {"index": 0})
+
+        real_write = os.write
+        state = {"calls": 0}
+
+        def fail_after_a_partial_write(fd: int, data: bytes) -> int:
+            state["calls"] += 1
+            if state["calls"] == 1:
+                return real_write(fd, data[:8])
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+        with patch.object(jsonl_log.os, "write", side_effect=fail_after_a_partial_write):
+            with self.assertRaises(OSError):
+                jsonl_log.append_jsonl_line(path, {"index": 1})
+
+        jsonl_log.append_jsonl_line(path, {"index": 2})
+
+        parsed = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            try:
+                parsed.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+        self.assertIn({"index": 0}, parsed)
+        self.assertIn({"index": 2}, parsed)
+
+    def test_a_zero_return_write_damages_only_the_record_it_was_writing(self):
+        """The ``count <= 0`` exit leaves the same partial record as a raise."""
+        path = self.home / "zero-write.jsonl"
+        jsonl_log.append_jsonl_line(path, {"index": 0})
+
+        real_write = os.write
+        state = {"calls": 0}
+
+        def stall_after_a_partial_write(fd: int, data: bytes) -> int:
+            state["calls"] += 1
+            if state["calls"] == 1:
+                return real_write(fd, data[:8])
+            return 0
+
+        with patch.object(jsonl_log.os, "write", side_effect=stall_after_a_partial_write):
+            jsonl_log.append_jsonl_line(path, {"index": 1})
+
+        jsonl_log.append_jsonl_line(path, {"index": 2})
+
+        parsed = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            try:
+                parsed.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+        self.assertIn({"index": 0}, parsed)
+        self.assertIn({"index": 2}, parsed)
+
+    def test_zero_backups_discards_instead_of_growing_unbounded(self):
+        """A log whose reader ignores backups asks for no backups.
+
+        Retaining a generation no reader opens costs disk and buys nothing, so
+        ``backup_count=0`` has to mean "rotate and discard". It must not mean
+        "never rotate", which would let the log grow without limit.
+        """
+        path = self.home / "discard.jsonl"
+        for index in range(200):
+            jsonl_log.append_jsonl_line(
+                path,
+                {"index": index, "pad": "x" * 100},
+                max_bytes=1024,
+                backup_count=0,
+            )
+
+        self.assertEqual([], list(self.home.glob("discard.jsonl.*")))
+        self.assertLess(path.stat().st_size, 1024 + 200)
+        self.assertEqual(
+            199,
+            json.loads(path.read_text(encoding="utf-8").splitlines()[-1])["index"],
+        )
+
+    def test_zero_max_bytes_still_disables_rotation(self):
+        """Passing no cap must keep the old unbounded behaviour available."""
+        path = self.home / "uncapped.jsonl"
+        for index in range(50):
+            jsonl_log.append_jsonl_line(
+                path,
+                {"index": index, "pad": "x" * 100},
+                max_bytes=0,
+                backup_count=0,
+            )
+
+        self.assertEqual([], list(self.home.glob("uncapped.jsonl.*")))
+        self.assertEqual(50, len(path.read_text(encoding="utf-8").splitlines()))
+
+    def test_existing_world_readable_log_is_tightened(self):
+        """Installs that already wrote a 0644 log must be repaired in place."""
+        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        self.log_path.write_text('{"hook_event_name": "Stop"}\n', encoding="utf-8")
+        self.log_path.chmod(0o644)
+        self.write_records(1)
+        self.assertEqual(0o600, self.mode_of(self.log_path))
+
+    def test_log_directory_is_owner_only(self):
+        """The directory guard also covers the audit log and latest.json.
+
+        Those live in the state dir, which sidepulse creates and owns. The
+        provider log's own parent is deliberately not covered: that path is
+        user-configurable, so its permissions are the user's to set.
+        """
+        self.write_records(1)
+        state_dir = self.home / ".local" / "state" / "sidepulse" / "agent-monitor"
+        self.assertEqual(0o700, self.mode_of(state_dir))
+
+    def test_log_rotates_at_the_size_cap(self):
+        with patch.object(hook_module, "MAX_LOG_BYTES", 2048):
+            self.write_records(40, filler=200)
+        rotated = self.log_path.with_suffix(self.log_path.suffix + ".1")
+        self.assertTrue(rotated.exists(), "log never rotated past the cap")
+        self.assertLessEqual(self.log_path.stat().st_size, 2048 + 512)
+
+    def test_rotation_keeps_a_bounded_number_of_backups(self):
+        with patch.object(hook_module, "MAX_LOG_BYTES", 1024):
+            with patch.object(hook_module, "LOG_BACKUP_COUNT", 2):
+                self.write_records(120, filler=200)
+        backups = sorted(p.name for p in self.log_path.parent.glob("hook.jsonl.*"))
+        self.assertEqual(["hook.jsonl.1", "hook.jsonl.2"], backups)
+
+    def test_rotated_backups_stay_owner_only(self):
+        with patch.object(hook_module, "MAX_LOG_BYTES", 1024):
+            self.write_records(40, filler=200)
+        for backup in self.log_path.parent.glob("hook.jsonl.*"):
+            self.assertEqual(0o600, self.mode_of(backup), f"{backup.name} is readable")
+
+    def test_rotation_preserves_whole_records(self):
+        """Rotation must split between lines, never mid-record."""
+        with patch.object(hook_module, "MAX_LOG_BYTES", 1024):
+            self.write_records(40, filler=200)
+        for path in [self.log_path, *self.log_path.parent.glob("hook.jsonl.*")]:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                json.loads(line)  # a truncated record would raise here
+
+    def test_rotation_failure_still_exits_zero(self):
+        """Log hygiene is best-effort; it must never break an agent turn.
+
+        Every step of rotate_log swallows OSError, so a log that cannot be
+        renamed has to leave the hook exiting 0 and still recording. A read-only
+        directory reaches that path for real; patching the writer to raise only
+        reaches hook_log_main's blanket except, which another test covers.
+        """
+        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        self.log_path.write_text("x" * 4096 + "\n", encoding="utf-8")
+        self.log_path.chmod(0o600)
+        self.log_path.parent.chmod(0o500)
+        self.addCleanup(self.log_path.parent.chmod, 0o700)
+
+        with patch.object(hook_module, "MAX_LOG_BYTES", 1024):
+            code, out = run_hook("claude", self.log_path, '{"hook_event_name": "Stop"}')
+
+        self.assertEqual(0, code)
+        self.assertEqual("", out)
+        self.assertEqual(
+            [],
+            list(self.log_path.parent.glob("hook.jsonl.*")),
+            "rotation cannot rename inside a read-only directory",
+        )
+        self.assertIn(
+            "Stop",
+            self.log_path.read_text(encoding="utf-8"),
+            "the record must still be appended when rotation fails",
+        )
+
+    def test_sibling_audit_log_is_also_private_and_bounded(self):
+        """event-status.jsonl holds up to 2000 chars of raw payload per record.
+
+        It is written by a different module than the provider log, so it needs
+        its own guard rather than inheriting one.
+        """
+        audit_path = self.home / "audit.jsonl"
+        event = parse_log_line("claude", json.dumps({"hook_event_name": "Stop"}))
+        with patch.object(audit_module, "STATUS_AUDIT_MAX_BYTES", 1024):
+            for _ in range(200):
+                audit_module.append_status_audit_record(event, None, path=audit_path)
+        self.assertEqual(0o600, self.mode_of(audit_path))
+        self.assertTrue(
+            list(self.home.glob("audit.jsonl.*")), "audit log never rotated"
+        )
+
+    def test_status_history_log_is_also_private_and_bounded(self):
+        """The status bar appends one of these per refresh, idle or not.
+
+        The chart reads the live file only, so this log keeps no backups: the
+        bytes on disk are the bytes the chart can show. Boundedness is therefore
+        a size assertion, not the presence of a rotated generation.
+        """
+        history_path = self.home / "history.jsonl"
+        with patch.object(audit_module, "STATUS_HISTORY_MAX_BYTES", 1024):
+            for index in range(200):
+                audit_module.append_status_history_record(
+                    {"recorded_at": f"t{index}", "status": "idle", "pad": "x" * 100},
+                    path=history_path,
+                )
+        self.assertEqual(0o600, self.mode_of(history_path))
+        self.assertEqual(
+            [], list(self.home.glob("history.jsonl.*")), "history log kept a backup"
+        )
+        self.assertLess(
+            history_path.stat().st_size, 1024 + 200, "history log grew past the cap"
+        )
 
 
 class EntryPointSubprocessTests(unittest.TestCase):
