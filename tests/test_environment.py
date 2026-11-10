@@ -136,6 +136,10 @@ class CleanInstallTests(unittest.TestCase):
             "PATH": f"{self.venv / 'bin'}:{os.environ.get('PATH', '')}",
             "HOME": str(self.home),
             "XDG_CONFIG_HOME": str(self.home / ".config"),
+            "XDG_STATE_HOME": str(self.home / ".local/state"),
+            # The status-bar smoke test runs the real app; never let it find
+            # and write to a device that happens to be plugged in.
+            "SIDEPULSE_MOUNT_ROOTS": str(self.home / "mounts"),
             "SIDEPULSE_DISABLE_EVENT_SOCKET": "1",
             "TMPDIR": os.environ.get("TMPDIR", "/tmp"),
         }

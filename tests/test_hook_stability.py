@@ -76,6 +76,7 @@ class HookIsolationMixin:
             {
                 "HOME": str(self.home),
                 "XDG_CONFIG_HOME": str(self.home / ".config"),
+                "XDG_STATE_HOME": str(self.home / ".local" / "state"),
                 "SIDEPULSE_DISABLE_EVENT_SOCKET": "1",
             },
         )
