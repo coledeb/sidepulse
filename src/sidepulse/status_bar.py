@@ -6765,29 +6765,40 @@ def session_row_icon_for_status(status: AgentStatus, *, dark_mode: bool | None =
 
 
 def status_icon_for_status(status: AgentStatus):
-    state = state_for_mode(status.mode)
-    # Frame 0 is the resting pose: the plain glyph on the shared canvas, so a
-    # row keeps one size as it moves between animated and static states.
-    return animated_status_icon(state, 0)
+    return static_status_icon(state_for_mode(status.mode))
 
 
-@lru_cache(maxsize=STATUS_ICON_FRAME_COUNT * 4)
+# Static menu rows stand the Working arrows nearly upright, on a slight slant.
+STATIC_WORKING_TILT_DEGREES = 60.0
+
+
+@lru_cache(maxsize=8)
+def static_status_icon(state: StatusBarState):
+    # The plain glyph on the shared canvas, so rows match the menu-bar size.
+    tilt = STATIC_WORKING_TILT_DEGREES if state == STATE_WORKING else 0.0
+    return status_glyph_image(state, tilt, 1.0, 1.0)
+
+
+@lru_cache(maxsize=STATUS_ICON_FRAME_COUNT * 2)
 def animated_status_icon(state: StatusBarState, frame: int):
+    phase = frame / STATUS_ICON_FRAME_COUNT
+    pulse = (1.0 + math.cos(2.0 * math.pi * phase)) / 2.0
+    if state == STATE_WORKING:
+        return status_glyph_image(state, -360.0 * phase, 1.0, 1.0)
+    return status_glyph_image(state, 0.0, 0.82 + 0.18 * pulse, 0.45 + 0.55 * pulse)
+
+
+def status_glyph_image(state: StatusBarState, degrees: float, scale: float, opacity: float):
     source = image_for_symbol(state.symbol, state.label)
     if source is None:
         return None
-    phase = frame / STATUS_ICON_FRAME_COUNT
-    pulse = (1.0 + math.cos(2.0 * math.pi * phase)) / 2.0
-    scale = 1.0 if state == STATE_WORKING else 0.82 + 0.18 * pulse
-    opacity = 1.0 if state == STATE_WORKING else 0.45 + 0.55 * pulse
     image = NSImage.alloc().initWithSize_((18.0, 18.0))
     image.lockFocus()
     NSGraphicsContext.saveGraphicsState()
     try:
         transform = NSAffineTransform.transform()
         transform.translateXBy_yBy_(9.0, 9.0)
-        if state == STATE_WORKING:
-            transform.rotateByDegrees_(-360.0 * phase)
+        transform.rotateByDegrees_(degrees)
         transform.scaleBy_(scale)
         transform.translateXBy_yBy_(-9.0, -9.0)
         transform.concat()
