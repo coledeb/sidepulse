@@ -419,6 +419,12 @@ STATUS_BAR_HISTORY_CHART_RECORD_LIMIT_MULTIPLIER = 3.0
 MAC_SLEEP_POLL_SECONDS = 60.0
 SYSTEM_POLL_ERROR_BACKOFF_SECONDS = 30.0
 LID_ANIMATION_RESTORE_FUDGE_SECONDS = 0.15
+# Extra time the animation guard stays up to cover the device write itself.
+# Right after a wake the card takes ~2.4s to answer, so a guard sized to the
+# animation alone expired before the write landed and the next refresh painted
+# over it. The restore callback drops the guard as soon as the animation ends;
+# this only bounds how long a lost restore can block LED updates.
+LED_ANIMATION_WRITE_ALLOWANCE_SECONDS = 10.0
 # Skip the lid-close charging fill when its write would land this late.
 LID_CHARGING_PREVIEW_MAX_LATE_SECONDS = 2.0
 AGENT_ANIMATION_DEVICE_PREVIEW_SECONDS = 3.0
@@ -2825,7 +2831,9 @@ class StatusBarController(NSObject):
         self.led_animation_token += 1
         token = self.led_animation_token
         self.led_animation_until_monotonic = (
-            time.monotonic() + AGENT_ANIMATION_DEVICE_PREVIEW_SECONDS
+            time.monotonic()
+            + AGENT_ANIMATION_DEVICE_PREVIEW_SECONDS
+            + LED_ANIMATION_WRITE_ALLOWANCE_SECONDS
         )
         self.set_settings_message(
             f"Showing {MODE_LABELS[mode]} on device for "
@@ -2974,7 +2982,9 @@ class StatusBarController(NSObject):
         self.led_animation_token += 1
         token = self.led_animation_token
         self.led_animation_until_monotonic = (
-            time.monotonic() + AGENT_ANIMATION_EDITOR_DEVICE_PREVIEW_SECONDS
+            time.monotonic()
+            + AGENT_ANIMATION_EDITOR_DEVICE_PREVIEW_SECONDS
+            + LED_ANIMATION_WRITE_ALLOWANCE_SECONDS
         )
         if status is not None:
             status.setStringValue_(
@@ -3684,6 +3694,7 @@ class StatusBarController(NSObject):
             animation.duration_seconds
             + charging_seconds
             + LID_ANIMATION_RESTORE_FUDGE_SECONDS
+            + LED_ANIMATION_WRITE_ALLOWANCE_SECONDS
         )
         self.led_animation_until_monotonic = time.monotonic() + duration
         thread = threading.Thread(

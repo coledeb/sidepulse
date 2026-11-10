@@ -5933,6 +5933,45 @@ class AgentMonitorTests(unittest.TestCase):
         self.assertFalse(controller.lid_closed_led_hold_active)
         play_lid_animation.assert_not_called()
 
+    def test_lid_open_guard_outlasts_slow_device_write(self) -> None:
+        """A refresh during a slow post-wake write must not paint over the animation."""
+        try:
+            from sidepulse import status_bar
+        except SystemExit as exc:
+            self.skipTest(str(exc))
+
+        controller = status_bar.StatusBarController.alloc().init()
+        controller.leds_enabled = True
+        controller.lid_closed_led_hold_active = False
+        controller.led_sync_in_flight = False
+        device = status_bar.StatusBarDevice(
+            device_id="sp",
+            name="SidePulse",
+            root=Path("/Volumes/SidePulse"),
+            target=Path("/Volumes/SidePulse/LEDS.LED"),
+            connected=True,
+            display=status_bar.LED_DISPLAY_AGENT,
+        )
+
+        with (
+            patch.object(controller, "status_bar_devices", return_value=[device]),
+            patch.object(controller, "sync_virtual_status_device"),
+            patch("sidepulse.status_bar.time.monotonic", return_value=1000.0),
+            patch("sidepulse.status_bar.threading.Thread") as thread,
+            patch("sidepulse.status_bar.log_status_bar"),
+        ):
+            controller.play_lid_animation(status_bar.LID_ANIMATION_OPEN)
+            thread.assert_called_once()
+
+        # The card can take ~2.4s to accept the write after a wake.
+        with (
+            patch.object(controller, "sync_virtual_status_device"),
+            patch("sidepulse.status_bar.time.monotonic", return_value=1003.0),
+            patch("sidepulse.status_bar.threading.Thread") as thread,
+        ):
+            controller.sync_leds(AgentMode.IDLE_READY, None, "agent")
+            thread.assert_not_called()
+
     def test_lid_close_hold_suppresses_refresh_until_conditions_change(self) -> None:
         try:
             from sidepulse import status_bar
