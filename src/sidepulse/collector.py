@@ -1985,39 +1985,13 @@ def read_recent_lines_across_rotations(
 def _replace_stale(status: AgentStatus, stale: bool) -> AgentStatus:
     if status.stale == stale:
         return status
-    return AgentStatus(
-        provider=status.provider,
-        agent_id=status.agent_id,
-        display_name=status.display_name,
-        mode=status.mode,
-        updated_at=status.updated_at,
-        event_name=status.event_name,
-        session_id=status.session_id,
-        cwd=status.cwd,
-        tool_name=status.tool_name,
-        message=status.message,
-        origin=status.origin,
-        stale=stale,
-    )
+    return replace(status, stale=stale)
 
 
 def _replace_mode(status: AgentStatus, mode: AgentMode) -> AgentStatus:
     if status.mode == mode:
         return status
-    return AgentStatus(
-        provider=status.provider,
-        agent_id=status.agent_id,
-        display_name=status.display_name,
-        mode=mode,
-        updated_at=status.updated_at,
-        event_name=status.event_name,
-        session_id=status.session_id,
-        cwd=status.cwd,
-        tool_name=status.tool_name,
-        message=status.message,
-        origin=status.origin,
-        stale=status.stale,
-    )
+    return replace(status, mode=mode)
 
 
 def title_from_event(record: HookEvent) -> str | None:

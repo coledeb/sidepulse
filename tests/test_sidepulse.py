@@ -1907,6 +1907,9 @@ class AgentMonitorTests(unittest.TestCase):
         )
         reloaded = collector_module.agent_status_from_dict(named.to_dict())
         self.assertEqual(reloaded.project, "Plex")
+        # Rows copied for display (aged out, gone stale) keep it too.
+        self.assertEqual(collector_module._replace_mode(named, AgentMode.IDLE_READY).project, "Plex")
+        self.assertEqual(collector_module._replace_stale(named, True).project, "Plex")
         self.assertEqual(
             status_bar.native_session_menu_title(reloaded),
             "Check Marshals S2E03 Replacement  [Plex]",
