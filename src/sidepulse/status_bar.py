@@ -6769,7 +6769,7 @@ def status_icon_for_status(status: AgentStatus):
 
 
 # Static menu rows stand the Working arrows nearly upright, on a slight slant.
-STATIC_WORKING_TILT_DEGREES = 60.0
+STATIC_WORKING_TILT_DEGREES = -60.0
 
 
 @lru_cache(maxsize=8)
