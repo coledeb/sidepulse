@@ -29,6 +29,20 @@ from Quartz import (
 )
 
 
+GLYPH_CANVAS = 18.0
+
+
+def centered_glyph_rect(image, canvas: float = GLYPH_CANVAS):
+    """Natural-size rect that centers a symbol on the square glyph canvas.
+
+    The menu-bar layer and the menu rows both draw through this, so the glyph
+    keeps one size everywhere and rotates about its own center.
+    """
+    size = image.size()
+    width, height = float(size.width), float(size.height)
+    return (((canvas - width) / 2, (canvas - height) / 2), (width, height))
+
+
 class StatusIconView(NSView):
     def initWithFrame_(self, frame):
         self = objc.super(StatusIconView, self).initWithFrame_(frame)
@@ -74,8 +88,11 @@ class StatusIconView(NSView):
         def draw():
             tinted.lockFocus()
             try:
-                self.source_image.drawInRect_fromRect_operation_fraction_(
-                    rect, rect, NSCompositingOperationSourceOver, 1.0,
+                source = self.source_image
+                source.drawInRect_fromRect_operation_fraction_(
+                    centered_glyph_rect(source),
+                    ((0, 0), (source.size().width, source.size().height)),
+                    NSCompositingOperationSourceOver, 1.0,
                 )
                 NSColor.labelColor().set()
                 NSRectFillUsingOperation(rect, NSCompositingOperationSourceIn)

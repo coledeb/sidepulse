@@ -93,7 +93,7 @@ from .battery import (
     snapshot_shows_charging_fill,
 )
 from .power_source_notifications import PowerSourceNotifier
-from .status_icon import NativeStatusIconRenderer
+from .status_icon import GLYPH_CANVAS, NativeStatusIconRenderer, centered_glyph_rect
 from .audit import (
     append_status_history_record,
     default_status_audit_log_path,
@@ -6787,10 +6787,12 @@ def session_row_icon_for_status(
 
 def status_icon_for_status(status: AgentStatus):
     state = state_for_mode(status.mode)
-    return image_for_symbol(state.symbol, state.label)
+    # Frame 0 is the resting pose: the plain glyph on the shared canvas, so a
+    # row keeps one size as it moves between animated and static states.
+    return animated_status_icon(state, 0)
 
 
-@lru_cache(maxsize=STATUS_ICON_FRAME_COUNT * 2)
+@lru_cache(maxsize=STATUS_ICON_FRAME_COUNT * 4)
 def animated_status_icon(state: StatusBarState, frame: int):
     source = image_for_symbol(state.symbol, state.label)
     if source is None:
@@ -6808,9 +6810,11 @@ def animated_status_icon(state: StatusBarState, frame: int):
         if state == STATE_WORKING:
             transform.rotateByDegrees_(-360.0 * phase)
         transform.scaleBy_(scale)
+        transform.translateXBy_yBy_(-9.0, -9.0)
         transform.concat()
+        # Same natural-size, centered glyph the menu-bar layer animates.
         source.drawInRect_fromRect_operation_fraction_(
-            ((-7.5, -7.5), (15.0, 15.0)), image_source_rect(source),
+            centered_glyph_rect(source), image_source_rect(source),
             NSCompositingOperationSourceOver, opacity,
         )
     finally:
@@ -6984,7 +6988,7 @@ def is_dark_appearance(appearance=None) -> bool:
 def horizontal_icon_pair(left_icon, right_icon, *, dark_mode: bool | None = None):
     if dark_mode is None:
         dark_mode = is_dark_appearance()
-    left_width = 15.5
+    left_width = GLYPH_CANVAS
     right_width = float(right_icon.size().width)
     width = left_width + 3.0 + right_width
     height = 18.0
@@ -6992,7 +6996,7 @@ def horizontal_icon_pair(left_icon, right_icon, *, dark_mode: bool | None = None
     try:
         image.lockFocus()
         left_icon.drawInRect_fromRect_operation_fraction_(
-            ((0.0, 1.25), (left_width, left_width)),
+            ((0.0, (height - left_width) / 2), (left_width, left_width)),
             image_source_rect(left_icon),
             NSCompositingOperationSourceOver,
             1.0,
