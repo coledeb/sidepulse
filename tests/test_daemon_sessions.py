@@ -127,3 +127,73 @@ def test_hook_event_reaches_the_daemon_monitor_over_its_socket():
         finally:
             server.stop()
     assert [row['provider'] for row in reply['snapshot']['statuses']] == ['claude']
+
+
+def test_huge_prompts_do_not_push_get_state_past_its_reply_cap():
+    daemon = sessions()
+    for index in range(3):
+        daemon.ingest_line('claude', {'hook_event_name': 'UserPromptSubmit', 'session_id': f's{index}',
+                                      'cwd': '/tmp/project', 'prompt': 'p' * 600_000})
+    encoded = json.dumps(daemon.snapshot(include_stale=True).to_dict())
+    assert len(encoded.encode()) < 64 * 1024
+    assert all(len((row.message or '').encode()) <= 2048 for row in daemon.snapshot().statuses)
+
+
+def test_osc_rows_keep_their_explicit_state_past_the_hook_idle_timeout():
+    daemon = sessions()
+    daemon.monitor.stale_after_seconds = 60
+    daemon.program_state.submit({'v': 1, 'type': 'program_status', 'scope': 'build',
+                                 'status': {'state': 'working', 'app': 'make'}})
+    with patch('sidepulse.collector.datetime') as clock:
+        clock.now.return_value = datetime.now(timezone.utc) + timedelta(hours=2)
+        snapshot = daemon.snapshot()
+    assert [row.provider for row in snapshot.statuses] == ['make']
+    assert snapshot.aggregate.mode == AgentMode.WORKING
+
+
+def test_a_newer_event_in_the_same_state_refreshes_the_mirror():
+    daemon = sessions()
+    line = {'hook_event_name': 'PermissionRequest', 'session_id': 's1', 'cwd': '/tmp/project',
+            'tool_name': 'Bash', 'tool_input': {'command': 'ls'}}
+    daemon.ingest_line('claude', line)
+    first = daemon.program_state.pending_events('phone')
+    later = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
+    daemon.ingest_line('claude', {**line, 'logged_at': later})
+    assert daemon.program_state.pending_events('phone') != first
+
+
+def test_turning_on_a_transcript_fallback_recovers_from_it_right_away():
+    from sidepulse.settings import AgentMonitorSettings
+    daemon = sessions()
+    with patch.object(daemon, 'schedule_recovery') as recover:
+        daemon.apply_settings(AgentMonitorSettings(codex_transcripts_enabled=True))
+        recover.assert_called_once()
+        daemon.apply_settings(AgentMonitorSettings(codex_transcripts_enabled=True))
+        recover.assert_called_once()
+
+
+def test_local_rows_carry_their_mobile_session_link():
+    daemon = sessions()
+    daemon.ingest_line('claude', stop_line('Done. Should I push it?'))
+    (row,) = daemon.snapshot().statuses
+    assert row.session_link and row.session_link.startswith('sidepulse://sessions?publisher=mac&scope=agent-')
+
+
+def test_daemon_rewrites_leds_once_a_killed_visualizer_lease_is_gone():
+    from sidepulse.device_writer import DeviceCandidate
+    from sidepulse.service import SidePulseService
+    service = SidePulseService()
+    root = Path('/Volumes/SidePulse')
+    service.runtime.devices = [DeviceCandidate(root, root / 'LEDS.LED', 'mounted')]
+    writes = []
+    holder = {'pid': 1}
+    with patch('sidepulse.service.write_led_program', side_effect=lambda program, device_path: writes.append(program)), \
+            patch('sidepulse.service.led_lease_holder', side_effect=lambda _root: holder.get('pid') and holder):
+        holder.clear()
+        service.sync_outputs()
+        assert len(writes) == 1
+        holder['pid'] = 1  # the visualizer takes over and paints its own frames
+        service.sync_outputs()
+        holder.clear()  # it is killed without restoring the agent program
+        service.sync_outputs()
+    assert len(writes) == 2 and writes[0] == writes[1]

@@ -551,9 +551,7 @@ class LiveAgentMonitor:
         self.reconcile_claude_session_idle(now)
         with self.lock:
             statuses = tuple(self.statuses_by_key.values())
-        if with_extra:
-            statuses += tuple(self.extra_statuses())
-        return snapshot_from_statuses(
+        snapshot = snapshot_from_statuses(
             statuses,
             sources=self.sources,
             collected_at=now,
@@ -564,6 +562,9 @@ class LiveAgentMonitor:
             post_tool_working_visible_seconds=self.post_tool_working_visible_seconds,
             include_stale=include_stale,
         )
+        if not with_extra:
+            return snapshot
+        return merge_program_statuses(snapshot, tuple(self.extra_statuses()))
 
     def reconcile_claude_session_idle(self, now: datetime) -> None:
         # Some local/cancelled Claude prompts return to idle without a Stop hook.
@@ -1739,6 +1740,40 @@ def snapshot_from_statuses(
         stale_statuses=stale_visible,
         sources=sources,
         collected_at=collected_at,
+    )
+
+
+# OSC program and remote rows are explicit: they hold until the next update,
+# except Done, which clears after 20 minutes. Hook aging rules do not apply.
+PROGRAM_DONE_VISIBLE_SECONDS = 1200.0
+
+
+def merge_program_statuses(
+    snapshot: MonitorSnapshot,
+    program_statuses: tuple[AgentStatus, ...],
+) -> MonitorSnapshot:
+    """Show OSC program and remote rows beside the hook rows of ``snapshot``."""
+    now = snapshot.collected_at
+    rows = [
+        status for status in program_statuses
+        if status.mode != AgentMode.COMPLETED
+        or status.age_seconds(now) <= PROGRAM_DONE_VISIBLE_SECONDS
+    ]
+    if not rows:
+        return snapshot
+    fresh = [*snapshot.statuses, *rows]
+    stale = list(snapshot.stale_statuses)
+    if any(status_counts_active(status) for status in fresh):
+        stale.extend(_replace_stale(status, True) for status in fresh if not status_counts_active(status))
+        fresh = [status for status in fresh if status_counts_active(status)]
+    fresh.sort(key=lambda status: (status.priority, -status.updated_at.timestamp()))
+    stale.sort(key=lambda status: (status.priority, -status.updated_at.timestamp()))
+    return MonitorSnapshot(
+        aggregate=aggregate_status(tuple(fresh), tuple(stale)),
+        statuses=tuple(fresh),
+        stale_statuses=tuple(stale),
+        sources=snapshot.sources,
+        collected_at=now,
     )
 
 

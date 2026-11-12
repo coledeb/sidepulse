@@ -13,6 +13,8 @@ import hashlib
 import json
 import sys
 import threading
+import urllib.parse
+from dataclasses import replace
 from datetime import datetime
 from typing import Callable
 
@@ -35,6 +37,27 @@ MIRROR_STATES = {
     AgentMode.COMPLETED: "done",
 }
 MIRROR_CONTEXT_LIMIT = 128
+# get_state replies are capped at 1 MiB, so row text shown in the menu is
+# clipped here; the monitor still read the whole event.
+SNAPSHOT_TEXT_LIMITS = {"message": 2048, "display_name": 512, "tool_name": 256}
+
+
+def clip_text(value: str | None, limit: int) -> str | None:
+    if value is None or len(value.encode("utf-8")) <= limit:
+        return value
+    return value.encode("utf-8")[: limit - 3].decode("utf-8", errors="ignore") + "…"
+
+
+def clipped_status(status: AgentStatus, session_link: str | None = None) -> AgentStatus:
+    changes = {
+        field: clip_text(getattr(status, field), limit)
+        for field, limit in SNAPSHOT_TEXT_LIMITS.items()
+        if getattr(status, field) is not None
+        and len(getattr(status, field).encode("utf-8")) > limit
+    }
+    if session_link and not status.session_link:
+        changes["session_link"] = session_link
+    return replace(status, **changes) if changes else status
 
 
 def log_sessions(message: str) -> None:
@@ -112,11 +135,12 @@ class DaemonSessions:
         self.mirrored: dict[str, str] = {}
         self.t3_poller = None
         self.start_t3 = start_t3
+        self.recovery_lock = threading.Lock()
 
     # lifecycle
 
     def start(self) -> None:
-        threading.Thread(target=self._recover, name="sidepulse-recovery", daemon=True).start()
+        self.schedule_recovery()
         if self.start_t3:
             from .t3_status import T3StatusPoller, t3_installed
 
@@ -133,11 +157,15 @@ class DaemonSessions:
         if self.t3_poller is not None:
             self.t3_poller.stop()
 
+    def schedule_recovery(self) -> None:
+        threading.Thread(target=self._recover, name="sidepulse-recovery", daemon=True).start()
+
     def _recover(self) -> None:
-        try:
-            self.monitor.reconcile_recovery_sources()
-        except Exception as exc:
-            log_sessions(f"history recovery error: {exc}")
+        with self.recovery_lock:
+            try:
+                self.monitor.reconcile_recovery_sources()
+            except Exception as exc:
+                log_sessions(f"history recovery error: {exc}")
         self.changed()
 
     # input
@@ -171,6 +199,11 @@ class DaemonSessions:
     def apply_settings(self, settings) -> None:
         self.monitor.stale_after_seconds = settings.idle_timeout_seconds
         self.monitor.completed_visible_seconds = settings.completed_visible_seconds
+        sources = default_sources(settings)
+        if sources != self.monitor.recovery_sources:
+            # A transcript fallback was turned on or off: read the new sources now.
+            self.monitor.recovery_sources = sources
+            self.schedule_recovery()
 
     # output
 
@@ -180,8 +213,26 @@ class DaemonSessions:
             status for status in self.program_state.statuses(skip_scope=is_mirror_scope)
         )
 
+    def session_link(self, status: AgentStatus) -> str | None:
+        scope = mirror_scope(status.agent_id)
+        if scope not in self.mirrored:
+            return None
+        return "sidepulse://sessions?" + urllib.parse.urlencode(
+            {"publisher": self.program_state.publisher, "scope": scope},
+            quote_via=urllib.parse.quote,
+        )
+
     def snapshot(self, include_stale: bool = False) -> MonitorSnapshot:
-        return self.monitor.snapshot(include_stale=include_stale)
+        snapshot = self.monitor.snapshot(include_stale=include_stale)
+        aggregate = snapshot.aggregate
+        if aggregate.representative is not None:
+            aggregate = replace(aggregate, representative=clipped_status(aggregate.representative))
+        return replace(
+            snapshot,
+            aggregate=aggregate,
+            statuses=tuple(clipped_status(row, self.session_link(row)) for row in snapshot.statuses),
+            stale_statuses=tuple(clipped_status(row) for row in snapshot.stale_statuses),
+        )
 
     def changed(self) -> None:
         try:
@@ -196,17 +247,21 @@ class DaemonSessions:
         from .relay import DEFAULT_RELAY_SOURCE_NAME, load_relay_config
 
         source_name = load_relay_config().machine_name or DEFAULT_RELAY_SOURCE_NAME
-        snapshot = self.monitor.snapshot(include_stale=False, with_extra=False)
-        wanted: dict[str, dict] = {}
-        for status in snapshot.statuses:
-            if not should_mirror(status):
-                continue
-            update = mirrored_update(status, source_name)
-            if update is not None:
-                wanted[update["scope"]] = update
+        # Read the rows under the lock, so a slower caller cannot publish an
+        # older view after a newer one.
         with self.mirror_lock:
-            for scope, update in wanted.items():
-                signature = json.dumps([update["status"], update["context"]], sort_keys=True)
+            snapshot = self.monitor.snapshot(include_stale=False, with_extra=False)
+            wanted: dict[str, tuple[dict, str]] = {}
+            for status in snapshot.statuses:
+                if not should_mirror(status):
+                    continue
+                update = mirrored_update(status, source_name)
+                if update is not None:
+                    # A newer event with the same state still refreshes the mirror.
+                    freshness = status.updated_at.isoformat()
+                    wanted[update["scope"]] = (update, freshness)
+            for scope, (update, freshness) in wanted.items():
+                signature = json.dumps([update["status"], update["context"], freshness], sort_keys=True)
                 if self.mirrored.get(scope) == signature:
                     continue
                 self.program_state.submit(update)

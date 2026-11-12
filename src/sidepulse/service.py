@@ -9,7 +9,7 @@ import threading
 
 from .battery import program_for_battery, program_for_charging_preview, snapshot_shows_charging_fill
 from .daemon_runtime import DaemonRuntime
-from .device_writer import DeviceBusyError, DeviceWriteError, write_led_program, normalize_led_text, validate_led_text
+from .device_writer import DeviceBusyError, DeviceWriteError, led_lease_holder, write_led_program, normalize_led_text, validate_led_text
 from .led_status import apply_brightness, led_count_for_target, program_for_agent_mode
 from .relay import (
     RelayConfig,
@@ -211,6 +211,12 @@ class SidePulseService:
                     continue
             key = f"file:{candidate.target}"
             active_targets.add(key)
+            if led_lease_holder(candidate.target.parent) is not None:
+                # `sidepulse visualize` owns the LEDs and overwrites them. Forget
+                # the cached program so it is written again once the lease ends,
+                # even if the visualizer was killed without restoring it.
+                self.last_program_by_target.pop(key, None)
+                continue
             if self.last_program_by_target.get(key) == program:
                 continue
             try:
