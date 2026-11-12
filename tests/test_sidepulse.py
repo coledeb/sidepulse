@@ -9605,6 +9605,21 @@ team id YOUR_TEAM_ID, push key '/path/to/AuthKey_YOUR_KEY_ID.p8'
         self.assertEqual(summarize_prompt("user:fix the flaky test"), "fix the flaky test")
         self.assertEqual(summarize_prompt("the user: table is empty"), "the user: table is empty")
         self.assertIsNone(summarize_prompt("User:"))
+
+    def test_summarize_prompt_titles_a_t3_handoff_by_its_new_request(self) -> None:
+        """T3's provider-switch replay must not become the session title."""
+        handoff = (
+            "Context handoff (full_thread_summary):\n"
+            "Provider context handoff. Thread: 95e13e6a. Covered app runs: 1-2.\n\n"
+            "[Historical user; user_message; thread=95e13e6a]\n"
+            "Audit my codebase\n\n"
+            "[Historical assistant; assistant_message; thread=95e13e6a]\n"
+            "Findings below.\n\n"
+            "User message:\n"
+            "Can you act on your findings here and fix them"
+        )
+        self.assertEqual(summarize_prompt(handoff), "Can you act on your findings here and fix them")
+        self.assertIsNone(summarize_prompt(handoff.rpartition("\nUser message:")[0]))
         self.assertIsNone(summarize_prompt("├──\n└──"))
 
     def test_project_name_skips_the_temp_directory_itself(self) -> None:

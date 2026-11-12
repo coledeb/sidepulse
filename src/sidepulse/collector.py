@@ -2146,6 +2146,10 @@ def codex_session_index_path() -> Path:
     return Path.home() / ".codex" / "session_index.jsonl"
 
 
+T3_HANDOFF_PREFIX = re.compile(r"Context handoff \([^)\n]*\):\s*\n")
+T3_HANDOFF_REQUEST_MARKER = "\nUser message:\n"
+
+
 def summarize_prompt(value: object, max_len: int = 72) -> str | None:
     if not isinstance(value, str):
         return None
@@ -2161,6 +2165,14 @@ def summarize_prompt(value: object, max_len: int = 72) -> str | None:
     )
     if marker:
         text = marker.group(1)
+
+    if T3_HANDOFF_PREFIX.match(text):
+        # T3 Code replays a thread's history when it switches provider; the
+        # new request follows the replay's last "User message:" line.
+        _, found, request = text.rpartition(T3_HANDOFF_REQUEST_MARKER)
+        if not found:
+            return None
+        text = request
 
     text = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)
     text = re.sub(r"`([^`]+)`", r"\1", text)
