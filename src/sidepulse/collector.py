@@ -156,6 +156,7 @@ class AgentMonitor:
         self._transcript_file_list_cache: dict[tuple[str, int], CachedTranscriptFileList] = {}
         self._latest_status_signature: tuple[Any, ...] | None = None
         self._latest_statuses_by_key: dict[str, AgentStatus] | None = None
+        self._latest_metadata: tuple[dict[str, StatusMetadata], dict[str, StatusMetadata], dict[str, str]] = ({}, {}, {})
 
     @classmethod
     def from_default_sources(
@@ -261,6 +262,7 @@ class AgentMonitor:
 
         self._latest_status_signature = signature
         self._latest_statuses_by_key = dict(statuses_by_key)
+        self._latest_metadata = (metadata_by_session, metadata_by_status, sessions_by_t3_thread)
         return statuses_by_key
 
     def _input_signature(self) -> tuple[Any, ...]:
@@ -632,9 +634,17 @@ class LiveAgentMonitor:
             post_tool_working_visible_seconds=self.post_tool_working_visible_seconds,
         )
         recovered_statuses = recovery_monitor._latest_statuses()
+        recovered_by_session, recovered_by_status, recovered_threads = recovery_monitor._latest_metadata
         # Parsing can run in a worker while hooks arrive. Merge under the same
         # lock as ingest_record, and preserve live state on equal timestamps.
         with self.lock:
+            # A row's title and project live only in memory, so after a restart
+            # its next event would rebuild its name without them; take what the
+            # history replay learned, keeping anything a live hook already set.
+            merge_metadata(self.metadata_by_session, recovered_by_session)
+            merge_metadata(self.metadata_by_status, recovered_by_status)
+            for thread_key, session_id in recovered_threads.items():
+                self.sessions_by_t3_thread.setdefault(thread_key, session_id)
             changed = False
             for agent_id, recovered in recovered_statuses.items():
                 previous = self.statuses_by_key.get(agent_id)
@@ -1395,6 +1405,21 @@ def metadata_for_record(
         title=status_metadata.title or session_metadata.title,
         origin=status_metadata.origin or session_metadata.origin,
     )
+
+
+def merge_metadata(
+    live: dict[str, StatusMetadata], recovered: dict[str, StatusMetadata]
+) -> None:
+    """Fill ``live``'s missing fields from ``recovered``; live values win."""
+    for key, found in recovered.items():
+        current = live.get(key)
+        if current is None:
+            live[key] = replace(found)
+            continue
+        current.cwd = current.cwd or found.cwd
+        current.project = current.project or found.project
+        current.title = current.title or found.title
+        current.origin = current.origin or found.origin
 
 
 def update_metadata(metadata: StatusMetadata, record: HookEvent) -> None:

@@ -145,6 +145,34 @@ class ClaudeIdlePromptTests(unittest.TestCase):
             self.assertEqual(persisted["mode"], AgentMode.IDLE_READY.value)
             self.assertEqual(persisted["updated_at"], notification_at.isoformat())
 
+    def test_row_keeps_its_title_after_a_restart(self) -> None:
+        """A restarted monitor's next hook must not drop the title of an older row."""
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            log = base / "claude.jsonl"
+            now = datetime.now(timezone.utc) - timedelta(seconds=30)
+            session_id = "restarted-claude-session"
+            records = [
+                self.event("UserPromptSubmit", session_id, now, prompt="fix the muted sliders"),
+                self.event("Stop", session_id, now + timedelta(seconds=1)),
+            ]
+            log.write_text(
+                "\n".join(json.dumps(record.raw | {"logged_at": record.logged_at.isoformat()}) for record in records)
+                + "\n"
+            )
+
+            monitor = LiveAgentMonitor(
+                recovery_sources=(SourceSpec("claude", log),),
+                latest_state_path=base / "latest.json",
+                stale_after_seconds=3600,
+            )
+            monitor.ingest_record(self.event("SessionEnd", session_id, now + timedelta(seconds=2)))
+
+            self.assertEqual(
+                monitor.snapshot().statuses[0].display_name,
+                "project: fix the muted sliders (restarte)",
+            )
+
     def test_idle_prompt_after_real_work_stays_ask(self) -> None:
         now = datetime.now(timezone.utc)
         session_id = "working-claude-session"
