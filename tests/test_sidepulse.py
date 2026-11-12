@@ -2747,7 +2747,7 @@ class AgentMonitorTests(unittest.TestCase):
         self.assertNotIn("Keep Awake With Lid Closed", titles)
         self.assertNotIn("Strong Sleep Override...", titles)
         self.assertNotIn("Sleep Helper Missing", titles)
-        self.assertIn("Setup...", titles)
+        self.assertNotIn("Setup...", titles)
 
     def test_lid_animation_program_uses_device_brightness(self) -> None:
         try:
@@ -4623,16 +4623,11 @@ class AgentMonitorTests(unittest.TestCase):
             started=True,
             detail="",
         )
-        relay_config = SimpleNamespace(
-            receiver_channel="receiver-code",
-            server="https://bridge.sidepulse.io",
-        )
 
         with (
             patch.object(cli_module.sys, "platform", "darwin"),
-            patch.object(
-                cli_module, "ensure_receiver_config", return_value=relay_config
-            ) as ensure_receiver,
+            patch.object(cli_module, "ensure_receiver_config") as configure_receiver,
+            patch.object(cli_module, "relay_link_command") as link_command,
             patch("sidepulse.service_launch.install_service", return_value=service_result) as service,
             patch.object(cli_module, "install_codex_hooks", return_value=codex_result) as codex,
             patch.object(cli_module, "install_claude_hooks", return_value=claude_result) as claude,
@@ -4671,7 +4666,8 @@ class AgentMonitorTests(unittest.TestCase):
         guard.assert_called_once_with(scope="auto", dry_run=False)
         launch.assert_called_once_with(start=True)
         service.assert_called_once_with(start=True, dry_run=False)
-        ensure_receiver.assert_not_called()
+        configure_receiver.assert_not_called()
+        link_command.assert_not_called()
 
     def test_sidepulse_setup_no_status_bar_still_installs_guard(self) -> None:
         parser = cli_module.build_sidepulse_parser()
@@ -4699,14 +4695,9 @@ class AgentMonitorTests(unittest.TestCase):
             started=True,
             detail="",
         )
-        relay_config = SimpleNamespace(
-            receiver_channel="receiver-code",
-            server="https://bridge.sidepulse.io",
-        )
 
         with (
             patch.object(cli_module.sys, "platform", "darwin"),
-            patch.object(cli_module, "ensure_receiver_config", return_value=relay_config),
             patch("sidepulse.service_launch.install_service", return_value=service_result),
             patch.object(cli_module, "install_hook_results", return_value=[hook_result]),
             patch(

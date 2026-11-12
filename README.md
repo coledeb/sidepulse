@@ -836,7 +836,7 @@ On first launch, the status-bar app shows a SidePulse Setup window. It can:
 - install or uninstall SidePulse Pro Eject Prevention, which keeps SidePulse Pro/SidePulse Dot available after sleep;
 - open the one-time closed-lid sleep prevention installer in Terminal.
 
-The Setup window can be reopened from the dropdown with `Setup...`.
+To reopen Setup, choose **Settings… → Advanced → Open Setup…**.
 
 The status-bar item uses a single icon, with the current state in its tooltip:
 
