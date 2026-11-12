@@ -12,11 +12,7 @@ from sidepulse.battery import (
     program_for_charging_preview,
 )
 from sidepulse.device_writer import validate_led_text
-from sidepulse.settings import (
-    LID_ANIMATION_CLOSED,
-    LID_ANIMATION_OPEN,
-    LedAnimationSetting,
-)
+from sidepulse.settings import LID_ANIMATION_CLOSED, LID_ANIMATION_OPEN
 
 CHARGING = BatterySnapshot(percent=40, is_plugged=True, is_charging=True)
 
@@ -63,96 +59,74 @@ class ChargingPreviewProgramTests(unittest.TestCase):
 
 
 class LidCloseChargingTests(unittest.TestCase):
+    """The daemon follows the lid-close animation with the charging fill."""
+
     def setUp(self) -> None:
-        try:
-            from sidepulse import status_bar
-        except SystemExit as exc:
-            self.skipTest(str(exc))
-        self.status_bar = status_bar
-        self.device = status_bar.StatusBarDevice(
-            device_id="sd",
-            name="SidePulse",
-            root=Path("/Volumes/SidePulse"),
-            target=Path("/Volumes/SidePulse/LEDS.LED"),
-            connected=True,
-            display="agent",
-        )
-        self.animation = LedAnimationSetting(program="off", duration_seconds=0.1)
+        from sidepulse.device_writer import DeviceCandidate
+        from sidepulse.service import SidePulseService
+        from sidepulse.settings import AgentMonitorSettings
 
-    def controller(self, *, enabled: bool = True, snapshot=CHARGING):
-        controller = self.status_bar.StatusBarController.alloc().init()
-        controller.settings = controller.settings.with_battery_power_change_preview(
-            enabled=enabled, seconds=6
+        self.service = SidePulseService()
+        root = Path("/Volumes/SidePulse")
+        self.service.runtime.devices = [DeviceCandidate(root, root / "LEDS.LED", "mounted")]
+        self.writes: list[str] = []
+        self.enabled = True
+        self.settings = lambda: AgentMonitorSettings().with_battery_power_change_preview(
+            enabled=self.enabled, seconds=6
         )
-        controller.last_battery_snapshot = snapshot
-        controller.leds_enabled = True
-        controller.led_animation_token = 0
-        return controller
+        for target in ("sidepulse.service.load_settings",):
+            patcher = patch(target, side_effect=lambda: self.settings())
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        patcher = patch(
+            "sidepulse.service.write_led_program",
+            side_effect=lambda program, device_path: self.writes.append(program) or device_path,
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
-    def play(self, controller, kind: str):
-        with (
-            patch("sidepulse.status_bar.log_status_bar"),
-            patch.object(controller, "status_bar_devices", return_value=[self.device]),
-            patch("sidepulse.status_bar.threading.Thread") as thread,
-        ):
-            controller.play_lid_animation(kind, animation=self.animation)
-        return thread.call_args.kwargs["args"]
+    def close(self, snapshot=CHARGING):
+        self.service.runtime.last_battery_snapshot = snapshot
+        self.service.play_lid_animation(LID_ANIMATION_CLOSED)
 
     def test_close_while_charging_queues_the_fill(self) -> None:
-        args = self.play(self.controller(), LID_ANIMATION_CLOSED)
-        self.assertEqual(args[0], LID_ANIMATION_CLOSED)
-        self.assertIs(args[4], CHARGING)
-        self.assertEqual(args[5], 6.0)
+        self.close()
+        _due, _wall, battery, seconds = self.service.lid_charging_followup
+        self.assertIs(battery, CHARGING)
+        self.assertEqual(seconds, 6.0)
+        self.assertEqual(len(self.writes), 1)
 
     def test_fill_follows_the_checkbox_and_charging_state(self) -> None:
-        cases = (
-            (self.controller(enabled=False), LID_ANIMATION_CLOSED),
-            (
-                self.controller(snapshot=BatterySnapshot(percent=40, is_plugged=False)),
-                LID_ANIMATION_CLOSED,
-            ),
-            (self.controller(snapshot=None), LID_ANIMATION_CLOSED),
-            (self.controller(), LID_ANIMATION_OPEN),
-        )
-        for controller, kind in cases:
-            args = self.play(controller, kind)
-            self.assertIsNone(args[4])
-            self.assertEqual(args[5], 0.0)
+        self.enabled = False
+        self.close()
+        self.assertIsNone(self.service.lid_charging_followup)
+        self.enabled = True
+        for snapshot in (BatterySnapshot(percent=40, is_plugged=False), None):
+            self.close(snapshot)
+            self.assertIsNone(self.service.lid_charging_followup)
+        self.service.runtime.last_battery_snapshot = CHARGING
+        self.service.play_lid_animation(LID_ANIMATION_OPEN)
+        self.assertIsNone(self.service.lid_charging_followup)
 
-    def run_worker(self, controller, *, late: bool):
-        writes = []
-        clock = iter([1000.0, 1000.0 + (30.0 if late else 0.2)])
-        with (
-            patch("sidepulse.status_bar.log_status_bar"),
-            patch("sidepulse.status_bar.time.sleep"),
-            patch("sidepulse.status_bar.time.time", side_effect=lambda: next(clock)),
-            patch(
-                "sidepulse.status_bar.write_led_program",
-                side_effect=lambda program, device_path: writes.append(program) or device_path,
-            ),
-            patch.object(controller, "performSelectorOnMainThread_withObject_waitUntilDone_"),
-        ):
-            controller.play_lid_animation_worker(
-                LID_ANIMATION_CLOSED, self.animation, [self.device], 0, CHARGING, 6.0
-            )
-        return writes
+    def test_fill_is_written_once_the_close_animation_ends(self) -> None:
+        self.close()
+        with patch("sidepulse.service.time.time", return_value=self.service.lid_charging_followup[1] + 0.2):
+            self.service.play_lid_charging_followup()
+        self.assertEqual(len(self.writes), 2)
+        self.assertIn(BATTERY_CHARGING_MINT, self.writes[1])
+        self.assertTrue(self.writes[1].splitlines()[-1].startswith("off "))
+        self.assertIsNone(self.service.lid_charging_followup)
 
-    def test_worker_writes_the_fill_after_the_close_animation(self) -> None:
-        writes = self.run_worker(self.controller(), late=False)
-        self.assertEqual(len(writes), 2)
-        self.assertEqual(writes[0], "off")
-        self.assertIn(BATTERY_CHARGING_MINT, writes[1])
-        self.assertTrue(writes[1].splitlines()[-1].startswith("off "))
+    def test_fill_is_skipped_when_the_mac_slept_first(self) -> None:
+        self.close()
+        with patch("sidepulse.service.time.time", return_value=self.service.lid_charging_followup[1] + 30):
+            self.service.play_lid_charging_followup()
+        self.assertEqual(len(self.writes), 1)
 
-    def test_worker_skips_the_fill_when_the_mac_slept_first(self) -> None:
-        writes = self.run_worker(self.controller(), late=True)
-        self.assertEqual(writes, ["off"])
-
-    def test_worker_skips_the_fill_after_the_lid_reopens(self) -> None:
-        controller = self.controller()
-        controller.led_animation_token = 1
-        writes = self.run_worker(controller, late=False)
-        self.assertEqual(writes, ["off"])
+    def test_reopening_the_lid_cancels_the_fill(self) -> None:
+        self.close()
+        self.service.play_lid_animation(LID_ANIMATION_OPEN)
+        self.assertIsNone(self.service.lid_charging_followup)
 
 
 if __name__ == "__main__":

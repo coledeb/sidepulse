@@ -16,6 +16,8 @@ from pathlib import Path
 from typing import Any
 
 from .antigravity_hook import ANTIGRAVITY_NATIVE_EVENTS, ANTIGRAVITY_TOOL_EVENTS
+from .hook_commands import observer_script, WINDOWS_MARKER
+
 from .providers import (
     ANTIGRAVITY_HOOK_NAME,
     CLAUDE_EVENTS,
@@ -510,8 +512,11 @@ def event_hook_command(
 ) -> str:
     """The hook-log command for a provider whose payload does not name its event."""
     executable = python_executable or sys.executable or "python3"
+    if os.name == 'nt':
+        return windows_hook_command(executable, provider, log_path, event=event_name,
+                                    frozen=getattr(sys, 'frozen', False) and python_executable is None)
     if getattr(sys, "frozen", False) and python_executable is None:
-        head = [shlex.quote(executable), "agent-monitor", "hook-log"]
+        head = [shlex.quote(executable), "hook-log"]
     else:
         head = [shlex.quote(executable), shlex.quote(str(Path(__file__).with_name("hook_entry.py")))]
     return " ".join(
@@ -643,7 +648,7 @@ def remove_cursor_hook_entries(entries: list[Any]) -> list[Any]:
             and (
                 "sidepulse.cursor_hook" in str(entry.get("command") or "")
                 or "agent-monitor hook-log" in str(entry.get("command") or "")
-                or "hook_entry.py" in str(entry.get("command") or "")
+                or "hook_entry.py" in observer_script(str(entry.get("command") or ""))
             )
         )
     ]
@@ -655,11 +660,13 @@ def hook_command(
     python_executable: str | None = None,
 ) -> str:
     executable = python_executable or sys.executable or "python3"
+    if os.name == 'nt':
+        return windows_hook_command(executable, provider, log_path,
+                                    frozen=getattr(sys, 'frozen', False) and python_executable is None)
     if getattr(sys, "frozen", False) and python_executable is None:
         command = " ".join(
             [
                 shlex.quote(executable),
-                "agent-monitor",
                 "hook-log",
                 "--provider",
                 shlex.quote(provider),
@@ -684,6 +691,22 @@ def hook_command(
 
 def fail_open_command(command: str) -> str:
     return f"{command} ; true"
+
+
+def windows_hook_command(executable, provider, log_path, *, event=None, frozen=False):
+    """A shell-independent invocation, including paths with quotes/metacharacters.
+
+    Encoding the PowerShell argument avoids a second cmd/Bash/PowerShell parse
+    of user paths. The observer remains fail-open even if Python disappeared.
+    """
+    import base64
+    args = [executable, 'hook-log' if frozen else str(Path(__file__).with_name('hook_entry.py')),
+            '--provider', provider, '--log', str(log_path.expanduser())]
+    if event is not None:
+        args += ['--event', event]
+    quoted = ' '.join("'" + str(arg).replace("'", "''") + "'" for arg in args)
+    script = WINDOWS_MARKER + "$ErrorActionPreference='Stop'; try { & " + quoted + " } catch { }; exit 0"
+    return 'powershell.exe -NoProfile -NonInteractive -EncodedCommand ' + base64.b64encode(script.encode('utf-16le')).decode('ascii')
 
 
 def grok_legacy_hook_config_paths(config: Path) -> tuple[Path, ...]:
@@ -854,6 +877,7 @@ def resolve_codex_hook_hashes(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding='utf-8',
             bufsize=1,
             cwd=str(cwd or Path.cwd()),
         )
@@ -946,7 +970,7 @@ def resolve_codex_hook_hashes(
         key = hook.get("key")
         if hook.get("sourcePath") != source_path:
             continue
-        if not isinstance(command, str) or "hook_entry.py" not in command:
+        if not isinstance(command, str) or "hook_entry.py" not in observer_script(command):
             continue
         if not isinstance(current_hash, str) or not isinstance(key, str):
             continue
@@ -1043,7 +1067,7 @@ def remove_codex_hook_blocks_for_log(text: str, log_path: Path) -> str:
                     break
                 end += 1
             block = "".join(lines[index:end])
-            if target in block or "sidepulse hook-log" in block or "hook_entry.py" in block:
+            if target in block or "sidepulse hook-log" in block or "hook_entry.py" in observer_script_from_toml_block(block):
                 index = end
                 continue
 
@@ -1075,7 +1099,7 @@ def remove_json_command_hooks_for_log(entries: list[Any], log_path: Path) -> lis
             if not isinstance(hook, dict):
                 continue
             command = hook.get("command", "")
-            if target in command or "sidepulse hook-log" in command or "hook_entry.py" in command:
+            if target in command or "sidepulse hook-log" in command or "hook_entry.py" in observer_script(command):
                 continue
             cleaned_hooks.append(hook)
         if cleaned_hooks:
@@ -1131,3 +1155,9 @@ def _normalize_config_text(text: str) -> str:
     if not stripped:
         return ""
     return stripped + "\n"
+
+
+def observer_script_from_toml_block(block):
+    from .hook_commands import WINDOWS_PREFIX
+    commands = re.findall(re.escape(WINDOWS_PREFIX) + r'[A-Za-z0-9+/=]+', block)
+    return block + '\n' + '\n'.join(observer_script(command) for command in commands)

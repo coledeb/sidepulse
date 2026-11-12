@@ -119,30 +119,21 @@ class StatusBarStartupTests(unittest.TestCase):
             self.assertEqual([call[0] for call in calls.mock_calls], ["hide_dock_icon", "initialize"])
             app.run.assert_called_once()
 
-    def test_status_bar_build_monitor_defers_history(self):
-        from sidepulse import status_bar
-        from sidepulse.settings import AgentMonitorSettings
+    def test_daemon_sessions_defer_history_to_a_background_thread(self):
+        from sidepulse import daemon_sessions
+        from sidepulse.program_status import ProgramState
 
         with (
             tempfile.TemporaryDirectory() as tmp,
-            patch.object(status_bar, "default_latest_state_path", return_value=Path(tmp) / "latest.json"),
-            patch.object(status_bar, "default_sources", return_value=(SourceSpec("codex", Path(tmp) / "hook.jsonl"),)),
-            patch.object(AgentMonitor, "_latest_statuses") as read_history,
+            patch.object(daemon_sessions, "default_latest_state_path", return_value=Path(tmp) / "latest.json"),
+            patch.object(daemon_sessions, "default_sources", return_value=(SourceSpec("codex", Path(tmp) / "hook.jsonl"),)),
+            patch.object(AgentMonitor, "_latest_statuses", return_value={}) as read_history,
+            patch.object(daemon_sessions.threading, "Thread") as thread,
         ):
-            target = SimpleNamespace(settings=AgentMonitorSettings())
-            status_bar.StatusBarController.build_monitor(target)
+            sessions = daemon_sessions.DaemonSessions(ProgramState(publisher="mac"), start_t3=False)
             read_history.assert_not_called()
-
-    def test_background_recovery_keeps_original_monitor_when_settings_reload(self):
-        from sidepulse import status_bar
-
-        original = Mock()
-        target = SimpleNamespace(monitor=original)
-        with patch.object(status_bar.threading, "Thread") as thread:
-            status_bar.StatusBarController.start_monitor_recovery(target)
-            target.monitor = Mock()
-            thread.call_args.kwargs["target"]()
-            original.reconcile_recovery_sources.assert_called_once()
-            target.monitor.reconcile_recovery_sources.assert_not_called()
+            sessions.start()
             self.assertTrue(thread.call_args.kwargs["daemon"])
             thread.return_value.start.assert_called_once()
+            thread.call_args.kwargs["target"]()
+            read_history.assert_called_once()

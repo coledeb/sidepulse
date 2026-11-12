@@ -81,6 +81,8 @@ class AgentStatus:
     # The project's own name where its host gives one (T3 Code); otherwise the
     # row is named after its folder.
     project: str | None = None
+    seq: int | None = None
+    session_link: str | None = None
 
     @property
     def priority(self) -> int:
@@ -112,6 +114,8 @@ class AgentStatus:
             "origin": self.origin,
             "stale": self.stale,
             "project": self.project,
+            **({"seq": self.seq} if self.seq is not None else {}),
+            **({"session_link": self.session_link} if self.session_link else {}),
         }
 
 

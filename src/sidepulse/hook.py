@@ -9,7 +9,6 @@ from typing import Any
 
 from .audit import append_status_audit_record
 from .collector import StatusMetadata, read_recent_lines, status_from_event, title_from_event
-from .ipc import send_hook_event
 from .jsonl_log import DEFAULT_BACKUP_COUNT, DEFAULT_MAX_BYTES, append_jsonl_line
 from .origin import annotate_payload_with_origin
 from .providers import detect_log_path, infer_provider_from_payload, parse_log_line
@@ -270,16 +269,9 @@ def hook_log_main(provider: str, log_path: Path, event: str | None = None) -> in
             pass
         try:
             if not hook_event_socket_disabled():
-                send_hook_event(actual_provider, line)
-                from .relay import candidate_relay_event_socket_paths
+                from .program_transport import send_hook_event
 
-                for relay_socket in candidate_relay_event_socket_paths():
-                    if send_hook_event(
-                        actual_provider,
-                        line,
-                        socket_path=relay_socket,
-                    ):
-                        break
+                send_hook_event(actual_provider, line)
         except Exception:
             pass
     except Exception:

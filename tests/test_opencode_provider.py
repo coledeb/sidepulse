@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
-from sidepulse.cli import build_parser
+from sidepulse.cli import build_sidepulse_parser
 from sidepulse.collector import AgentMonitor, SourceSpec
 from sidepulse.install import (
     install_opencode_hooks,
@@ -118,11 +118,8 @@ class OpenCodeInstallTests(unittest.TestCase):
 
     def test_cli_knows_opencode(self) -> None:
         self.assertIn("opencode", HOOK_PROVIDERS)
-        args = build_parser().parse_args(
-            ["install", "opencode", "--opencode-log", "/tmp/custom-opencode.jsonl"]
-        )
+        args = build_sidepulse_parser().parse_args(["setup", "opencode"])
         self.assertEqual(args.provider, "opencode")
-        self.assertEqual(args.opencode_log, Path("/tmp/custom-opencode.jsonl"))
 
 
 class OpenCodeOriginTests(unittest.TestCase):

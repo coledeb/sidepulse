@@ -3,6 +3,7 @@ from __future__ import annotations
 import colorsys
 import json
 import math
+import re
 import shlex
 import signal
 import socket
@@ -50,6 +51,8 @@ try:
         NSOnState,
         NSOpenPanel,
         NSPopUpButton,
+        NSPasteboard,
+        NSPasteboardTypeString,
         NSRectFillUsingOperation,
         NSScrollView,
         NSSavePanel,
@@ -83,41 +86,35 @@ except ImportError:  # pragma: no cover - only the Ghostty integration needs thi
     SBApplication = None
 
 from .battery import (
-    BatteryLedController,
     BatterySnapshot,
     DEFAULT_POWER_CHANGE_PREVIEW_SECONDS,
     format_watts,
     program_for_battery,
-    program_for_charging_preview,
-    read_battery_snapshot,
-    snapshot_shows_charging_fill,
 )
-from .power_source_notifications import PowerSourceNotifier
 from .status_icon import GLYPH_CANVAS, NativeStatusIconRenderer, centered_glyph_rect
 from .audit import (
-    append_status_history_record,
     default_status_audit_log_path,
     default_status_history_log_path,
     export_status_audit_csv,
     export_status_audit_html,
     read_status_history_records,
-    status_history_record,
 )
-from .collector import LiveAgentMonitor, SourceSpec, default_sources, status_project
+from .collector import status_project
 from .device_writer import (
     DEFAULT_FILE_NAME,
     MOUNT_ROOT,
     DeviceCandidate,
     DeviceWriteError,
-    discover_devices,
+    control_target_exists,
     normalize_led_text,
     path_exists,
     target_from_device_path,
     validate_led_text,
-    write_led_program,
 )
-from .keep_awake import KEEPALIVE_FILE_NAME, KeepAwakeController
-from .ipc import HookEventServer, default_event_socket_path, default_latest_state_path
+from .firmware_status import FirmwareStatus, FirmwareStatusReader, install_update
+from .update import BuildInfo, GITHUB_MAIN_URL
+from .ipc import UICommandServer
+from .program_transport import daemon_command, write_daemon_program as write_led_program
 from .install import (
     install_antigravity_hooks,
     install_claude_hooks,
@@ -135,13 +132,12 @@ from .install import (
     uninstall_opencode_hooks,
 )
 from .led_status import (
-    AgentLedController,
+    led_count_for_target,
     apply_brightness,
     brightness_percent,
     normalize_brightness,
     normalized_device_name,
     program_for_agent_mode,
-    write_mode_to_leds,
 )
 from .links import IOSLink, load_ios_links, remove_ios_link, send_ios_program
 from .virtual_device import (
@@ -152,13 +148,6 @@ from .virtual_device import (
     VirtualStatusDevice,
 )
 from .lid_sleep import (
-    LID_POLL_SECONDS,
-    ClosedLidAwakeController,
-    MacSleepSnapshot,
-    external_display_is_active,
-    read_lid_closed,
-    read_mac_sleep_snapshot,
-    run_pmset_displaysleepnow,
     sleep_helper_install_command,
     sleep_helper_installed,
 )
@@ -173,7 +162,6 @@ from .providers import (
     detect_junie_config,
     detect_opencode_config,
     default_state_dir,
-    parse_log_line,
 )
 from .sd_eject_guard_launch import (
     SD_EJECT_GUARD_DISPLAY_NAME,
@@ -186,7 +174,6 @@ from .t3_status import (
     STATE_DISCONNECTED as T3_STATE_DISCONNECTED,
     STATE_NEEDS_RECONNECT as T3_STATE_NEEDS_RECONNECT,
     T3Error,
-    T3StatusPoller,
     connect_t3,
     t3_installed,
 )
@@ -330,6 +317,7 @@ class AgentAnimationMenuItemView(NSView):
             self.popup = None
             self.mode = None
             self.animation_id = None
+            self.preview_program = None
             self.label = add_label(self, "", 10, 7, 106, 20)
             self.animation_preview = VirtualLedView.alloc().initWithFrame_(
                 ((122, 2), (72, 28))
@@ -350,7 +338,14 @@ class AgentAnimationMenuItemView(NSView):
         self.mode = str(mode)
         self.animation_id = str(animation_id)
         self.label.setStringValue_(str(label))
-        self.animation_preview.setProgram_(str(program))
+        self.preview_program = str(program)
+
+    def viewWillDraw(self):
+        # Menu rows need a WASM player only when their popup is actually drawn.
+        if self.preview_program is not None:
+            self.animation_preview.setProgram_(self.preview_program)
+            self.preview_program = None
+        objc.super(AgentAnimationMenuItemView, self).viewWillDraw()
 
     def mouseDown_(self, _event):
         popup = self.popup
@@ -401,8 +396,8 @@ STATUS_BAR_KEEPALIVE_VOLUME_NAMES = (
     "SidePulseDot",
     "PulseDot",
 )
-STATUS_BAR_REFRESH_SECONDS = 15.0
-STATUS_BAR_BATTERY_FALLBACK_POLL_SECONDS = 30.0
+STATUS_BAR_REFRESH_SECONDS = 2.0
+STATUS_HISTORY_SAMPLE_SECONDS = 15.0
 STATUS_BAR_DEVICE_POLL_SECONDS = 2.0
 STATUS_BAR_SESSION_HISTORY_LIMIT = 10
 SIDEPULSE_NOTCH_FEATURE_ENABLED = True
@@ -416,17 +411,6 @@ SETTINGS_TAB_TOP_MARGIN = 20
 STATUS_BAR_HISTORY_CHART_RECORD_LIMIT = 2400
 STATUS_BAR_HISTORY_CHART_RECORD_LIMIT_PADDING = 300
 STATUS_BAR_HISTORY_CHART_RECORD_LIMIT_MULTIPLIER = 3.0
-MAC_SLEEP_POLL_SECONDS = 60.0
-SYSTEM_POLL_ERROR_BACKOFF_SECONDS = 30.0
-LID_ANIMATION_RESTORE_FUDGE_SECONDS = 0.15
-# Extra time the animation guard stays up to cover the device write itself.
-# Right after a wake the card takes ~2.4s to answer, so a guard sized to the
-# animation alone expired before the write landed and the next refresh painted
-# over it. The restore callback drops the guard as soon as the animation ends;
-# this only bounds how long a lost restore can block LED updates.
-LED_ANIMATION_WRITE_ALLOWANCE_SECONDS = 10.0
-# Skip the lid-close charging fill when its write would land this late.
-LID_CHARGING_PREVIEW_MAX_LATE_SECONDS = 2.0
 AGENT_ANIMATION_DEVICE_PREVIEW_SECONDS = 3.0
 AGENT_ANIMATION_EDITOR_DEVICE_PREVIEW_SECONDS = 10.0
 AGENT_ANIMATION_PROFILE_CUSTOM = ""
@@ -513,78 +497,6 @@ def state_for_mode(mode: AgentMode) -> StatusBarState:
     return STATE_IDLE
 
 
-def awake_policy_should_hold(policy: str, *, agents_active: bool) -> bool:
-    if policy == SLEEP_PREVENTION_ALWAYS:
-        return True
-    if policy == SLEEP_PREVENTION_AGENTS:
-        return agents_active
-    return False
-
-
-def lid_closed_led_state_should_hold(
-    *,
-    lid_closed: bool | None,
-    sleep_prevention_policy: str,
-    agents_active: bool | None,
-    battery_safeguard_active: bool = False,
-) -> bool:
-    """Keep the shutdown frame while the closed Mac is allowed to sleep."""
-    if lid_closed is not True or agents_active is None:
-        return False
-    sleep_prevention_requested = awake_policy_should_hold(
-        sleep_prevention_policy,
-        agents_active=agents_active,
-    ) and not battery_safeguard_active
-    return not sleep_prevention_requested
-
-
-def lid_close_animation_should_run(
-    *,
-    sleep_prevention_policy: str,
-    agents_active: bool | None,
-) -> bool:
-    """Run the physical close animation only when the Mac may go to sleep."""
-    if sleep_prevention_policy == SLEEP_PREVENTION_ALWAYS:
-        return False
-    if sleep_prevention_policy == SLEEP_PREVENTION_AGENTS:
-        return agents_active is False
-    return True
-
-
-def closed_lid_display_sleep_should_request(
-    *,
-    lid_closed: bool | None,
-    external_display_active: bool | None,
-    system_sleep_disabled: bool,
-) -> bool:
-    """Only sleep displays when it cannot affect an external monitor."""
-    return (
-        lid_closed is True
-        and external_display_active is False
-        and system_sleep_disabled
-    )
-
-
-def sleep_prevention_battery_safeguard(
-    snapshot: BatterySnapshot | None,
-    threshold_percent: float,
-) -> tuple[bool, str]:
-    threshold = max(0.0, min(100.0, float(threshold_percent)))
-    threshold_text = format_percent_value(threshold)
-    if threshold <= 0:
-        return False, "disabled"
-    if snapshot is None:
-        return False, f"battery unknown, threshold {threshold_text}"
-    if not snapshot.battery_present:
-        return False, f"no battery, threshold {threshold_text}"
-    battery_text = format_percent_value(snapshot.percent)
-    if snapshot.is_plugged:
-        return False, f"battery {battery_text}, plugged in, threshold {threshold_text}"
-    if snapshot.percent < threshold:
-        return True, f"battery {battery_text}, threshold {threshold_text}"
-    return False, f"battery {battery_text}, threshold {threshold_text}"
-
-
 def format_percent_value(value: float | int) -> str:
     number = float(value)
     if number.is_integer():
@@ -610,16 +522,11 @@ class StatusBarController(NSObject):
             return None
 
         self.settings = load_settings()
+        self.app_build = BuildInfo.current()
         self.open_settings_on_launch = False
         self.monitor = self.build_monitor()
         self.event_server = None
-        self.t3_poller = T3StatusPoller(
-            self.handle_t3_record,
-            on_state_change=self.t3_state_changed,
-            # Settings reloads replace self.monitor, so look it up each time.
-            local_waiting=lambda: self.monitor.t3_settle_candidates(),
-            on_local_settled=self.handle_t3_settled,
-        )
+        # The daemon follows T3 Code; the menu only offers to connect it.
         self.t3_connecting = False
         self.status_item = None
         self.status_icon_timer = None
@@ -627,9 +534,6 @@ class StatusBarController(NSObject):
         self.status_icon_native_failed = False
         self.tracking_status_menu = None
         self.timer = None
-        self.battery_timer = None
-        self.power_source_notifier = PowerSourceNotifier(self.power_source_did_change)
-        self.lid_timer = None
         self.device_timer = None
         self.agent_animation_preview_timer = None
         self.settings_window = None
@@ -654,58 +558,23 @@ class StatusBarController(NSObject):
         self.last_snapshot = None
         self.last_battery_snapshot = None
         self.last_battery_error = None
-        self.battery_poll_in_flight = False
-        self.battery_poll_pending = False
-        self.pending_battery_snapshot = None
-        self.pending_battery_error = None
-        self.last_power_connected = None
         self.battery_preview_until = 0.0
         self.current_state = STATE_IDLE
-        self.led_controller = AgentLedController()
-        self.battery_led_controller = BatteryLedController()
-        self.agent_led_controllers_by_device = {}
-        self.battery_led_controllers_by_device = {}
-        self.remote_led_program_by_device = {}
-        self.last_led_display_kind_by_device = {}
         self.device_errors = {}
         self.visualizer = VisualizerControl(default_state_dir() / "visualizer.log")
+        self.firmware_reader = FirmwareStatusReader()
+        self.firmware_status = {}
+        self.firmware_check_in_flight = False
+        self.firmware_roots = ()
+        self.firmware_upgrade_root = None
+        self.firmware_led_hold_until = 0.0
+        self.firmware_messages = {}
         self.leds_enabled = True
-        self.led_sync_in_flight = False
         self.terminating = False
         self.last_led_error = None
         self.last_led_display_kind = LED_DISPLAY_AGENT
         self.last_connected_device_signature = None
-        self.keep_awake = KeepAwakeController()
-        self.closed_lid_awake = ClosedLidAwakeController(
-            use_system_disable=sleep_helper_installed(),
-            use_caffeinate=False,
-        )
-        self.last_keep_awake_error = None
-        self.last_closed_lid_awake_error = None
-        self.last_mac_sleep_error = None
-        self.last_mac_sleep_snapshot = None
-        self.mac_sleep_poll_in_flight = False
-        self.last_mac_sleep_poll_monotonic = 0.0
-        self.mac_sleep_poll_backoff_until_monotonic = 0.0
-        self.pending_mac_sleep_snapshot = None
-        self.last_status_history_error = None
-        self.last_status_read_error = None
         self.event_refresh_pending = False
-        self.agent_awake_last_mode = None
-        self.agent_awake_grace_until_monotonic = None
-        self.agent_awake_requested = False
-        self.battery_sleep_safeguard_active = False
-        self.battery_sleep_safeguard_reason = ""
-        self.last_lid_closed = None
-        self.last_lid_error = None
-        self.lid_poll_in_flight = False
-        self.lid_poll_backoff_until_monotonic = 0.0
-        self.pending_lid_closed = None
-        self.pending_lid_error = None
-        self.lid_closed_led_hold_active = False
-        self.closed_lid_display_sleep_requested = False
-        self.led_animation_until_monotonic = 0.0
-        self.led_animation_token = 0
         self.virtual_status_device = VirtualStatusDevice.alloc().init()
         return self
 
@@ -720,8 +589,6 @@ class StatusBarController(NSObject):
         install_standard_edit_menu()
         log_status_bar("launching status item")
         self.start_event_server()
-        if t3_installed():
-            self.t3_poller.start()
 
         self.status_item = NSStatusBar.systemStatusBar().statusItemWithLength_(
             NSSquareStatusItemLength
@@ -733,28 +600,12 @@ class StatusBarController(NSObject):
         button.setAccessibilityLabel_("SidePulse Agent Monitor: Idle")
         self.status_item.setVisible_(self.settings.show_menu_bar_icon)
         log_status_bar("status item created")
-        self.start_monitor_recovery()
 
         self.refresh_(None)
         self.timer = schedule_status_bar_timer(
             STATUS_BAR_REFRESH_SECONDS,
             self,
             "refresh:",
-        )
-        if not self.power_source_notifier.start():
-            log_status_bar(
-                "power notification unavailable: "
-                f"{self.power_source_notifier.last_error or 'unknown error'}"
-            )
-        self.battery_timer = schedule_status_bar_timer(
-            STATUS_BAR_BATTERY_FALLBACK_POLL_SECONDS,
-            self,
-            "pollBattery:",
-        )
-        self.lid_timer = schedule_status_bar_timer(
-            LID_POLL_SECONDS,
-            self,
-            "pollLid:",
         )
         self.device_timer = schedule_status_bar_timer(
             STATUS_BAR_DEVICE_POLL_SECONDS,
@@ -782,36 +633,29 @@ class StatusBarController(NSObject):
             log_status_bar(f"refresh error: {exc}")
             self.set_status(STATE_ASK)
             battery_snapshot = self.read_battery_snapshot()
-            self.sync_keep_awake(AgentMode.BLOCKED_ERROR, battery_snapshot)
-            mac_sleep_snapshot = self.read_mac_sleep_snapshot()
-            self.record_status_history(
-                AgentMode.BLOCKED_ERROR,
-                STATE_ASK,
-                battery_snapshot,
-                mac_sleep_snapshot,
-            )
             self.sync_leds(AgentMode.BLOCKED_ERROR, battery_snapshot, LED_DISPLAY_AGENT)
-            self.status_item.setMenu_(build_error_menu(exc))
+            self.status_item.setMenu_(build_error_menu(exc, self))
+            unavailable = isinstance(exc.__cause__, (FileNotFoundError, ConnectionRefusedError))
+            now = time.monotonic()
+            if unavailable:
+                first = getattr(self, 'daemon_unavailable_since', now)
+                self.daemon_unavailable_since = first
+                if now - first >= 5 and now >= getattr(self, 'next_daemon_recovery', 0):
+                    self.restartDaemon_(None)
             return
 
+        self.daemon_unavailable_since = time.monotonic()
         self.last_snapshot = snapshot
         battery_snapshot = self.read_battery_snapshot()
         state = state_for_mode(snapshot.aggregate.mode)
         self.observe_connected_devices()
-        self.set_status(state)
-        self.sync_keep_awake(snapshot.aggregate.mode, battery_snapshot)
-        mac_sleep_snapshot = self.read_mac_sleep_snapshot()
-        self.record_status_history(
-            snapshot.aggregate.mode,
-            state,
-            battery_snapshot,
-            mac_sleep_snapshot,
-        )
+        self.check_firmware()
         self.sync_leds(
             snapshot.aggregate.mode,
             battery_snapshot,
             self.active_led_display_kind(battery_snapshot),
         )
+        self.set_status(state)
         self.visualizer.poll()
         self.visualizer.refresh_apps_async(self.request_menu_refresh)
         self.status_item.setMenu_(build_menu(snapshot, state, self))
@@ -925,7 +769,103 @@ class StatusBarController(NSObject):
 
     @objc.IBAction
     def forceRefresh_(self, _sender):
+        self.firmware_roots = ()
         self.refresh_(None)
+
+    @objc.IBAction
+    def openAppUpdates_(self, _sender):
+        open_url(GITHUB_MAIN_URL)
+
+    def check_firmware(self) -> None:
+        roots = tuple(
+            device.root for device in self.status_bar_devices(remember=False)
+            if device.connected and device.remote_link is None and device.device_id != VIRTUAL_DEVICE_ID
+        )
+        if self.firmware_check_in_flight or self.firmware_upgrade_root is not None:
+            return
+        if roots == self.firmware_roots:
+            return
+        self.firmware_status = {root: status for root, status in self.firmware_status.items() if root in roots}
+        self.firmware_messages = {root: message for root, message in self.firmware_messages.items() if root in roots}
+        self.firmware_roots = roots
+        self.firmware_check_in_flight = True
+        threading.Thread(target=self.read_firmware_worker, args=(roots,), daemon=True).start()
+
+    def read_firmware_worker(self, roots) -> None:
+        try:
+            statuses = self.firmware_reader.read(roots)
+        except Exception as exc:
+            statuses = {root: FirmwareStatus(error=str(exc)) for root in roots}
+        self.performSelectorOnMainThread_withObject_waitUntilDone_(
+            "handleFirmwareStatus:", statuses, False,
+        )
+
+    def handleFirmwareStatus_(self, statuses):
+        self.firmware_status = dict(statuses)
+        self.firmware_messages = {
+            root: message for root, message in self.firmware_messages.items()
+            if root == self.firmware_upgrade_root
+        }
+        self.firmware_check_in_flight = False
+        self.rebuild_firmware_menu()
+
+    def rebuild_firmware_menu(self) -> None:
+        if self.status_item is not None and self.last_snapshot is not None:
+            self.status_item.setMenu_(build_menu(self.last_snapshot, self.current_state, self))
+
+    @objc.IBAction
+    def upgradeFirmware_(self, sender):
+        root = Path(str(sender.representedObject()))
+        status = self.firmware_status.get(root)
+        connected = any(
+            device.connected and device.root == root
+            for device in self.status_bar_devices(remember=False)
+        )
+        if self.firmware_upgrade_root is not None or not connected or status is None or not status.outdated:
+            return
+        try:
+            daemon_command({'type': 'output_control', 'pause_seconds': 300}, timeout=1)
+        except Exception as exc:
+            self.firmware_messages[root] = ("Could not pause LED output", str(exc))
+            self.rebuild_firmware_menu()
+            return
+        self.firmware_upgrade_root = root
+        self.firmware_messages[root] = ("Updating firmware…", "Keep the device connected")
+        self.close_status_menu()
+        self.rebuild_firmware_menu()
+        threading.Thread(target=self.upgrade_firmware_worker, args=(status,), daemon=True).start()
+
+    def upgrade_firmware_worker(self, status) -> None:
+        try:
+            install_update(status.device, status.latest)
+            message = (
+                f"Firmware {status.latest} transferred. Leave the device connected for at least "
+                "10 seconds, then reconnect to confirm installation."
+            )
+            success = True
+        except Exception as exc:
+            message = f"Firmware upgrade failed: {exc}"
+            success = False
+        self.performSelectorOnMainThread_withObject_waitUntilDone_(
+            "handleFirmwareUpgrade:", (str(status.device.root), message, success), False,
+        )
+
+    def handleFirmwareUpgrade_(self, payload):
+        root, message, success = payload
+        self.firmware_upgrade_root = None
+        self.firmware_led_hold_until = time.monotonic() + 10
+        try:
+            daemon_command({'type': 'output_control', 'pause_seconds': 10})
+        except Exception as exc:
+            log_status_bar(f'firmware output resume error: {exc}')
+        title = "Reconnect to confirm firmware update" if success else "Firmware upgrade failed"
+        self.firmware_messages[Path(root)] = (title, message)
+        self.rebuild_firmware_menu()
+        alert = NSAlert.alloc().init()
+        alert.setMessageText_("Firmware transferred" if success else "Firmware upgrade failed")
+        alert.setInformativeText_(message)
+        alert.addButtonWithTitle_("OK")
+        alert.runModal()
 
     @objc.IBAction
     def openDeepLink_(self, sender):
@@ -1053,8 +993,8 @@ class StatusBarController(NSObject):
 
     @objc.IBAction
     def toggleKeepAwake_(self, _sender):
-        self.keep_awake.set_enabled(not self.keep_awake.enabled)
-        log_status_bar(f"keep_awake={'on' if self.keep_awake.enabled else 'off'}")
+        enabled = getattr(self.monitor, 'runtime', {}).get('keep_awake_enabled', True)
+        daemon_command({'type': 'output_control', 'keep_awake_enabled': not enabled})
         self.refresh_(None)
 
     @objc.IBAction
@@ -1269,6 +1209,22 @@ class StatusBarController(NSObject):
         return True
 
     @objc.IBAction
+    def togglePhoneSessionSync_(self, sender):
+        self.toggle_phone_session_sync(str(sender.representedObject()))
+
+    def toggle_phone_session_sync(self, link_id: str) -> None:
+        enabled = not self.settings.sync_sessions_to_phone(link_id)
+        try:
+            self.settings = self.settings.with_phone_session_sync(link_id, enabled)
+            save_settings(self.settings)
+        except Exception as exc:
+            self.settings = load_settings()
+            self.set_settings_message(f"Could not save session sync: {exc}")
+            return
+        self.set_settings_message("Session syncing enabled." if enabled else "Session syncing paused. The phone keeps its last received sessions.")
+        self.refresh_(None)
+
+    @objc.IBAction
     def setDeviceDisplayAgent_(self, sender):
         self.set_device_display(sender.representedObject(), LED_DISPLAY_AGENT)
 
@@ -1362,8 +1318,6 @@ class StatusBarController(NSObject):
 
     @objc.IBAction
     def quit_(self, _sender):
-        self.closed_lid_awake.release()
-        self.keep_awake.release()
         NSApp.terminate_(self)
 
     def applicationWillTerminate_(self, _notification):
@@ -1371,20 +1325,10 @@ class StatusBarController(NSObject):
         NSWorkspace.sharedWorkspace().notificationCenter().removeObserver_(self)
         self.stop_agent_animation_preview_timer()
         self.visualizer.stop(own_only=True)
-        self.clear_leds_on_quit()
         self.stop_status_icon_animation()
         if self.status_icon_renderer is not None:
             self.status_icon_renderer.close()
-        self.power_source_notifier.stop()
-        if self.battery_timer is not None:
-            self.battery_timer.invalidate()
-            self.battery_timer = None
-        self.stop_agent_animation_preview_timer()
         self.stop_event_server()
-        self.t3_poller.stop()
-        self.visualizer.stop(own_only=True)
-        self.closed_lid_awake.release()
-        self.keep_awake.release()
 
     def set_status(self, state: StatusBarState) -> None:
         previous = self.current_state
@@ -1395,8 +1339,11 @@ class StatusBarController(NSObject):
         if button is None:
             return
         button.setTitle_("")
-        button.setToolTip_(f"SidePulse Agent Monitor: {state.label}")
-        button.setAccessibilityLabel_(f"SidePulse Agent Monitor: {state.label}")
+        label = f"SidePulse Agent Monitor: {state.label}"
+        if self.device_errors:
+            label += " — LED output failed"
+        button.setToolTip_(label)
+        button.setAccessibilityLabel_(label)
         self.update_status_icon_animation()
         if previous != state:
             log_status_bar(f"state={state.label}")
@@ -1477,40 +1424,16 @@ class StatusBarController(NSObject):
         elif not animated:
             self.stop_status_icon_animation()
 
-    def build_monitor(self) -> LiveAgentMonitor:
-        socket_path = default_event_socket_path()
-        return LiveAgentMonitor(
-            sources=(SourceSpec("event-bus", socket_path),),
-            recovery_sources=default_sources(self.settings),
-            stale_after_seconds=self.settings.idle_timeout_seconds,
-            completed_visible_seconds=self.settings.completed_visible_seconds,
-            latest_state_path=default_latest_state_path(),
-            recover_on_init=False,
-        )
-
-    def start_monitor_recovery(self) -> None:
-        # Capture this instance: settings changes can replace self.monitor while
-        # an earlier recovery is still running. Workers never access AppKit.
-        monitor = self.monitor
-
-        def recover() -> None:
-            try:
-                monitor.reconcile_recovery_sources()
-            except Exception as exc:
-                log_status_bar(f"history recovery error: {exc}")
-
-        threading.Thread(target=recover, daemon=True).start()
+    def build_monitor(self):
+        from .program_presentation import DaemonMonitor
+        return DaemonMonitor()
 
     def reload_monitor(self) -> None:
         self.monitor = self.build_monitor()
-        self.start_monitor_recovery()
 
     def start_event_server(self) -> None:
         self.stop_event_server()
-        self.event_server = HookEventServer(
-            self.handle_hook_event_message,
-            on_open_settings=self.schedule_open_settings,
-        )
+        self.event_server = UICommandServer(on_open_settings=self.schedule_open_settings)
         try:
             socket_path = self.event_server.start()
             log_status_bar(f"event_server listening={socket_path}")
@@ -1528,54 +1451,19 @@ class StatusBarController(NSObject):
             "openSettings:", None, False,
         )
 
-    def handle_hook_event_message(self, provider: str, line: dict) -> None:
-        try:
-            record = parse_log_line(
-                provider,
-                json.dumps(line, separators=(",", ":"), ensure_ascii=False),
-            )
-            if record is not None:
-                self.monitor.ingest_record(record)
-                self.schedule_event_refresh()
-        except Exception as exc:
-            log_status_bar(f"event_server ingest error: {exc}")
-
-    def t3_state_changed(self, state: str) -> None:
-        error = self.t3_poller.last_error if state != "connected" else None
-        log_status_bar(f"t3 state={state}" + (f" error={error}" if error else ""))
-        self.schedule_event_refresh()
-
-    def handle_t3_settled(self, row, settled_at) -> None:
-        """A waiting row's T3 thread was settled on this Mac (called on the poller thread)."""
-        try:
-            if self.monitor.settle_waiting_session(row, settled_at):
-                log_status_bar(
-                    f"t3 settled agent={row.agent_id} thread={row.t3_thread_id or 'by-timing'}"
-                )
-                self.schedule_event_refresh()
-        except Exception as exc:
-            log_status_bar(f"t3 settle error: {exc}")
-
-    def handle_t3_record(self, record) -> None:
-        """A linked T3 environment's thread changed (called on the poller thread)."""
-        try:
-            log_status_bar(
-                f"t3 thread={record.session_id} status={record.raw.get('sidepulse_status')} "
-                f"origin={record.origin}"
-            )
-            self.monitor.ingest_record(record)
-            self.schedule_event_refresh()
-        except Exception as exc:
-            log_status_bar(f"t3 ingest error: {exc}")
+    def t3_state(self) -> str | None:
+        """The daemon's T3 Code connection state, as of the last refresh."""
+        return (getattr(self.monitor, "t3", None) or {}).get("state")
 
     def t3_menu_action_title(self) -> str | None:
         if self.t3_connecting:
             return "Connecting T3 Code… (approve in your browser)"
         if not t3_installed():
             return None
-        if self.t3_poller.state == T3_STATE_NEEDS_RECONNECT:
+        state = self.t3_state()
+        if state == T3_STATE_NEEDS_RECONNECT:
             return "Reconnect T3 Code…"
-        if self.t3_poller.state == T3_STATE_DISCONNECTED:
+        if state == T3_STATE_DISCONNECTED:
             return "Connect T3 Code…"
         return None
 
@@ -1593,8 +1481,10 @@ class StatusBarController(NSObject):
                 log_status_bar(f"t3 connect failed: {exc}")
             finally:
                 self.t3_connecting = False
-                self.t3_poller.reconnect()
-                self.t3_poller.start()
+                try:
+                    daemon_command({"type": "t3_reconnect"})
+                except Exception as exc:
+                    log_status_bar(f"t3 reconnect request failed: {exc}")
                 self.schedule_event_refresh()
 
         threading.Thread(target=run, name="sidepulse-t3-connect", daemon=True).start()
@@ -1627,6 +1517,8 @@ class StatusBarController(NSObject):
         if window is None:
             return
         identifier = str(tab_item.identifier())
+        if identifier == 'history' and self.settings_window is not None:
+            self.refresh_history_chart()
         height = (
             SETTINGS_ANIMATIONS_WINDOW_HEIGHT
             if identifier == "animations"
@@ -2000,7 +1892,9 @@ class StatusBarController(NSObject):
                 timeframe_popup,
                 self.settings.history_timeframe_seconds,
             )
-        self.refresh_history_chart()
+        tabs = self.settings_fields.get('tabs')
+        if tabs is not None and str(tabs.selectedTabViewItem().identifier()) == 'history':
+            self.refresh_history_chart()
 
     def refresh_history_chart(self) -> None:
         chart = self.settings_fields.get("status_history_chart")
@@ -2812,20 +2706,13 @@ class StatusBarController(NSObject):
             self.set_settings_message("No connected agent-display device to show it on.")
             return
 
-        self.led_animation_token += 1
-        token = self.led_animation_token
-        self.led_animation_until_monotonic = (
-            time.monotonic()
-            + AGENT_ANIMATION_DEVICE_PREVIEW_SECONDS
-            + LED_ANIMATION_WRITE_ALLOWANCE_SECONDS
-        )
         self.set_settings_message(
             f"Showing {MODE_LABELS[mode]} on device for "
             f"{AGENT_ANIMATION_DEVICE_PREVIEW_SECONDS:g} seconds."
         )
         thread = threading.Thread(
             target=self.show_agent_animation_on_device_worker,
-            args=(mode, animation.style, animation.custom_program, devices, token),
+            args=(mode, animation.style, animation.custom_program, devices),
             kwargs={"idle_pulse_seconds": self.settings.idle_pulse_seconds},
             daemon=True,
         )
@@ -2837,34 +2724,32 @@ class StatusBarController(NSObject):
         animation_style: str,
         custom_program: str,
         devices: list[StatusBarDevice],
-        token: int,
         idle_pulse_seconds: float | None = None,
     ) -> None:
         for device in devices:
             try:
-                result = write_mode_to_leds(
+                program = program_for_agent_mode(
                     mode,
-                    device_path=device.target,
+                    led_count=led_count_for_target(device.target),
                     brightness=device.brightness,
                     animation_style=animation_style,
                     custom_program=custom_program,
                     idle_pulse_seconds=idle_pulse_seconds,
                 )
+                target = write_led_program(
+                    program,
+                    device_path=device.target,
+                    hold_seconds=AGENT_ANIMATION_DEVICE_PREVIEW_SECONDS,
+                )
                 log_status_bar(
                     f"animation device preview={MODE_LABELS[mode]} "
-                    f"device={device.name} target={result.target}"
+                    f"device={device.name} target={target}"
                 )
             except Exception as exc:
                 log_status_bar(
                     f"animation device preview error {MODE_LABELS[mode]} "
                     f"device={device.name}: {exc}"
                 )
-        time.sleep(AGENT_ANIMATION_DEVICE_PREVIEW_SECONDS)
-        self.performSelectorOnMainThread_withObject_waitUntilDone_(
-            "restoreLedDisplay:",
-            str(token),
-            False,
-        )
 
     def show_agent_animation_editor(
         self,
@@ -2963,13 +2848,6 @@ class StatusBarController(NSObject):
                 status.setTextColor_(NSColor.systemRedColor())
             return
 
-        self.led_animation_token += 1
-        token = self.led_animation_token
-        self.led_animation_until_monotonic = (
-            time.monotonic()
-            + AGENT_ANIMATION_EDITOR_DEVICE_PREVIEW_SECONDS
-            + LED_ANIMATION_WRITE_ALLOWANCE_SECONDS
-        )
         if status is not None:
             status.setStringValue_(
                 f"Showing for {AGENT_ANIMATION_EDITOR_DEVICE_PREVIEW_SECONDS:g} seconds"
@@ -2977,7 +2855,7 @@ class StatusBarController(NSObject):
             status.setTextColor_(NSColor.secondaryLabelColor())
         thread = threading.Thread(
             target=self.show_animation_program_on_device_worker,
-            args=(program, devices, token),
+            args=(program, devices),
             daemon=True,
         )
         thread.start()
@@ -2986,7 +2864,6 @@ class StatusBarController(NSObject):
         self,
         program: str,
         devices: list[StatusBarDevice],
-        token: int,
     ) -> None:
         for device in devices:
             try:
@@ -2994,6 +2871,7 @@ class StatusBarController(NSObject):
                 target = write_led_program(
                     scaled_program,
                     device_path=device.target,
+                    hold_seconds=AGENT_ANIMATION_EDITOR_DEVICE_PREVIEW_SECONDS,
                 )
                 log_status_bar(
                     f"custom animation preview device={device.name} target={target}"
@@ -3002,12 +2880,6 @@ class StatusBarController(NSObject):
                 log_status_bar(
                     f"custom animation preview error {device.name}: {exc}"
                 )
-        time.sleep(AGENT_ANIMATION_EDITOR_DEVICE_PREVIEW_SECONDS)
-        self.performSelectorOnMainThread_withObject_waitUntilDone_(
-            "restoreLedDisplay:",
-            str(token),
-            False,
-        )
 
     def save_custom_agent_animation(self) -> None:
         mode = self.agent_animation_editor_mode
@@ -3045,173 +2917,22 @@ class StatusBarController(NSObject):
         self.refresh_(None)
 
     def read_battery_snapshot(self) -> BatterySnapshot | None:
-        try:
-            snapshot = read_battery_snapshot(
-                full_charge_watts=self.settings.battery_full_charge_watts,
-            )
-        except Exception as exc:
-            error = str(exc)
-            if error != self.last_battery_error:
-                log_status_bar(f"battery error: {error}")
-            self.last_battery_error = error
-            return None
-
-        return self.accept_battery_snapshot(snapshot)
-
-    def accept_battery_snapshot(self, snapshot: BatterySnapshot) -> BatterySnapshot:
-        self.last_battery_error = None
+        """Return the daemon observation; the UI never polls Mac power itself."""
+        runtime = getattr(self.monitor, 'runtime', {})
+        data = runtime.get('battery')
+        if data is not None:
+            from .battery import PDProfile
+            data = dict(data)
+            data['pd_profiles'] = tuple(PDProfile(**row) for row in data.get('pd_profiles', ()))
+            snapshot = BatterySnapshot(**data)
+        else:
+            snapshot = None
         self.last_battery_snapshot = snapshot
-        self.update_battery_power_preview(snapshot)
+        self.last_battery_error = runtime.get('battery_error')
+        self.battery_preview_until = runtime.get('battery_preview_until', 0.0)
+        self.leds_enabled = getattr(self.monitor, 'outputs_enabled', True)
         return snapshot
 
-    @objc.IBAction
-    def pollBattery_(self, _sender):
-        self.poll_battery_once()
-
-    def poll_battery_once(self) -> None:
-        if self.battery_poll_in_flight:
-            self.battery_poll_pending = True
-            return
-        self.battery_poll_in_flight = True
-        threading.Thread(target=self._read_battery_snapshot_async, daemon=True).start()
-
-    def power_source_did_change(self) -> None:
-        self.poll_battery_once()
-
-    def _read_battery_snapshot_async(self) -> None:
-        try:
-            self.pending_battery_snapshot = read_battery_snapshot(
-                full_charge_watts=self.settings.battery_full_charge_watts,
-            )
-            self.pending_battery_error = None
-        except Exception as exc:
-            self.pending_battery_snapshot = None
-            self.pending_battery_error = str(exc)
-        self.performSelectorOnMainThread_withObject_waitUntilDone_(
-            "handleBatterySnapshot:",
-            None,
-            False,
-        )
-
-    def handleBatterySnapshot_(self, _payload) -> None:
-        self.handle_battery_snapshot()
-
-    def handle_battery_snapshot(self) -> None:
-        snapshot = self.pending_battery_snapshot
-        error = self.pending_battery_error
-        self.pending_battery_snapshot = None
-        self.pending_battery_error = None
-        poll_again = self.battery_poll_pending
-        self.battery_poll_pending = False
-        self.battery_poll_in_flight = False
-
-        if snapshot is None:
-            if error and error != self.last_battery_error:
-                log_status_bar(f"battery error: {error}")
-            self.last_battery_error = error
-            if poll_again:
-                self.poll_battery_once()
-            return
-
-        battery_snapshot = self.accept_battery_snapshot(snapshot)
-        mode = (
-            self.last_snapshot.aggregate.mode
-            if self.last_snapshot is not None
-            else AgentMode.IDLE_READY
-        )
-        self.sync_keep_awake(mode, battery_snapshot)
-        self.sync_leds(
-            mode,
-            battery_snapshot,
-            self.active_led_display_kind(battery_snapshot),
-        )
-        if poll_again:
-            self.poll_battery_once()
-
-    def update_battery_power_preview(self, snapshot: BatterySnapshot) -> None:
-        plugged = snapshot.is_plugged
-        if self.last_power_connected is not None and self.last_power_connected != plugged:
-            if self.settings.battery_show_on_power_change:
-                self.battery_preview_until = (
-                    time.monotonic()
-                    + self.settings.battery_power_change_preview_seconds
-                )
-                log_status_bar(
-                    f"battery preview power={'plugged' if plugged else 'unplugged'}"
-                )
-        self.last_power_connected = plugged
-
-    def read_mac_sleep_snapshot(self) -> MacSleepSnapshot | None:
-        now = time.monotonic()
-        if (
-            not self.mac_sleep_poll_in_flight
-            and now >= self.mac_sleep_poll_backoff_until_monotonic
-            and now - self.last_mac_sleep_poll_monotonic >= MAC_SLEEP_POLL_SECONDS
-        ):
-            self.mac_sleep_poll_in_flight = True
-            self.last_mac_sleep_poll_monotonic = now
-            threading.Thread(target=self._read_mac_sleep_snapshot_async, daemon=True).start()
-        return self.last_mac_sleep_snapshot
-
-    def _read_mac_sleep_snapshot_async(self) -> None:
-        self.pending_mac_sleep_snapshot = read_mac_sleep_snapshot()
-        self.performSelectorOnMainThread_withObject_waitUntilDone_(
-            "handleMacSleepSnapshot:",
-            None,
-            False,
-        )
-
-    def handleMacSleepSnapshot_(self, _sender):
-        self.mac_sleep_poll_in_flight = False
-        snapshot = self.pending_mac_sleep_snapshot
-        self.pending_mac_sleep_snapshot = None
-        if not isinstance(snapshot, MacSleepSnapshot):
-            return
-        error = snapshot.error or None
-        if error != self.last_mac_sleep_error:
-            self.last_mac_sleep_error = error
-            if error:
-                log_status_bar(f"mac_sleep error: {error}")
-        self.mac_sleep_poll_backoff_until_monotonic = (
-            time.monotonic() + SYSTEM_POLL_ERROR_BACKOFF_SECONDS if error else 0.0
-        )
-        self.last_mac_sleep_snapshot = snapshot
-
-    def record_status_history(
-        self,
-        mode: AgentMode,
-        state: StatusBarState,
-        battery_snapshot: BatterySnapshot | None,
-        mac_sleep_snapshot: MacSleepSnapshot | None,
-    ) -> None:
-        try:
-            record = status_history_record(
-                agent_mode=mode.value,
-                display_status=state.label,
-                battery=battery_snapshot,
-                mac_sleep=mac_sleep_snapshot,
-                lid_closed=self.last_lid_closed,
-                keep_awake_requested=bool(self.keep_awake.holding_requested),
-                keep_awake_active=bool(self.keep_awake.process_running()),
-                sleep_prevention_policy=self.settings.sleep_prevention_policy,
-                sleep_prevention_battery_safeguard_active=bool(
-                    self.battery_sleep_safeguard_active
-                ),
-                sleep_prevention_min_battery_percent=(
-                    self.settings.sleep_prevention_min_battery_percent
-                ),
-                closed_lid_awake_requested=bool(self.closed_lid_awake.last_requested),
-                closed_lid_awake_active=bool(self.closed_lid_awake.active()),
-            )
-            append_status_history_record(record)
-        except Exception as exc:
-            error = str(exc)
-            if error != self.last_status_history_error:
-                self.last_status_history_error = error
-                log_status_bar(f"status_history error: {error}")
-            return
-
-        self.last_status_history_error = None
 
     def active_led_display_kind(self, snapshot: BatterySnapshot | None) -> str:
         if self.settings.led_display == LED_DISPLAY_CUSTOM:
@@ -3223,57 +2944,46 @@ class StatusBarController(NSObject):
         return LED_DISPLAY_AGENT
 
     def reset_led_controllers_for_display_change(self) -> None:
-        self.led_controller.reset()
-        self.battery_led_controller.reset()
-        for controller in self.agent_led_controllers_by_device.values():
-            controller.reset()
-        for controller in self.battery_led_controllers_by_device.values():
-            controller.reset()
-        self.remote_led_program_by_device.clear()
-        self.last_led_display_kind_by_device.clear()
         self.last_led_error = None
 
     def reset_led_controllers_for_device(self, device_id: str) -> None:
-        agent_controller = self.agent_led_controllers_by_device.get(device_id)
-        if agent_controller is not None:
-            agent_controller.reset()
-        battery_controller = self.battery_led_controllers_by_device.get(device_id)
-        if battery_controller is not None:
-            battery_controller.reset()
-        self.remote_led_program_by_device.pop(device_id, None)
-        self.last_led_display_kind_by_device.pop(device_id, None)
         self.device_errors.pop(device_id, None)
         self.last_led_error = None
 
-    def agent_controller_for_device(self, device: StatusBarDevice) -> AgentLedController:
-        controller = self.agent_led_controllers_by_device.get(device.device_id)
-        if controller is None:
-            controller = AgentLedController(device_path=device.target)
-            self.agent_led_controllers_by_device[device.device_id] = controller
-        controller.device_path = device.target
-        controller.brightness = device.brightness
-        return controller
+    @objc.IBAction
+    def copySessionLink_(self, sender):
+        value = sender.representedObject()
+        if not isinstance(value, str) or not value.startswith('sidepulse://sessions?'):
+            return
+        clipboard = NSPasteboard.generalPasteboard()
+        clipboard.clearContents()
+        clipboard.setString_forType_(value, NSPasteboardTypeString)
 
-    def battery_controller_for_device(self, device: StatusBarDevice) -> BatteryLedController:
-        controller = self.battery_led_controllers_by_device.get(device.device_id)
-        if controller is None:
-            controller = BatteryLedController(device_path=device.target)
-            self.battery_led_controllers_by_device[device.device_id] = controller
-        controller.device_path = device.target
-        controller.brightness = device.brightness
-        return controller
+    @objc.IBAction
+    def restartDaemon_(self, _sender):
+        if getattr(self, 'daemon_recovery_running', False):
+            return
+        self.daemon_recovery_running = True
+        self.next_daemon_recovery = time.monotonic() + 60
+        def recover():
+            try:
+                from .service_launch import restart_service
+                result = restart_service()
+                if not result.started:
+                    log_status_bar('Daemon could not be restarted: ' + result.detail)
+            except Exception as exc:
+                log_status_bar(f'Daemon restart failed: {exc}')
+            finally:
+                self.daemon_recovery_running = False
+        threading.Thread(target=recover, daemon=True).start()
 
     def status_bar_devices(self, *, remember: bool = True) -> list[StatusBarDevice]:
         entries_by_id: dict[str, StatusBarDevice] = {}
-        try:
-            candidates = discover_devices()
-        except Exception as exc:
-            log_status_bar(f"device discovery error: {exc}")
-            candidates = []
+        candidates = getattr(self.monitor, 'devices', [])
 
         for candidate in candidates:
-            device_id = device_id_for_root(candidate.root)
-            name = device_display_name(candidate.root.name)
+            device_id = candidate.device_id or device_id_for_root(candidate.root)
+            name = candidate.model or device_display_name(candidate.root.name)
             entries_by_id[device_id] = StatusBarDevice(
                 device_id=device_id,
                 name=name,
@@ -3360,6 +3070,8 @@ class StatusBarController(NSObject):
         if previous is None or previous == signature:
             return False
 
+        self.firmware_roots = ()
+
         previous_by_id = {entry[0]: entry for entry in previous}
         current_by_id = {entry[0]: entry for entry in signature}
         reset_ids = {
@@ -3413,35 +3125,11 @@ class StatusBarController(NSObject):
             return LED_DISPLAY_BATTERY
         return LED_DISPLAY_AGENT
 
-    def sync_leds(
-        self,
-        mode: AgentMode,
-        battery_snapshot: BatterySnapshot | None,
-        display_kind: str,
-    ) -> None:
-        if not self.leds_enabled or self.terminating:
-            return
-
-        self.sync_virtual_status_device(mode, battery_snapshot)
-
-        if self.lid_closed_led_hold_active:
-            if self.should_hold_lid_closed_led_state():
-                return
-            self.lid_closed_led_hold_active = False
-            log_status_bar("lid_led_state=restoring reason=sleep_conditions_changed")
-
-        if time.monotonic() < self.led_animation_until_monotonic:
-            return
-
-        if self.led_sync_in_flight:
-            return
-        self.led_sync_in_flight = True
-        thread = threading.Thread(
-            target=self.sync_leds_worker,
-            args=(mode, battery_snapshot, display_kind),
-            daemon=True,
-        )
-        thread.start()
+    def sync_leds(self, mode, battery_snapshot, display_kind) -> None:
+        # The virtual Notch is a view. Physical output and timers belong to the daemon.
+        if self.leds_enabled:
+            self.sync_virtual_status_device(mode, battery_snapshot)
+        self.sync_leds_now(mode, battery_snapshot, display_kind)
 
     def sync_virtual_status_device(
         self,
@@ -3490,347 +3178,32 @@ class StatusBarController(NSObject):
                 return
             self.virtual_status_device.set_program(program)
 
-    def sync_leds_worker(
-        self,
-        mode: AgentMode,
-        battery_snapshot: BatterySnapshot | None,
-        display_kind: str,
-    ) -> None:
-        try:
-            self.sync_leds_now(mode, battery_snapshot, display_kind)
-        finally:
-            self.led_sync_in_flight = False
 
-    def sync_leds_now(
-        self,
-        mode: AgentMode,
-        battery_snapshot: BatterySnapshot | None,
-        display_kind: str,
-    ) -> None:
-        devices = [
-            device for device in self.status_bar_devices()
-            if device.connected and device.device_id != VIRTUAL_DEVICE_ID
-        ]
-        if not devices:
-            self.ensure_device_selection()
-            devices = [
-                device
-                for device in self.status_bar_devices(remember=False)
-                if device.connected and device.device_id != VIRTUAL_DEVICE_ID
-            ]
-        if not devices:
-            self.last_led_error = None
-            return
-
-        active_errors: dict[str, str] = {}
-        for device in devices:
-            device_display_kind = self.active_led_display_kind_for_device(
-                device,
-                battery_snapshot,
-            )
-            if self.last_led_display_kind_by_device.get(device.device_id) != device_display_kind:
-                self.reset_led_controllers_for_device(device.device_id)
-                self.last_led_display_kind_by_device[device.device_id] = device_display_kind
-
-            if device_display_kind == LED_DISPLAY_CUSTOM:
-                self.device_errors.pop(device.device_id, None)
-                continue
-
-            if device.remote_link is not None:
-                if device_display_kind == LED_DISPLAY_BATTERY and battery_snapshot is not None:
-                    program = program_for_battery(
-                        battery_snapshot,
-                        led_count=8,
-                        brightness=255,
-                    )
-                    label = f"{device.name} Battery {battery_snapshot.percent}%"
-                else:
-                    animation = self.settings.agent_animation(mode)
-                    try:
-                        program = program_for_agent_mode(
-                            mode,
-                            led_count=8,
-                            brightness=255,
-                            animation_style=animation.style,
-                            custom_program=animation.custom_program,
-                            idle_pulse_seconds=self.settings.idle_pulse_seconds,
-                        )
-                    except DeviceWriteError as exc:
-                        active_errors[device.device_id] = str(exc)
-                        continue
-                    label = f"{device.name} {MODE_LABELS[mode]}"
-
-                if self.remote_led_program_by_device.get(device.device_id) == program:
-                    self.device_errors.pop(device.device_id, None)
-                    continue
-                try:
-                    send_ios_program(
-                        device.remote_link,
-                        program,
-                        data=remote_event_data(battery_snapshot),
-                    )
-                except Exception as exc:
-                    error = str(exc)
-                    active_errors[device.device_id] = error
-                    previous_error = self.device_errors.get(device.device_id)
-                    if error != previous_error:
-                        log_status_bar(f"linked phone error {device.name}: {error}")
-                    continue
-
-                self.remote_led_program_by_device[device.device_id] = program
-                self.device_errors.pop(device.device_id, None)
-                log_status_bar(
-                    f"leds={label} target=linked phone {device.remote_link.link_id}"
-                )
-                continue
-
-            if device_display_kind == LED_DISPLAY_BATTERY and battery_snapshot is not None:
-                controller = self.battery_controller_for_device(device)
-                result = controller.sync_snapshot(battery_snapshot)
-                label = (
-                    f"{device.name} Battery {battery_snapshot.percent}% "
-                    f"{format_watts(battery_snapshot.adapter_power)}"
-                )
-            else:
-                animation = self.settings.agent_animation(mode)
-                controller = self.agent_controller_for_device(device)
-                result = controller.sync_mode(
-                    mode,
-                    animation_style=animation.style,
-                    custom_program=animation.custom_program,
-                    idle_pulse_seconds=self.settings.idle_pulse_seconds,
-                )
-                label = f"{device.name} {result.label}"
-
-            if result.error and controller.last_error_busy:
-                # `sidepulse visualize` holds the device; the controller retries
-                # every second and restores the display once it is released.
-                self.device_errors.pop(device.device_id, None)
-                continue
-            if result.error:
-                active_errors[device.device_id] = result.error
-                previous_error = self.device_errors.get(device.device_id)
-                if result.error != previous_error:
-                    log_status_bar(f"led error {device.name}: {result.error}")
-                continue
-
-            self.device_errors.pop(device.device_id, None)
-            if result.changed:
-                target = result.target if result.target is not None else "-"
-                log_status_bar(f"leds={label} target={target}")
-
-        self.device_errors.update(active_errors)
+    def sync_leds_now(self, mode, battery_snapshot, display_kind) -> None:
+        self.device_errors = dict(getattr(getattr(self, 'monitor', None), 'output_errors', {}))
         self.last_led_error = next(iter(self.device_errors.values()), None)
 
-    def play_lid_animation(
-        self,
-        kind: str,
-        *,
-        animation: LedAnimationSetting | None = None,
-    ) -> None:
-        if not self.leds_enabled or self.terminating:
-            return
-        if animation is None:
-            state = (
-                ANIMATION_STATE_LID_CLOSED
-                if kind == LID_ANIMATION_CLOSED
-                else ANIMATION_STATE_LID_OPEN
-            )
-            current = self.settings.lid_animation(kind)
-            animation_id = self.settings.agent_animation_id(state)
-            duration_seconds = current.duration_seconds
-            if animation_id in {
-                AGENT_ANIMATION_LID_CLOSED,
-                AGENT_ANIMATION_LID_OPEN,
-            }:
-                duration_seconds = default_lid_animation(kind).duration_seconds
-            animation = LedAnimationSetting(
-                program=animation_state_program(self.settings, state),
-                duration_seconds=duration_seconds,
-            )
+    def play_lid_animation(self, kind, *, animation=None) -> None:
         try:
-            validate_lid_animation(animation)
-        except DeviceWriteError as exc:
-            self.set_settings_message(f"{LID_ANIMATION_LABELS[kind]} animation invalid: {exc}")
-            return
+            command = {'type': 'play_lid_animation', 'kind': kind}
+            if animation is not None:
+                command.update(program=animation.program, duration_seconds=animation.duration_seconds)
+            daemon_command(command, timeout=5)
+        except Exception as exc:
+            self.set_settings_message(f'Could not play lid animation: {exc}')
 
-        devices = [
-            device for device in self.status_bar_devices()
-            if (
-                device.connected
-                and device.device_id != VIRTUAL_DEVICE_ID
-                and device.remote_link is None
-                and device.display != LED_DISPLAY_CUSTOM
-            )
-        ]
-        if not devices:
-            return
-
-        charging_snapshot = None
-        charging_seconds = 0.0
-        if kind == LID_ANIMATION_CLOSED and self.lid_close_charging_preview_enabled():
-            charging_snapshot = self.last_battery_snapshot
-            charging_seconds = self.settings.battery_power_change_preview_seconds
-
-        self.led_animation_token += 1
-        token = self.led_animation_token
-        duration = (
-            animation.duration_seconds
-            + charging_seconds
-            + LID_ANIMATION_RESTORE_FUDGE_SECONDS
-            + LED_ANIMATION_WRITE_ALLOWANCE_SECONDS
-        )
-        self.led_animation_until_monotonic = time.monotonic() + duration
-        thread = threading.Thread(
-            target=self.play_lid_animation_worker,
-            args=(kind, animation, devices, token, charging_snapshot, charging_seconds),
-            daemon=True,
-        )
-        thread.start()
-
-    def lid_close_charging_preview_enabled(self) -> bool:
-        """Follow the lid-close animation with the charging fill while charging.
-
-        Shares the plug/unplug preview checkbox and length.
-        """
-        snapshot = self.last_battery_snapshot
-        return (
-            self.settings.battery_show_on_power_change
-            and snapshot is not None
-            and snapshot_shows_charging_fill(snapshot)
-        )
-
-    def should_hold_lid_closed_led_state(self) -> bool:
-        agents_active = None
-        if self.last_snapshot is not None:
-            agents_active = self.last_snapshot.aggregate.active_count > 0
-        return lid_closed_led_state_should_hold(
-            lid_closed=self.last_lid_closed,
-            sleep_prevention_policy=self.settings.sleep_prevention_policy,
-            agents_active=agents_active,
-            battery_safeguard_active=self.battery_sleep_safeguard_active,
-        )
-
-    def should_run_lid_close_animation(self) -> bool:
-        agents_active = None
-        if self.last_snapshot is not None:
-            agents_active = self.last_snapshot.aggregate.active_count > 0
-        return lid_close_animation_should_run(
-            sleep_prevention_policy=self.settings.sleep_prevention_policy,
-            agents_active=agents_active,
-        )
-
-    def play_lid_animation_worker(
-        self,
-        kind: str,
-        animation: LedAnimationSetting,
-        devices: list[StatusBarDevice],
-        token: int,
-        charging_snapshot: BatterySnapshot | None = None,
-        charging_seconds: float = 0.0,
-    ) -> None:
-        label = LID_ANIMATION_LABELS[kind]
-        for device in devices:
-            try:
-                program = program_for_lid_animation(animation, brightness=device.brightness)
-                target = write_led_program(program, device_path=device.target)
-                log_status_bar(f"animation={label} device={device.name} target={target}")
-            except Exception as exc:
-                log_status_bar(f"animation error {label} {device.name}: {exc}")
-
-        # Wall-clock time, because the monotonic clock stops while the Mac sleeps.
-        started = time.time()
-        time.sleep(animation.duration_seconds + LID_ANIMATION_RESTORE_FUDGE_SECONDS)
-        if charging_snapshot is not None and charging_seconds > 0:
-            self.play_lid_close_charging_preview(
-                devices,
-                token,
-                charging_snapshot,
-                charging_seconds,
-                late=time.time() - started > animation.duration_seconds
-                + LID_CHARGING_PREVIEW_MAX_LATE_SECONDS,
-            )
-        self.performSelectorOnMainThread_withObject_waitUntilDone_(
-            "restoreLedDisplay:",
-            str(token),
-            False,
-        )
-
-    def play_lid_close_charging_preview(
-        self,
-        devices: list[StatusBarDevice],
-        token: int,
-        snapshot: BatterySnapshot,
-        seconds: float,
-        *,
-        late: bool,
-    ) -> None:
-        label = "Lid Closed Charging"
-        if token != self.led_animation_token:
-            return
-        if late:
-            # The Mac slept before the follow-up; lighting up on a later
-            # background wake would be the wrong moment.
-            log_status_bar(f"animation={label} skipped reason=late")
-            return
-        duration = 0.0
-        for device in devices:
-            try:
-                preview = program_for_charging_preview(
-                    snapshot,
-                    seconds,
-                    full_charge_watts=self.settings.battery_full_charge_watts,
-                    brightness=device.brightness,
-                )
-                if preview is None:
-                    return
-                program, duration = preview
-                target = write_led_program(program, device_path=device.target)
-                log_status_bar(
-                    f"animation={label} device={device.name} "
-                    f"seconds={duration:g} target={target}"
-                )
-            except Exception as exc:
-                log_status_bar(f"animation error {label} {device.name}: {exc}")
-        time.sleep(duration)
-
-    @objc.IBAction
-    def restoreLedDisplay_(self, token_value):
-        restore_led_display(self, token_value)
 
     def connect_device(self) -> None:
+        daemon_command({'type': 'output_control', 'enabled': True})
         self.leds_enabled = True
-        self.status_bar_devices()
-        self.reset_led_controllers_for_display_change()
         self.last_led_error = None
-        self.last_status_read_error = None
-        log_status_bar("device connect requested")
 
     def disconnect_device(self) -> None:
-        self.leds_enabled = False
-        targets = self.current_led_targets()
-        if not targets:
-            targets = [
-                device.target for device in self.status_bar_devices()
-                if (
-                    device.connected
-                    and device.device_id != VIRTUAL_DEVICE_ID
-                    and device.remote_link is None
-                )
-            ]
-        for target in targets:
-            try:
-                result = write_mode_to_leds(
-                    AgentMode.IDLE_READY,
-                    device_path=target,
-                    idle_pulse_seconds=self.settings.idle_pulse_seconds,
-                )
-                log_status_bar(f"device disconnected target={result.target}")
-            except Exception as exc:
-                log_status_bar(f"device disconnect error: {exc}")
-        self.reset_led_controllers_for_display_change()
-        self.last_led_error = None
-        self.last_status_read_error = None
+        try:
+            daemon_command({'type': 'output_control', 'enabled': False})
+            self.leds_enabled = False
+        except Exception as exc:
+            self.last_led_error = str(exc)
 
     def device_connected(self) -> bool:
         connected = [
@@ -3845,146 +3218,18 @@ class StatusBarController(NSObject):
             and not self.device_errors
         )
 
-    def clear_leds_on_quit(self, *, wait_seconds: float = 1.0) -> None:
-        """Turn off the local LEDs this app drives, so they stop showing a stale state.
-
-        One file write per quit, like a single status change. Linked phones are
-        left alone: no network on the way out.
-        """
-        if not self.leds_enabled:
-            return
-        # A sync started just before quitting would overwrite the "off".
-        deadline = time.monotonic() + wait_seconds
-        while self.led_sync_in_flight and time.monotonic() < deadline:
-            time.sleep(0.02)
-        for target in self.current_led_targets():
-            try:
-                write_led_program("off", device_path=target)
-            except Exception as exc:
-                log_status_bar(f"quit clear error target={target}: {exc}")
-            else:
-                log_status_bar(f"quit clear target={target}")
-
     def current_led_target(self) -> Path | None:
         targets = self.current_led_targets()
         return targets[0] if targets else None
 
     def current_led_targets(self) -> list[Path]:
-        targets: list[Path] = []
-        seen: set[str] = set()
-        for controller in (
-            *self.battery_led_controllers_by_device.values(),
-            *self.agent_led_controllers_by_device.values(),
-            self.battery_led_controller,
-            self.led_controller,
-        ):
-            target = controller.last_target or controller.device_path
-            if target is None:
-                continue
-            if not path_exists(Path(target).parent):
-                continue
-            key = str(target)
-            if key in seen:
-                continue
-            targets.append(Path(target))
-            seen.add(key)
-        return targets
+        return [device.target for device in self.status_bar_devices(remember=False)
+            if device.connected and device.remote_link is None and device.device_id != VIRTUAL_DEVICE_ID]
 
     def ensure_device_selection(self) -> None:
-        selected = self.led_controller.device_path or self.battery_led_controller.device_path
-        if selected is not None:
-            target = target_from_device_path(
-                Path(selected),
-                DEFAULT_FILE_NAME,
-            )
-            if path_exists(target.parent):
-                self.led_controller.device_path = target
-                self.battery_led_controller.device_path = target
-                return
-            self.led_controller.device_path = None
-            self.battery_led_controller.device_path = None
-            self.reset_led_controllers_for_display_change()
-            self.last_led_error = None
+        # Selection is a daemon concern; the tray only lists available devices.
+        self.status_bar_devices()
 
-        try:
-            candidates = discover_devices()
-        except Exception as exc:
-            log_status_bar(f"device selection error: {exc}")
-            self.last_led_error = str(exc)
-            return
-        if not candidates:
-            return
-        target = preferred_status_bar_device(candidates).target
-        self.led_controller.device_path = target
-        self.battery_led_controller.device_path = target
-
-    @objc.IBAction
-    def pollLid_(self, _sender):
-        if self.lid_poll_in_flight:
-            return
-        if time.monotonic() < self.lid_poll_backoff_until_monotonic:
-            return
-        self.lid_poll_in_flight = True
-        threading.Thread(target=self._read_lid_closed_async, daemon=True).start()
-
-    def _read_lid_closed_async(self) -> None:
-        try:
-            closed = read_lid_closed()
-            self.pending_lid_closed = closed
-            self.pending_lid_error = None
-        except Exception as exc:
-            self.pending_lid_closed = None
-            self.pending_lid_error = str(exc)
-
-        self.performSelectorOnMainThread_withObject_waitUntilDone_(
-            "handleLidPollResult:",
-            None,
-            False,
-        )
-
-    def handleLidPollResult_(self, _sender):
-        self.lid_poll_in_flight = False
-        error = self.pending_lid_error
-        if error:
-            error = str(error)
-            if error != self.last_lid_error:
-                self.last_lid_error = error
-                log_status_bar(f"lid_state error: {error}")
-            self.lid_poll_backoff_until_monotonic = (
-                time.monotonic() + SYSTEM_POLL_ERROR_BACKOFF_SECONDS
-            )
-            return
-
-        closed = self.pending_lid_closed
-        if closed is None:
-            return
-        closed = bool(closed)
-        self.last_lid_error = None
-        self.lid_poll_backoff_until_monotonic = 0.0
-        if self.last_lid_closed is None:
-            self.last_lid_closed = closed
-            self.sync_closed_lid_awake()
-            return
-        if closed == self.last_lid_closed:
-            return
-
-        self.last_lid_closed = closed
-        self.sync_closed_lid_awake()
-        kind = LID_ANIMATION_CLOSED if closed else LID_ANIMATION_OPEN
-        log_status_bar(f"lid_state={'closed' if closed else 'open'}")
-        if closed:
-            if not self.should_run_lid_close_animation():
-                self.lid_closed_led_hold_active = False
-                log_status_bar(
-                    "animation=Lid Closed skipped reason=sleep_prevention_active"
-                )
-                return
-            self.lid_closed_led_hold_active = self.should_hold_lid_closed_led_state()
-            if self.lid_closed_led_hold_active:
-                log_status_bar("lid_led_state=held reason=sleep_allowed")
-        else:
-            self.lid_closed_led_hold_active = False
-        self.play_lid_animation(kind)
 
     @objc.IBAction
     def pollDevices_(self, _sender):
@@ -3996,159 +3241,12 @@ class StatusBarController(NSObject):
         if self.last_snapshot is not None:
             self.refresh_(None)
 
-    def sync_keep_awake(
-        self,
-        mode: AgentMode,
-        battery_snapshot: BatterySnapshot | None = None,
-    ) -> None:
-        agents_active = self.update_agent_awake_request(mode)
-        safeguard_active, safeguard_reason = sleep_prevention_battery_safeguard(
-            battery_snapshot,
-            self.settings.sleep_prevention_min_battery_percent,
-        )
-        if safeguard_active != self.battery_sleep_safeguard_active:
-            log_status_bar(
-                "sleep_battery_safeguard="
-                f"{'active' if safeguard_active else 'released'} "
-                f"{safeguard_reason}"
-            )
-        self.battery_sleep_safeguard_active = safeguard_active
-        self.battery_sleep_safeguard_reason = safeguard_reason
-        policy = self.settings.sleep_prevention_policy
-        should_hold = awake_policy_should_hold(
-            policy,
-            agents_active=agents_active,
-        ) and not safeguard_active
-        was_running = self.keep_awake.process_running()
-        self.keep_awake.update_requested(should_hold, mode=mode)
-        is_running = self.keep_awake.process_running()
-        if was_running != is_running:
-            log_status_bar(f"keep_awake={'active' if is_running else 'released'}")
-        if self.keep_awake.last_error != self.last_keep_awake_error:
-            self.last_keep_awake_error = self.keep_awake.last_error
-            if self.last_keep_awake_error:
-                log_status_bar(f"keep_awake error: {self.last_keep_awake_error}")
-
-        self.sync_closed_lid_awake(agents_active=agents_active)
-
-        if not self.leds_enabled:
-            return
-        read_any = False
-        for target in self.status_keepalive_targets():
-            status_path = self.keep_awake.poke_status_file(target)
-            if status_path is not None:
-                read_any = True
-                log_status_bar(f"sd_keepalive read={status_path}")
-        if not read_any and self.keep_awake.last_status_error != self.last_status_read_error:
-            self.last_status_read_error = self.keep_awake.last_status_error
-            if self.last_status_read_error:
-                log_status_bar(f"sd_keepalive error: {self.last_status_read_error}")
-
-    def update_agent_awake_request(self, mode: AgentMode) -> bool:
-        current = time.monotonic()
-        if mode in {
-            AgentMode.WORKING,
-            AgentMode.TOOL_RUNNING,
-            AgentMode.LONG_TASK_PROGRESS,
-        }:
-            self.agent_awake_grace_until_monotonic = None
-            requested = True
-        elif mode in {
-            AgentMode.COMPLETED,
-            AgentMode.WAITING_FOR_INPUT,
-            AgentMode.BLOCKED_ERROR,
-        }:
-            if (
-                self.agent_awake_last_mode != mode
-                or self.agent_awake_grace_until_monotonic is None
-            ):
-                self.agent_awake_grace_until_monotonic = (
-                    current + self.keep_awake.grace_seconds
-                )
-            requested = current < self.agent_awake_grace_until_monotonic
-        else:
-            requested = (
-                self.agent_awake_grace_until_monotonic is not None
-                and current < self.agent_awake_grace_until_monotonic
-            )
-
-        self.agent_awake_last_mode = mode
-        self.agent_awake_requested = requested
-        return requested
-
-    def sync_closed_lid_awake(self, *, agents_active: bool | None = None) -> None:
-        was_active = self.closed_lid_awake.active()
-        external_display_active = external_display_is_active()
-        battery_snapshot = getattr(self, "last_battery_snapshot", None)
-        clamshell_eligible = bool(
-            external_display_active is True
-            and battery_snapshot is not None
-            and battery_snapshot.is_plugged
-        )
-        self.closed_lid_awake.set_use_system_disable(
-            sleep_helper_installed() and not clamshell_eligible
-        )
-        policy = self.settings.sleep_prevention_policy
-        if self.battery_sleep_safeguard_active or clamshell_eligible:
-            policy = SLEEP_PREVENTION_NEVER
-        self.closed_lid_awake.update(
-            policy,
-            agents_active=self.agent_awake_requested if agents_active is None else agents_active,
-        )
-        is_active = self.closed_lid_awake.active()
-        if was_active != is_active:
-            log_status_bar(
-                f"closed_lid_awake={'active' if is_active else 'released'} "
-                f"policy={self.settings.sleep_prevention_policy}"
-            )
-        if self.closed_lid_awake.last_error != self.last_closed_lid_awake_error:
-            self.last_closed_lid_awake_error = self.closed_lid_awake.last_error
-            if self.last_closed_lid_awake_error:
-                log_status_bar(
-                    f"closed_lid_awake error: {self.last_closed_lid_awake_error}"
-                )
-
-        should_sleep_display = closed_lid_display_sleep_should_request(
-            lid_closed=getattr(self, "last_lid_closed", None),
-            external_display_active=external_display_active,
-            system_sleep_disabled=self.closed_lid_awake.system_disable_active(),
-        )
-        if not should_sleep_display:
-            self.closed_lid_display_sleep_requested = False
-            return
-        if getattr(self, "closed_lid_display_sleep_requested", False):
-            return
-        try:
-            run_pmset_displaysleepnow()
-            self.closed_lid_display_sleep_requested = True
-            log_status_bar("lid_display_sleep=requested")
-        except Exception as exc:
-            self.closed_lid_display_sleep_requested = False
-            log_status_bar(f"lid_display_sleep error: {exc}")
-
-    def status_keepalive_targets(self) -> list[Path]:
-        targets = self.current_led_targets()
-        if targets:
-            return targets
-        connected_targets = [
-            device.target
-            for device in self.status_bar_devices(remember=False)
-            if (
-                device.connected
-                and device.device_id != VIRTUAL_DEVICE_ID
-                and device.remote_link is None
-            )
-        ]
-        if connected_targets:
-            return connected_targets
-        return [MOUNT_ROOT / name / KEEPALIVE_FILE_NAME for name in STATUS_BAR_KEEPALIVE_VOLUME_NAMES]
-
 
 def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> NSMenu:
     menu = NSMenu.alloc().init()
     menu.setDelegate_(target)
 
-    menu.addItem_(disabled_menu_item("SidePulse"))
+    add_app_info(menu, target)
     menu.addItem_(NSMenuItem.separatorItem())
 
     menu.addItem_(disabled_menu_item("Agents"))
@@ -4159,14 +3257,13 @@ def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> 
     else:
         collision_keys = session_title_collision_keys(statuses)
         for status in statuses:
-            menu.addItem_(
-                build_session_menu_item(
-                    status,
-                    snapshot.collected_at,
-                    target,
-                    disambiguate_title=session_title_collision_key(status) in collision_keys,
-                )
+            session_item = build_session_menu_item(
+                status,
+                snapshot.collected_at,
+                target,
+                disambiguate_title=session_title_collision_key(status) in collision_keys,
             )
+            menu.addItem_(session_item)
 
     t3_title = target.t3_menu_action_title() if hasattr(target, "t3_menu_action_title") else None
     if t3_title:
@@ -4180,8 +3277,10 @@ def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> 
         menu.addItem_(t3_item)
 
     menu.addItem_(NSMenuItem.separatorItem())
-    menu.addItem_(disabled_menu_item("Devices"))
     devices = target.status_bar_devices()
+    errors = getattr(target, 'device_errors', {})
+    failed = any(device.connected and errors.get(device.device_id) for device in devices)
+    menu.addItem_(disabled_menu_item("Devices — LED output failed" if failed else "Devices"))
     for device in devices:
         menu.addItem_(build_device_menu_item(device, target))
     if not devices:
@@ -4394,6 +3493,35 @@ def hex_from_ns_color(color) -> str:
     srgb = color.colorUsingColorSpace_(NSColorSpace.sRGBColorSpace()) or color
     channels = (srgb.redComponent(), srgb.greenComponent(), srgb.blueComponent())
     return "#" + "".join(f"{max(0, min(255, round(channel * 255))):02X}" for channel in channels)
+def add_app_info(menu, target):
+    build = getattr(target, 'app_build', None) or BuildInfo.current()
+    details = build.version.split('+', 1)[0]
+    try:
+        details += ' · ' + datetime.fromisoformat(build.built_at.replace('Z', '+00:00')).astimezone().strftime('%Y-%m-%d')
+    except ValueError:
+        pass
+    status = getattr(getattr(target, 'monitor', None), 'runtime', {}).get('app_update', {}).get('status', 'not_checked')
+    labels = {'current': 'Up to date with GitHub main', 'available': 'Update available from GitHub main…',
+              'checking': 'Checking GitHub main…', 'unavailable': 'Could not check GitHub main',
+              'not_checked': 'GitHub main check pending'}
+    if status == 'available':
+        details += ' · Update available'
+    title = 'SidePulse  ' + details
+    if status == 'available':
+        item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, 'openAppUpdates:', '')
+        item.setTarget_(target)
+    else:
+        item = disabled_menu_item(title)
+    attributed = NSMutableAttributedString.alloc().initWithString_attributes_(
+        title, {NSFontAttributeName: NSFont.menuFontOfSize_(0)},
+    )
+    attributed.addAttributes_range_({
+        NSFontAttributeName: NSFont.systemFontOfSize_(11),
+        NSForegroundColorAttributeName: NSColor.secondaryLabelColor(),
+    }, (len('SidePulse'), len(title) - len('SidePulse')))
+    item.setAttributedTitle_(attributed)
+    item.setToolTip_(f'{build.version}\n{build.date_label()}\n{labels.get(status, labels["unavailable"])}')
+    menu.addItem_(item)
 
 
 def build_sleep_prevention_policy_item(policy: str, target: StatusBarController) -> NSMenuItem:
@@ -4409,21 +3537,41 @@ def build_sleep_prevention_policy_item(policy: str, target: StatusBarController)
 
 
 def build_device_menu_item(device: StatusBarDevice, target: StatusBarController) -> NSMenuItem:
-    item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(device.name, None, "")
+    error = getattr(target, 'device_errors', {}).get(device.device_id) if device.connected else None
+    title = f"⚠ {device.name}" if error else device.name
+    item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, None, "")
     item.setState_(1 if device.connected else 0)
     submenu = NSMenu.alloc().init()
+    if error:
+        item.setToolTip_(error)
+        warning = disabled_menu_item("LED update failed")
+        warning.setToolTip_(error)
+        submenu.addItem_(warning)
+        submenu.addItem_(disabled_menu_item(error))
+        submenu.addItem_(NSMenuItem.separatorItem())
 
-    agent = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-        "Agent Status",
-        "setDeviceDisplayAgent:",
-        "",
-    )
-    agent.setTarget_(target)
-    agent.setRepresentedObject_(device.device_id)
-    agent.setState_(1 if device.display == LED_DISPLAY_AGENT else 0)
-    submenu.addItem_(agent)
+    if device.remote_link is not None:
+        capable = device.remote_link.status_protocol == 2
+        sync = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Forward sessions", "togglePhoneSessionSync:" if capable else None, "",
+        )
+        sync.setTarget_(target)
+        sync.setRepresentedObject_(device.remote_link.link_id)
+        sync.setState_(1 if capable and target.settings.sync_sessions_to_phone(device.remote_link.link_id) else 0)
+        sync.setEnabled_(capable)
+        submenu.addItem_(sync)
+        submenu.addItem_(disabled_menu_item("Patterns are set on the phone" if capable else "Update the phone app and link again to sync"))
+    else:
+        agent = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Agent Status",
+            "setDeviceDisplayAgent:",
+            "",
+        )
+        agent.setTarget_(target)
+        agent.setRepresentedObject_(device.device_id)
+        agent.setState_(1 if device.display == LED_DISPLAY_AGENT else 0)
+        submenu.addItem_(agent)
 
-    if device.remote_link is None:
         battery = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
             "Battery Level",
             "setDeviceDisplayBattery:",
@@ -4434,18 +3582,44 @@ def build_device_menu_item(device: StatusBarDevice, target: StatusBarController)
         battery.setState_(1 if device.display == LED_DISPLAY_BATTERY else 0)
         submenu.addItem_(battery)
 
-    custom = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-        "Manual",
-        "setDeviceDisplayCustom:",
-        "",
-    )
-    custom.setTarget_(target)
-    custom.setRepresentedObject_(device.device_id)
-    custom.setState_(1 if device.display == LED_DISPLAY_CUSTOM else 0)
-    submenu.addItem_(custom)
+        custom = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Manual",
+            "setDeviceDisplayCustom:",
+            "",
+        )
+        custom.setTarget_(target)
+        custom.setRepresentedObject_(device.device_id)
+        custom.setState_(1 if device.display == LED_DISPLAY_CUSTOM else 0)
+        submenu.addItem_(custom)
 
     if device.device_id != VIRTUAL_DEVICE_ID and device.remote_link is None:
         submenu.addItem_(NSMenuItem.separatorItem())
+        if device.connected:
+            status = target.firmware_status.get(device.root)
+            version = "checking…" if status is None else "unavailable"
+            if status is not None and status.device is not None:
+                version = status.device.version
+            submenu.addItem_(disabled_menu_item(f"Firmware {version}"))
+            message = target.firmware_messages.get(device.root)
+            if message:
+                entry = disabled_menu_item(message[0])
+                entry.setToolTip_(message[1])
+                submenu.addItem_(entry)
+            elif status is not None and status.error:
+                entry = disabled_menu_item("Firmware update check unavailable")
+                entry.setToolTip_(status.error)
+                submenu.addItem_(entry)
+            elif status is not None and status.outdated:
+                upgrade = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                    f"Upgrade to {status.latest}…", "upgradeFirmware:", "",
+                )
+                upgrade.setTarget_(target)
+                upgrade.setRepresentedObject_(str(device.root))
+                upgrade.setEnabled_(target.firmware_upgrade_root is None)
+                submenu.addItem_(upgrade)
+            elif status is not None and status.latest:
+                submenu.addItem_(disabled_menu_item("Firmware up to date" if version != "unknown" else "Firmware version unknown"))
+            submenu.addItem_(NSMenuItem.separatorItem())
         submenu.addItem_(disabled_menu_item(brightness_label_title(device.brightness)))
         submenu.addItem_(build_brightness_slider_item(device, target))
 
@@ -4781,7 +3955,7 @@ def history_record_limit_for_timeframe(seconds: float | None) -> int:
         value = float(seconds)
     except (TypeError, ValueError):
         value = float(DEFAULT_HISTORY_TIMEFRAME_SECONDS)
-    estimate = value / max(1.0, STATUS_BAR_REFRESH_SECONDS)
+    estimate = value / STATUS_HISTORY_SAMPLE_SECONDS
     return max(
         STATUS_BAR_HISTORY_CHART_RECORD_LIMIT,
         int(estimate * STATUS_BAR_HISTORY_CHART_RECORD_LIMIT_MULTIPLIER)
@@ -4850,6 +4024,8 @@ def draw_status_history_chart(bounds, records, timeframe_seconds: float | None =
         ("Agent", "agent"),
         ("Battery", "battery"),
         ("Charger", "charger"),
+        ("CPU °C", "cpu_temperature_c"),
+        ("Case °C", "case_temperature_c"),
         ("SidePulse", "sidepulse"),
         ("macOS Sleep", "mac_sleep"),
         ("Lid", "lid"),
@@ -4932,6 +4108,12 @@ def draw_status_history_chart(bounds, records, timeframe_seconds: float | None =
                 row_y + row_height / 2 - 7,
                 value_width - 8.0,
             )
+        elif kind in {"cpu_temperature_c", "case_temperature_c"}:
+            color = chart_color("#E87522" if kind == "cpu_temperature_c" else "#B54CAB", 0.95)
+            draw_history_line(points, kind, 120.0, start, end, chart_x, chart_width,
+                row_y + row_height * 0.16, row_height * 0.68, color, NSColor.clearColor())
+            draw_current_history_value(points, kind, "°", chart_x + chart_width + 8.0,
+                row_y + row_height / 2 - 7, value_width - 8.0)
         elif kind == "sidepulse":
             draw_history_segments(
                 points,
@@ -5060,13 +4242,18 @@ def draw_current_history_value(
     y: float,
     width: float,
 ) -> None:
-    value = latest_numeric_history_value(points, key)
+    if key in {'cpu_temperature_c', 'case_temperature_c'}:
+        value = numeric_history_value(points[-1][1].get(key)) if points else None
+    else:
+        value = latest_numeric_history_value(points, key)
     if value is None:
         text = "-"
     elif suffix == "%":
         text = f"{value:.0f}%"
     elif suffix == "W":
         text = f"{value:.0f}W"
+    elif suffix == "°":
+        text = f"{value:.1f}°"
     else:
         text = f"{value:g}{suffix}"
     draw_chart_text(text, x, y, width, 14)
@@ -5694,7 +4881,7 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
     add_button(history_tab, "Refresh", 32, 42, 90, 28, target, "refreshHistoryChart:")
     add_label(
         history_tab,
-        "Rows: agent display, battery %, charger W, SidePulse awake, macOS sleep, lid.",
+        "CPU: die/package °C · Case: palm-rest skin °C · Missing sensors stay blank.",
         134,
         46,
         480,
@@ -5712,6 +4899,7 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
     message = add_label(content, "", 24, 12, width - 48, 22)
 
     target.settings_fields = {
+        "tabs": tab_view,
         "codex_hook_status": codex_status,
         "claude_hook_status": claude_status,
         "grok_hook_status": grok_status,
@@ -6504,25 +5692,6 @@ def program_for_lid_animation(
     return apply_brightness(normalize_led_text(animation.program), brightness)
 
 
-def restore_led_display(target, token_value) -> None:
-    try:
-        token = int(str(token_value))
-    except ValueError:
-        token = target.led_animation_token
-    if token != target.led_animation_token:
-        return
-    target.led_animation_until_monotonic = 0.0
-    target.reset_led_controllers_for_display_change()
-    if target.last_snapshot is not None:
-        target.sync_leds(
-            target.last_snapshot.aggregate.mode,
-            target.last_battery_snapshot,
-            target.active_led_display_kind(target.last_battery_snapshot),
-        )
-    else:
-        target.refresh_(None)
-
-
 def hook_status_text(config: ProviderConfig) -> str:
     if not config.exists:
         return "Not installed — config created on install"
@@ -6582,6 +5751,8 @@ def device_mount_key(root: Path) -> str:
 
 def device_display_name(name: str) -> str:
     normalized = normalized_device_name(name)
+    if re.fullmatch(r'Dot-[0-9]{3}-[0-9]{3}', name):
+        return "SidePulse Dot"
     if "sidepulsedot" in normalized or "pulsedot" in normalized:
         return "SidePulse Dot"
     if "sidepulsepro" in normalized:
@@ -6717,6 +5888,12 @@ def build_session_options_menu(
             target,
             selected=action == selected,
         )
+    if status.session_link:
+        item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Copy mobile session link", "copySessionLink:", "")
+        item.setTarget_(target)
+        item.setRepresentedObject_(status.session_link)
+        menu.addItem_(item)
+
     return menu
 
 
@@ -7135,15 +6312,24 @@ def add_action_item(
     menu.addItem_(item)
 
 
-def build_error_menu(exc: Exception) -> NSMenu:
+def build_error_menu(exc: Exception, target=None) -> NSMenu:
     menu = NSMenu.alloc().init()
+    if target is not None:
+        add_app_info(menu, target)
+        menu.addItem_(NSMenuItem.separatorItem())
     item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-        f"Agent monitor error: {exc}",
+        f"Daemon unavailable: {exc}",
         None,
         "",
     )
     item.setEnabled_(False)
     menu.addItem_(item)
+    if target is not None:
+        menu.addItem_(NSMenuItem.separatorItem())
+        for title, selector, shortcut in [('Restart daemon', 'restartDaemon:', ''), ('Settings...', 'openSettings:', ','), ('Quit', 'quit:', 'q')]:
+            action = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, selector, shortcut)
+            action.setTarget_(target)
+            menu.addItem_(action)
     return menu
 
 

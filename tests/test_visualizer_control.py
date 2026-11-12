@@ -143,6 +143,9 @@ class VisualizerMenuTests(unittest.TestCase):
                 closed_lid_awake=SimpleNamespace(last_error=None),
                 status_bar_devices=lambda: [device],
                 visualizer=control,
+                firmware_status={},
+                firmware_messages={},
+                firmware_upgrade_root=None,
             )
             menu = status_bar.build_menu(
                 SimpleNamespace(statuses=[], collected_at=datetime.now(timezone.utc)), status_bar.STATE_IDLE, target

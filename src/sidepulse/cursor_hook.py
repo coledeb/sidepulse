@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .hook import routed_hook_payload, write_hook_line, write_hook_status_audit
-from .ipc import send_hook_event
+from .program_transport import send_hook_event
 from .origin import (
     T3CODE_SURFACE,
     T3CODE_THREAD_ENV,
@@ -35,7 +35,7 @@ EVENT_ALIASES = {
     "afterShellExecution": "PostToolUse",
     "afterFileEdit": "PostToolUse",
     "postToolUse": "PostToolUse",
-    "postToolUseFailure": "StopFailure",
+    "postToolUseFailure": "PostToolUseFailure",
     "stop": "Stop",
 }
 

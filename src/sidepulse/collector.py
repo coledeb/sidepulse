@@ -254,6 +254,7 @@ class AgentMonitor:
                     previous,
                     status,
                     pending_permissions_by_key.get(status.agent_id, set()),
+                    record=record,
                 ):
                     continue
                 statuses_by_key[status.agent_id] = status
@@ -470,6 +471,9 @@ class LiveAgentMonitor:
         self.metadata_by_status: dict[str, StatusMetadata] = {}
         self.pending_permissions_by_key: dict[str, set[str]] = {}
         self.sessions_by_t3_thread: dict[str, str] = {}
+        # Rows owned elsewhere (the daemon's OSC program and remote sessions),
+        # shown alongside this monitor's own under the same visibility rules.
+        self.extra_statuses: Callable[[], Iterable[AgentStatus]] = tuple
         self.load_latest_state()
         if recover_on_init:
             self.reconcile_recovery_sources()
@@ -498,6 +502,7 @@ class LiveAgentMonitor:
                 previous,
                 status,
                 self.pending_permissions_by_key.get(status.agent_id, set()),
+                record=record,
             ):
                 return
             self.statuses_by_key[status.agent_id] = status
@@ -541,11 +546,13 @@ class LiveAgentMonitor:
             self.write_latest_state()
             return True
 
-    def snapshot(self, include_stale: bool = False) -> MonitorSnapshot:
+    def snapshot(self, include_stale: bool = False, *, with_extra: bool = True) -> MonitorSnapshot:
         now = datetime.now(timezone.utc)
         self.reconcile_claude_session_idle(now)
         with self.lock:
             statuses = tuple(self.statuses_by_key.values())
+        if with_extra:
+            statuses += tuple(self.extra_statuses())
         return snapshot_from_statuses(
             statuses,
             sources=self.sources,
@@ -1469,6 +1476,14 @@ def status_from_event(
     )
 
 
+def codex_question_tool(record: HookEvent | AgentStatus) -> str | None:
+    if record.provider == "codex" and record.tool_name:
+        name = record.tool_name.rsplit(".", 1)[-1]
+        if name in {"request_user_input", "request_user_input_async"}:
+            return name
+    return None
+
+
 def mode_for_event(record: HookEvent) -> AgentMode | None:
     event = record.event_name
     raw = record.raw
@@ -1479,6 +1494,9 @@ def mode_for_event(record: HookEvent) -> AgentMode | None:
     if explicit_mode is not None:
         return explicit_mode
 
+    if record.provider == 'codex' and event in {'PostToolUseFailure', 'PermissionDenied'}:
+        # A failed/denied tool call is handled by Codex, not a request for input.
+        return AgentMode.WORKING
     if event in {"PostToolUseFailure", "PermissionDenied", "StopFailure"}:
         return AgentMode.BLOCKED_ERROR
     if event in {"PermissionRequest"}:
@@ -1496,10 +1514,22 @@ def mode_for_event(record: HookEvent) -> AgentMode | None:
             return AgentMode.WAITING_FOR_INPUT
         return AgentMode.WORKING
     if event in {"PreToolUse"}:
+        if codex_question_tool(record):
+            return AgentMode.WAITING_FOR_INPUT
         return AgentMode.TOOL_RUNNING
     if event in {"PostToolUse"}:
-        if _tool_response_looks_failed(raw.get("tool_response")):
+        if record.provider != 'codex' and _tool_response_looks_failed(raw.get("tool_response")):
             return AgentMode.BLOCKED_ERROR
+        if codex_question_tool(record) == "request_user_input_async":
+            response = raw.get("tool_response")
+            if isinstance(response, str):
+                try:
+                    response = json.loads(response)
+                except ValueError:
+                    response = None
+            # This acknowledges queuing the question, not receiving an answer.
+            if isinstance(response, dict) and response.get("accepted") is True:
+                return AgentMode.WAITING_FOR_INPUT
         return AgentMode.WORKING
     if event in {"PreCompact", "PostCompact"}:
         # Compaction says nothing about what the agent is doing: mid-turn the
@@ -1509,6 +1539,11 @@ def mode_for_event(record: HookEvent) -> AgentMode | None:
     if event in {"UserPromptSubmit", "SubagentStart"}:
         return AgentMode.WORKING
     if event in {"Stop", "SubagentStop"}:
+        if record.provider == "codex" and event == "Stop" and not record.agent_id:
+            from .codex_plan import pending_plan_review
+
+            if pending_plan_review(raw, record.session_id, record.turn_id):
+                return AgentMode.WAITING_FOR_INPUT
         if _assistant_message_asks_question(
             raw.get("last_assistant_message"),
             trust_final_line=event == "Stop",
@@ -1853,7 +1888,22 @@ def should_ignore_status_transition(
     previous: AgentStatus | None,
     current: AgentStatus,
     pending_permission_signatures: set[str],
+    *,
+    record: HookEvent | None = None,
 ) -> bool:
+    # Codex keeps running ordinary tools after it queues a question; those must
+    # not clear the pending question wait.
+    if (
+        previous is not None
+        and previous.mode == AgentMode.WAITING_FOR_INPUT
+        and previous.provider == "codex"
+        and (codex_question_tool(previous) or previous.event_name == "Stop")
+        and not codex_question_tool(current)
+        and current.event_name not in {"UserPromptSubmit", "Stop", "SubagentStop", "Interrupt", "SessionEnd", "SessionStart"}
+        and current.mode != AgentMode.BLOCKED_ERROR
+        and (record is None or explicit_mode_for_record(record) is None)
+    ):
+        return True
     # Claude sends an idle "waiting for your input" Notification about a minute
     # after a turn ends; it must not flip a finished turn, or one still running
     # background work, to Ask.
@@ -2142,8 +2192,13 @@ def project_name(cwd: str | None) -> str | None:
         return PureWindowsPath(cwd).name or cwd
     path = Path(cwd)
     for candidate in (path, *path.parents):
-        if (candidate / ".git").exists():
-            return candidate.name or str(candidate)
+        try:
+            if (candidate / ".git").exists():
+                return candidate.name or str(candidate)
+        except OSError:
+            # Remote paths can exceed this machine's filesystem limits.
+            # Their display metadata must not prevent status accounting.
+            continue
     if is_temp_root(path):
         return None
     return path.name or cwd

@@ -359,6 +359,7 @@ class AgentMonitorSettings:
     visualizer_color: str = VISUALIZER_DEFAULT_COLOR
     completed_visible_seconds: float = DEFAULT_COMPLETED_VISIBLE_SECONDS
     idle_pulse_seconds: float = DEFAULT_IDLE_PULSE_SECONDS
+    phone_session_sync: dict[str, bool] = field(default_factory=dict)
 
     def transcript_enabled(self, provider: str) -> bool:
         if provider == "codex":
@@ -384,6 +385,12 @@ class AgentMonitorSettings:
             if device.device_id == device_id:
                 return device.led_display
         return self.led_display
+
+    def sync_sessions_to_phone(self, link_id: str) -> bool:
+        return self.phone_session_sync.get(link_id, True)
+
+    def with_phone_session_sync(self, link_id: str, enabled: bool) -> "AgentMonitorSettings":
+        return replace(self, phone_session_sync={**self.phone_session_sync, link_id: bool(enabled)})
 
     def brightness_for_device(self, device_id: str) -> int:
         for device in self.devices:
@@ -854,6 +861,7 @@ class AgentMonitorSettings:
         return {
             "led_display": self.led_display,
             "show_menu_bar_icon": self.show_menu_bar_icon,
+            "phone_session_sync": dict(sorted(self.phone_session_sync.items())),
             "devices": [device.to_dict() for device in self.devices],
             "sleep_prevention_policy": self.sleep_prevention_policy,
             "virtual_status_device_enabled": self.virtual_status_device_enabled,
@@ -1007,8 +1015,15 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
             )
         }
     )
+    phone_session_sync = data.get("phone_session_sync")
+    if not isinstance(phone_session_sync, dict):
+        phone_session_sync = {}
     return AgentMonitorSettings(
         show_menu_bar_icon=_bool_setting(data.get("show_menu_bar_icon"), True),
+        phone_session_sync={
+            key: value for key, value in phone_session_sync.items()
+            if isinstance(key, str) and isinstance(value, bool)
+        },
         codex_transcripts_enabled=_bool_setting(transcript.get("codex"), False),
         claude_transcripts_enabled=_bool_setting(transcript.get("claude"), False),
         led_display=led_display,
