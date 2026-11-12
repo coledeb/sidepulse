@@ -143,6 +143,8 @@ def test_watcher_start_failure_can_be_cleaned_up(watcher, monkeypatch):
 
 @pytest.mark.skipif(sys.platform != 'win32', reason='Windows drive semantics')
 def test_windows_drive_is_itself_a_volume(tmp_path, monkeypatch):
+    # conftest points mount discovery at a temp dir; use the real drives here.
+    monkeypatch.delenv('SIDEPULSE_MOUNT_ROOTS', raising=False)
     root = Path(tmp_path.anchor)
     assert tuple(device_writer.iter_mounts(root)) == (root,)
     assert root in device_writer.default_mount_roots()

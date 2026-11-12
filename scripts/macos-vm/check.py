@@ -189,7 +189,16 @@ class Harness:
         return installed_snapshot()
 
     def wait_mode(self, provider, session, mode):
-        deadline = time.monotonic() + 10
+        timeout = 10
+        if mode == "waiting_for_input":
+            # Builds with a permission settle window show a fresh
+            # PermissionRequest as working until the window passes.
+            try:
+                from sidepulse.collector import PERMISSION_PROMPT_SETTLE_SECONDS as settle
+            except ImportError:
+                settle = 0
+            timeout += max(0.0, float(settle))
+        deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             try:
                 reply = self.snapshot()
