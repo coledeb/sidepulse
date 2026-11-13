@@ -66,8 +66,11 @@ def lid_close_animation_should_run(
     *,
     sleep_prevention_policy: str,
     agents_active: bool | None,
+    battery_safeguard_active: bool = False,
 ) -> bool:
     """Run the physical close animation only when the Mac may go to sleep."""
+    if battery_safeguard_active and agents_active is not None:
+        return True
     if sleep_prevention_policy == SLEEP_PREVENTION_ALWAYS:
         return False
     if sleep_prevention_policy == SLEEP_PREVENTION_AGENTS:
@@ -366,10 +369,18 @@ class DaemonRuntime:
 
         self.last_status_history_error = None
 
+    def agents_keeping_awake(self) -> bool | None:
+        """Whether agents hold the Mac awake, counting the grace after they stop.
+
+        Matches what sync_keep_awake asks for, so the lid-close LEDs agree
+        with whether the Mac will actually sleep.
+        """
+        if self.last_snapshot is None:
+            return None
+        return bool(self.agent_awake_requested)
+
     def should_hold_lid_closed_led_state(self) -> bool:
-        agents_active = None
-        if self.last_snapshot is not None:
-            agents_active = self.last_snapshot.aggregate.active_count > 0
+        agents_active = self.agents_keeping_awake()
         return lid_closed_led_state_should_hold(
             lid_closed=self.last_lid_closed,
             sleep_prevention_policy=self.settings.sleep_prevention_policy,
@@ -378,12 +389,10 @@ class DaemonRuntime:
         )
 
     def should_run_lid_close_animation(self) -> bool:
-        agents_active = None
-        if self.last_snapshot is not None:
-            agents_active = self.last_snapshot.aggregate.active_count > 0
         return lid_close_animation_should_run(
             sleep_prevention_policy=self.settings.sleep_prevention_policy,
-            agents_active=agents_active,
+            agents_active=self.agents_keeping_awake(),
+            battery_safeguard_active=self.battery_sleep_safeguard_active,
         )
 
     def sync_keep_awake(

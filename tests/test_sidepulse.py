@@ -5722,6 +5722,31 @@ class AgentMonitorTests(unittest.TestCase):
             )
         )
 
+    def test_lid_close_animation_runs_when_the_battery_safeguard_lets_the_mac_sleep(self) -> None:
+        self.assertTrue(
+            daemon_runtime.lid_close_animation_should_run(
+                sleep_prevention_policy=SLEEP_PREVENTION_ALWAYS,
+                agents_active=True,
+                battery_safeguard_active=True,
+            )
+        )
+
+    def test_lid_close_decisions_count_the_keep_awake_grace(self) -> None:
+        from types import SimpleNamespace
+
+        runtime = SidePulseService().runtime
+        runtime.settings = AgentMonitorSettings()
+        runtime.last_lid_closed = True
+        runtime.battery_sleep_safeguard_active = False
+        runtime.last_snapshot = SimpleNamespace(aggregate=SimpleNamespace(active_count=0))
+        # Agents finished but the grace still keeps the Mac awake.
+        runtime.agent_awake_requested = True
+        self.assertFalse(runtime.should_run_lid_close_animation())
+        self.assertFalse(runtime.should_hold_lid_closed_led_state())
+        runtime.agent_awake_requested = False
+        self.assertTrue(runtime.should_run_lid_close_animation())
+        self.assertTrue(runtime.should_hold_lid_closed_led_state())
+
     def test_lid_display_sleep_never_runs_with_an_external_or_unknown_display(self) -> None:
         self.assertTrue(
             daemon_runtime.closed_lid_display_sleep_should_request(
