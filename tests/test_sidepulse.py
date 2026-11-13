@@ -5747,6 +5747,37 @@ class AgentMonitorTests(unittest.TestCase):
         self.assertTrue(runtime.should_run_lid_close_animation())
         self.assertTrue(runtime.should_hold_lid_closed_led_state())
 
+    def test_closing_the_lid_with_agents_idle_ends_the_keep_awake_grace(self) -> None:
+        from types import SimpleNamespace
+        from sidepulse.models import AgentMode
+
+        runtime = SidePulseService().runtime
+        runtime.settings = AgentMonitorSettings()
+        runtime.sync_closed_lid_awake = lambda **kw: None
+        runtime.keep_awake.ensure_awake = lambda: None
+        runtime.last_battery_snapshot = None
+        runtime.last_lid_closed = False
+        plays = []
+        runtime.play_lid_animation = plays.append
+        for mode, ends in (
+            (AgentMode.COMPLETED, True),
+            (AgentMode.WAITING_FOR_INPUT, True),
+            (AgentMode.WORKING, False),
+        ):
+            runtime.last_lid_closed = False
+            runtime.agent_awake_grace_until_monotonic = None
+            runtime.agent_awake_last_mode = None
+            runtime.last_snapshot = SimpleNamespace(aggregate=SimpleNamespace(mode=mode, active_count=0))
+            runtime.sync_keep_awake(mode, None)
+            self.assertTrue(runtime.agent_awake_requested)
+            with patch("sidepulse.daemon_runtime.log_runtime"):
+                runtime.accept_lid_state(True)
+            self.assertEqual(runtime.agent_awake_requested, not ends, mode)
+            # The grace does not restart on later polls while the mode holds.
+            runtime.sync_keep_awake(mode, None)
+            self.assertEqual(runtime.agent_awake_requested, not ends, mode)
+        self.assertEqual(plays, [LID_ANIMATION_CLOSED, LID_ANIMATION_CLOSED])
+
     def test_lid_display_sleep_never_runs_with_an_external_or_unknown_display(self) -> None:
         self.assertTrue(
             daemon_runtime.closed_lid_display_sleep_should_request(

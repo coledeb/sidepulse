@@ -37,6 +37,13 @@ def display_status_for_mode(mode):
     return 'Idle'
 
 
+AGENT_WORKING_MODES = frozenset({
+    AgentMode.WORKING,
+    AgentMode.TOOL_RUNNING,
+    AgentMode.LONG_TASK_PROGRESS,
+})
+
+
 def awake_policy_should_hold(policy: str, *, agents_active: bool) -> bool:
     if policy == SLEEP_PREVENTION_ALWAYS:
         return True
@@ -303,6 +310,8 @@ class DaemonRuntime:
         closed = bool(closed)
         previous = self.last_lid_closed
         self.last_lid_closed = closed
+        if closed and previous is False:
+            self.end_agent_awake_grace_if_idle()
         self.sync_closed_lid_awake()
         if previous is None or previous == closed:
             return
@@ -430,13 +439,29 @@ class DaemonRuntime:
 
         self.sync_closed_lid_awake(agents_active=agents_active)
 
+    def end_agent_awake_grace_if_idle(self) -> None:
+        """Let the Mac sleep when the lid closes and no agent is mid-turn.
+
+        The grace after a turn ends keeps the Mac awake in case work resumes;
+        closing the lid with every agent finished or waiting says it won't.
+        A new turn while closed holds the Mac awake again as usual.
+        """
+        if self.last_snapshot is None:
+            return
+        mode = self.last_snapshot.aggregate.mode
+        if mode in AGENT_WORKING_MODES:
+            return
+        grace_until = self.agent_awake_grace_until_monotonic
+        now = time.monotonic()
+        if grace_until is None or now >= grace_until:
+            return
+        self.agent_awake_grace_until_monotonic = now
+        log_runtime("keep_awake grace ended: lid closed with agents idle")
+        self.sync_keep_awake(mode, self.last_battery_snapshot)
+
     def update_agent_awake_request(self, mode: AgentMode) -> bool:
         current = time.monotonic()
-        if mode in {
-            AgentMode.WORKING,
-            AgentMode.TOOL_RUNNING,
-            AgentMode.LONG_TASK_PROGRESS,
-        }:
+        if mode in AGENT_WORKING_MODES:
             self.agent_awake_grace_until_monotonic = None
             requested = True
         elif mode in {
