@@ -10,7 +10,7 @@ import threading
 from .battery import program_for_battery, program_for_charging_preview, snapshot_shows_charging_fill
 from .daemon_runtime import DaemonRuntime
 from .device_writer import DeviceBusyError, DeviceWriteError, led_lease_holder, write_led_program, normalize_led_text, validate_led_text
-from .led_status import apply_brightness, led_count_for_target, program_for_agent_mode
+from .led_status import apply_brightness, led_count_for_target, program_at_phase, program_for_agent_mode
 from .relay import (
     RelayConfig,
     listen_for_status_updates,
@@ -48,6 +48,9 @@ class SidePulseService:
         self.receiver_thread: threading.Thread | None = None
         self.receiver_signature: tuple[str, str] | None = None
         self.last_program_by_target: dict[str, str] = {}
+        # Status program per target and when it started (monotonic), so it can
+        # resume in step after an animation interrupts it.
+        self.program_started_by_target: dict[str, tuple[str, float]] = {}
         self.output_errors: dict[str, str] = {}
         self.output_lock = threading.RLock()
         self.outputs_enabled = True
@@ -219,8 +222,11 @@ class SidePulseService:
                 continue
             if self.last_program_by_target.get(key) == program:
                 continue
+            started = self.program_started_by_target.get(key)
+            resuming = started is not None and started[0] == program
+            written = program_at_phase(program, now - started[1]) if resuming else program
             try:
-                write_led_program(program, device_path=candidate.target)
+                write_led_program(written, device_path=candidate.target)
             except DeviceBusyError:
                 # `sidepulse visualize` owns the LEDs; not cached, so the
                 # program is rewritten once the lease is released.
@@ -231,9 +237,13 @@ class SidePulseService:
                 continue
             self.output_errors.pop(device_id, None)
             self.last_program_by_target[key] = program
+            if not resuming:
+                self.program_started_by_target[key] = (program, now)
 
         for key in set(self.last_program_by_target) - active_targets:
             self.last_program_by_target.pop(key, None)
+        for key in set(self.program_started_by_target) - active_targets:
+            self.program_started_by_target.pop(key, None)
 
     def play_lid_animation(self, kind, *, program=None, duration=None):
         if kind not in (LID_ANIMATION_CLOSED, LID_ANIMATION_OPEN):
@@ -288,6 +298,24 @@ class SidePulseService:
                     settings.battery_power_change_preview_seconds,
                 )
                 self.animation_until += settings.battery_power_change_preview_seconds
+
+    def play_lid_charging_fill(self):
+        """Show the charging fill alone when the lid closes but the Mac stays awake.
+
+        The status program comes back once it ends, in step with where it
+        would have been.
+        """
+        with self.output_lock:
+            settings = load_settings()
+            battery = self.runtime.last_battery_snapshot
+            if (battery is None or not settings.battery_show_on_power_change
+                    or not snapshot_shows_charging_fill(battery)):
+                return
+            self.lid_charging_followup = (
+                time.monotonic(), time.time(), battery,
+                settings.battery_power_change_preview_seconds,
+            )
+            self.play_lid_charging_followup()
 
     def play_lid_charging_followup(self):
         """Follow the lid-close animation with the charging fill while charging."""

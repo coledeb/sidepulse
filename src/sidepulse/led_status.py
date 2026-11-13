@@ -13,6 +13,7 @@ from .device_writer import (
     DeviceWriteError,
     normalize_led_text,
     resolve_target_path,
+    validate_led_text,
     write_led_program,
 )
 from .models import AgentMode
@@ -165,6 +166,92 @@ def add_dark_hold(program: str, dark_ms: int) -> str:
         if re.match(r"\s*off\b", line, re.IGNORECASE):
             return "\n".join(lines[: index + 1] + holds + lines[index + 1 :])
     return program
+
+
+_STEP_DURATION = re.compile(r"(\d+(?:\.\d+)?)(ms|s)", re.IGNORECASE)
+_PROGRAM_DIRECTIVE = re.compile(r"\s*brightness\s+\d+\s*", re.IGNORECASE)
+# Rounding to the nearest step is close enough below this.
+_PHASE_SPLIT_MIN_MS = 50
+
+
+def _parse_loop_step(line: str) -> tuple[list[str], int, int] | None:
+    """Split a single-group step into (tokens, duration index, duration ms).
+
+    Steps with per-LED groups, delays, or an implicit duration return None,
+    since their length on the device cannot be worked out reliably.
+    """
+    if ";" in line:
+        return None
+    tokens = line.split()
+    found = [
+        (index, match)
+        for index, token in enumerate(tokens)
+        if (match := _STEP_DURATION.fullmatch(token))
+    ]
+    if len(found) != 1:
+        return None
+    index, match = found[0]
+    value = float(match.group(1))
+    ms = round(value if match.group(2).lower() == "ms" else value * 1000)
+    if ms <= 0:
+        return None
+    return tokens, index, ms
+
+
+def program_at_phase(program: str, elapsed_seconds: float) -> str:
+    """The looping ``program`` as it would look ``elapsed_seconds`` after it started.
+
+    Writing a program restarts it on the device. After an interruption, write
+    this instead so a slow loop (the idle pulse) carries on where it would
+    have been. Programs whose timing cannot be read come back unchanged.
+    """
+    lines = normalize_led_text(program).split("\n")
+    if len(lines) < 2 or lines[-1].strip().lower() != "repeat" or elapsed_seconds <= 0:
+        return program
+    head: list[str] = []
+    body = lines[:-1]
+    while body and _PROGRAM_DIRECTIVE.fullmatch(body[0]):
+        head.append(body.pop(0))
+    steps = [_parse_loop_step(line) for line in body]
+    if not steps or any(step is None for step in steps):
+        return program
+    total = sum(step[2] for step in steps)
+    offset = round(elapsed_seconds * 1000) % total
+    start = 0
+    for index, (tokens, duration_index, ms) in enumerate(steps):
+        if offset < start + ms:
+            break
+        start += ms
+    into = offset - start
+    previous = steps[index - 1]
+
+    def without_duration(step: tuple[list[str], int, int]) -> list[str]:
+        tokens, duration_index, _ms = step
+        return tokens[:duration_index] + tokens[duration_index + 1 :]
+
+    # A step that holds the colour the previous step ended on can be cut
+    # anywhere; any other step is a transition, so start at its nearest edge.
+    is_hold = (
+        without_duration(steps[index]) == without_duration(previous)
+        and "pulse" not in (token.lower() for token in tokens + previous[0])
+    )
+    if is_hold and _PHASE_SPLIT_MIN_MS <= into <= ms - _PHASE_SPLIT_MIN_MS:
+        def with_ms(value: int) -> str:
+            parts = list(tokens)
+            parts[duration_index] = f"{value}ms"
+            return " ".join(parts)
+
+        rotated = [with_ms(ms - into)] + body[index + 1 :] + body[:index] + [with_ms(into)]
+    else:
+        if into * 2 >= ms:
+            index = (index + 1) % len(body)
+        rotated = body[index:] + body[:index]
+    shifted = "\n".join(head + rotated + [lines[-1]])
+    try:
+        validate_led_text(shifted)
+    except Exception:
+        return program
+    return shifted
 
 
 def _program_for_agent_mode(

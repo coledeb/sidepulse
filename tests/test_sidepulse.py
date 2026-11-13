@@ -5823,12 +5823,17 @@ class AgentMonitorTests(unittest.TestCase):
                 daemon_runtime.DaemonRuntime,
                 "play_lid_animation",
             ) as play_lid_animation,
+            patch.object(
+                controller.service,
+                "play_lid_charging_fill",
+            ) as play_lid_charging_fill,
         ):
             controller.accept_lid_state(controller.pending_lid_closed)
 
         self.assertTrue(controller.last_lid_closed)
         self.assertFalse(controller.lid_closed_led_hold_active)
         play_lid_animation.assert_not_called()
+        play_lid_charging_fill.assert_called_once_with()
 
     def test_daemon_lid_close_hold_suppresses_output_until_conditions_change(self) -> None:
         service = SidePulseService()

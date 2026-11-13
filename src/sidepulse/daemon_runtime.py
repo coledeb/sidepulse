@@ -306,7 +306,10 @@ class DaemonRuntime:
         kind = LID_ANIMATION_CLOSED if closed else LID_ANIMATION_OPEN
         if closed:
             if not self.should_run_lid_close_animation():
+                # The Mac stays awake (agents, or the Always policy), so skip
+                # the close animation but still show the charging fill.
                 self.lid_closed_led_hold_active = False
+                self.service.play_lid_charging_fill()
                 return
             self.lid_closed_led_hold_active = self.should_hold_lid_closed_led_state()
         else:
