@@ -105,6 +105,39 @@ class T3DelegateLookupTests(unittest.TestCase):
         monitor.ingest_record(event("ses_child"))
         self.assertNotIn("opencode:session:ses_child", monitor.statuses_by_key)
 
+    def test_saved_delegate_rows_go_on_restart(self) -> None:
+        from sidepulse import t3_status
+        from sidepulse.collector import LiveAgentMonitor
+
+        latest = Path(self.tmp.name) / "latest.json"
+        first = LiveAgentMonitor(latest_state_path=latest, recover_on_init=False)
+        first.t3_delegates = T3DelegateLookup(Path(self.tmp.name) / "none.sqlite")
+        first.ingest_record(event("ses_child"))
+        remote = HookEvent(provider="opencode", logged_at=NOW, event_name=t3_status.T3_EVENT_NAME,
+                           raw={"hook_event_name": t3_status.T3_EVENT_NAME, "sidepulse_status": "completed"},
+                           session_id="mcp:launch:remote", origin="OpenCode in T3 Code · KARLY")
+        first.ingest_record(remote)
+        self.assertEqual(
+            sorted(first.statuses_by_key),
+            ["opencode:session:mcp:launch:remote", "opencode:session:ses_child"],
+        )
+
+        self.add_thread("mcp:launch:child", "ses_child", delegatedFrom={"threadId": "p"})
+        import sidepulse.collector as collector
+        original = collector.T3DelegateLookup
+        collector.T3DelegateLookup = lambda: self.lookup
+        try:
+            second = LiveAgentMonitor(latest_state_path=latest, recover_on_init=False)
+        finally:
+            collector.T3DelegateLookup = original
+        self.assertEqual(sorted(second.statuses_by_key), ["opencode:session:mcp:launch:remote"])
+        second.ingest_record(HookEvent(
+            provider="opencode", logged_at=NOW, event_name=t3_status.T3_REMOVED_EVENT_NAME,
+            raw={"hook_event_name": t3_status.T3_REMOVED_EVENT_NAME},
+            session_id="mcp:launch:remote", origin="OpenCode in T3 Code · KARLY",
+        ))
+        self.assertEqual(second.statuses_by_key, {})
+
 
 if __name__ == "__main__":
     unittest.main()

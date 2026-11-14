@@ -50,6 +50,8 @@ from .origin import RELAY_ORIGIN_SEPARATOR, T3_NO_PROJECT_NAME, is_t3_scratch_pa
 from .settings import default_config_dir
 
 T3_EVENT_NAME = "T3ThreadStatus"
+# Drops a thread's row outright, as for a delegate child shown before.
+T3_REMOVED_EVENT_NAME = "T3ThreadRemoved"
 T3_SCOPE = "orchestration:read"
 T3_CLIENT_NAME = "SidePulse"
 T3_MCP_PROTOCOL_VERSION = "2025-06-18"
@@ -863,7 +865,30 @@ class T3StatusPoller:
             )
             text = first.get("text")
             self.delegate_children[key] = isinstance(text, str) and bool(T3_DELEGATE_PROMPT.match(text))
+            if self.delegate_children[key]:
+                # A row saved before this check (or before a restart) goes too.
+                provider = provider_for_t3_instance(thread.get("providerInstanceId"))
+                self._report_removed(environment_id, thread_id, provider)
         return self.delegate_children[key]
+
+    def _report_removed(self, environment_id: str, thread_id: str, provider: str) -> None:
+        label = dict(self.environments).get(environment_id, environment_id[:8])
+        origin = t3_thread_origin(provider, label)
+        self.ingest(
+            HookEvent(
+                provider=provider,
+                logged_at=self.wall_clock(),
+                event_name=T3_REMOVED_EVENT_NAME,
+                raw={
+                    "hook_event_name": T3_REMOVED_EVENT_NAME,
+                    "agent_origin": origin,
+                    "t3code_thread_id": thread_id,
+                    "t3code_environment_id": environment_id,
+                },
+                session_id=thread_id,
+                origin=origin,
+            )
+        )
 
     def check_local_settled(self) -> bool:
         """Clear waiting hook rows whose T3 thread was settled; True while any wait."""

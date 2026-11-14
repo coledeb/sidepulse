@@ -41,7 +41,7 @@ from .jsonl_log import DEFAULT_BACKUP_COUNT, backup_path
 from .providers import detect_log_path, parse_log_line
 from .settings import DEFAULT_COMPLETED_VISIBLE_SECONDS, AgentMonitorSettings, load_settings
 from .t3_delegates import T3DelegateLookup
-from .t3_status import LocalWaitingRow
+from .t3_status import T3_REMOVED_EVENT_NAME, LocalWaitingRow
 
 
 CODEX_TRANSCRIPT_PROVIDER = "codex-transcripts"
@@ -505,7 +505,7 @@ class LiveAgentMonitor:
             record = resolve_record_session(record, self.sessions_by_t3_thread)
             if record is None:
                 return
-            if self.t3_delegates.is_delegate(record):
+            if record.event_name == T3_REMOVED_EVENT_NAME or self.t3_delegates.is_delegate(record):
                 if self.statuses_by_key.pop(record.status_key, None) is not None:
                     self.write_latest_state()
                 return
@@ -696,8 +696,12 @@ class LiveAgentMonitor:
         loaded: dict[str, AgentStatus] = {}
         for status_data in statuses:
             status = agent_status_from_dict(status_data)
-            if status is not None and not is_orphan_status(status) and not is_internal_status(status):
-                loaded[status.agent_id] = status
+            if status is None or is_orphan_status(status) or is_internal_status(status):
+                continue
+            # Saved before SidePulse knew to hide T3 subagents.
+            if self.t3_delegates.is_delegate_session(status.provider, status.origin, status.session_id):
+                continue
+            loaded[status.agent_id] = status
         self.statuses_by_key.update(loaded)
 
     def reconcile_recovery_sources(self) -> None:

@@ -150,9 +150,11 @@ class PollerTests(unittest.TestCase):
         ]
         self.poller.poll_once()
         self.poller.poll_once()
-        self.assertEqual(
-            sorted(record.session_id for record in self.records), ["mcp:launch:requested", "user-thread"]
-        )
+        shown = sorted(r.session_id for r in self.records if r.event_name == t3_status.T3_EVENT_NAME)
+        self.assertEqual(shown, ["mcp:launch:requested", "user-thread"])
+        # A row saved before (e.g. across a restart) is dropped, once.
+        removed = [r.session_id for r in self.records if r.event_name == t3_status.T3_REMOVED_EVENT_NAME]
+        self.assertEqual(removed, ["mcp:launch:delegate"])
         reads = [args["threadId"] for name, args in self.client.calls if name == "t3_thread_read"]
         self.assertEqual(sorted(reads), ["mcp:launch:delegate", "mcp:launch:requested"])
 

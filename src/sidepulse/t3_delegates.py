@@ -56,14 +56,19 @@ class T3DelegateLookup:
 
     def is_delegate(self, record: HookEvent) -> bool:
         """Whether ``record`` comes from a T3 subagent on this Mac."""
-        if not is_t3code_origin(record.origin) or is_relayed_origin(record.origin):
-            return False
         thread_id = record.raw.get(T3CODE_THREAD_KEY)
         thread_id = thread_id if isinstance(thread_id, str) and thread_id else None
-        session_id = record.session_id
+        return self.is_delegate_session(record.provider, record.origin, record.session_id, thread_id)
+
+    def is_delegate_session(
+        self, provider: str, origin: str | None, session_id: str | None, thread_id: str | None = None,
+    ) -> bool:
+        """Whether that session, hosted by T3 on this Mac, is a subagent."""
+        if not is_t3code_origin(origin) or is_relayed_origin(origin):
+            return False
         if not thread_id and not session_id:
             return False
-        key = f"{record.provider}:{session_id or thread_id}"
+        key = f"{provider}:{session_id or thread_id}"
         if key in self.known:
             return self.known[key]
         now = self.monotonic()
