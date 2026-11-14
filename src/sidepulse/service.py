@@ -299,18 +299,23 @@ class SidePulseService:
                 )
                 self.animation_until += settings.battery_power_change_preview_seconds
 
-    def play_settled_animation(self):
+    def play_settled_animation(self, apply=None):
         """Play the Settled animation once, then let the status come back.
 
-        Settling several threads at once plays it once: it never interrupts
-        an animation that is still running, a lid one included.
+        ``apply`` (the settle itself) runs first under the output lock, so no
+        status write lands between the settle and the animation; nothing plays
+        when it returns False. Settling several threads at once plays it once:
+        it never interrupts an animation that is still running, a lid one
+        included.
         """
         from .models import AgentMode
         from .settings import ANIMATION_STATE_SETTLED, SETTLED_ANIMATION_SECONDS
         with self.output_lock:
+            result = apply() if apply is not None else True
             now = time.monotonic()
-            if not self.outputs_enabled or now < max(self.ui_pause_until, self.manual_pause_until, self.animation_until):
-                return
+            if not result or not self.outputs_enabled or now < max(
+                    self.ui_pause_until, self.manual_pause_until, self.animation_until):
+                return result
             settings = load_settings()
             selected = settings.agent_animation(ANIMATION_STATE_SETTLED)
             for candidate in self.runtime.devices:
@@ -330,6 +335,7 @@ class SidePulseService:
                 except Exception as exc:
                     self.output_errors[device_id] = str(exc)
             self.animation_until = now + SETTLED_ANIMATION_SECONDS + LID_ANIMATION_RESTORE_FUDGE_SECONDS
+            return result
 
     def play_lid_charging_fill(self):
         """Show the charging fill alone when the lid closes but the Mac stays awake.

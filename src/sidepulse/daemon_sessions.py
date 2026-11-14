@@ -123,12 +123,14 @@ class DaemonSessions:
         monitor: LiveAgentMonitor | None = None,
         start_t3: bool = True,
         on_change: Callable[[], None] | None = None,
-        on_settled: Callable[[], None] | None = None,
+        on_settled: Callable[[Callable[[], bool]], bool] | None = None,
     ) -> None:
         settings = load_settings()
         self.program_state = program_state
         self.on_change = on_change
-        # Plays the Settled animation when a T3 thread's row is cleared.
+        # Clears a settled T3 thread's row (the callable it is given) and
+        # plays the Settled animation as one step, so the LEDs never show the
+        # status after the settle before the animation.
         self.on_settled = on_settled
         self.monitor = monitor or LiveAgentMonitor(
             recovery_sources=default_sources(settings),
@@ -188,18 +190,15 @@ class DaemonSessions:
         self.changed()
 
     def settle(self, row, settled_at: datetime) -> None:
-        if self.monitor.settle_waiting_session(row, settled_at):
+        if self.settled(lambda: self.monitor.settle_waiting_session(row, settled_at)):
             log_sessions(f"t3 settled agent={row.agent_id} thread={row.t3_thread_id or 'by-timing'}")
             self.changed()
-            self.settled()
 
-    def settled(self) -> None:
+    def settled(self, apply: Callable[[], bool]) -> bool:
+        """Run ``apply`` (the settle) together with the Settled animation."""
         if self.on_settled is None:
-            return
-        try:
-            self.on_settled()
-        except Exception as exc:
-            log_sessions(f"settled animation error: {exc}")
+            return apply()
+        return self.on_settled(apply)
 
     def reconnect_t3(self) -> None:
         if self.t3_poller is None:

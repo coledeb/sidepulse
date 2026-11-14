@@ -88,7 +88,7 @@ class RemoteSettleTests(unittest.TestCase):
         client, clock, records = FakeClient(), Clock(), []
         poller = make_poller(client, clock, records)
         settles = []
-        poller.on_remote_settled = lambda: settles.append(clock.wall)
+        poller.on_remote_settled = lambda apply: settles.append(apply())
         client.threads[KARLY_WSL] = [thread("a", "completed"), thread("b", "completed")]
         poller.poll_once()
         self.assertEqual(settles, [])
