@@ -543,8 +543,10 @@ class LiveAgentMonitor:
         Those are Done rows and rows waiting on a closing question. Nothing an
         agent sends says the user read its reply; T3 records that as the thread
         being settled, so these rows are checked against T3. Permission prompts
-        are left alone: the agent is still blocked on them.
+        are left alone: the agent is still blocked on them. A row that aged
+        out of the list (its Done time ran out) is no longer checked.
         """
+        now = datetime.now(timezone.utc)
         with self.lock:
             threads_by_session = {
                 session_id: key.split(":", 1)[1]
@@ -560,6 +562,14 @@ class LiveAgentMonitor:
                 )
                 for status in self.statuses_by_key.values()
                 if is_local_t3_settle_candidate(status)
+                and not status_is_stale(
+                    status,
+                    now,
+                    stale_after_seconds=self.stale_after_seconds,
+                    tool_running_timeout_seconds=self.tool_running_timeout_seconds,
+                    completed_visible_seconds=self.completed_visible_seconds,
+                    idle_visible_seconds=self.idle_visible_seconds,
+                )
             ]
 
     def settle_waiting_session(self, row: LocalWaitingRow, settled_at: datetime) -> bool:

@@ -188,6 +188,19 @@ class DaemonSessions:
     def ingest_record(self, record) -> None:
         self.monitor.ingest_record(record)
         self.changed()
+        self.wake_t3_for_settle(record)
+
+    def wake_t3_for_settle(self, record) -> None:
+        """A row that just finished is checked for a settle right away, not
+        after whatever idle wait the T3 poller is in."""
+        from .collector import is_local_t3_settle_candidate
+
+        poller = self.t3_poller
+        if poller is None:
+            return
+        status = self.monitor.statuses_by_key.get(record.status_key)
+        if status is not None and is_local_t3_settle_candidate(status):
+            poller.wake()
 
     def settle(self, row, settled_at: datetime) -> None:
         if self.settled(lambda: self.monitor.settle_waiting_session(row, settled_at)):

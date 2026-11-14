@@ -258,18 +258,33 @@ class SettleTests(unittest.TestCase):
         self.assertEqual(status.event_name, T3_SETTLED_EVENT_NAME)
         self.assertEqual(self.monitor.t3_settle_candidates(), [])
 
-    def test_done_rows_poll_fast_for_three_minutes_then_slow(self) -> None:
+    def test_done_rows_poll_on_a_schedule_that_slows_with_age(self) -> None:
+        self.poller.state = t3_status.STATE_CONNECTED
+        self.monitor.completed_visible_seconds = 3600
         done_turn(self.monitor, "opencode", "ses_done", thread_id=OPENCODE_THREAD)
-        self.poller.wall_clock = lambda: STOP + timedelta(minutes=2)
-        self.poller.poll_once()
-        self.assertTrue(self.poller.any_active)
-        self.poller.wall_clock = lambda: STOP + timedelta(minutes=4)
-        self.poller.poll_once()
-        self.assertFalse(self.poller.any_active)
-        # A closing question keeps the fast rate however old it is.
+        for age, interval in ((0, 1.0), (9, 1.0), (10, 3.0), (59, 3.0), (60, 5.0), (119, 5.0),
+                              (120, 15.0), (1800, 15.0)):
+            with self.subTest(age=age):
+                self.poller.wall_clock = lambda age=age: STOP + timedelta(seconds=age)
+                self.poller.poll_once()
+                self.assertFalse(self.poller.any_active)
+                self.assertEqual(self.poller.next_interval(), interval)
+        # A closing question keeps the active rate however old it is.
         question_turn(self.monitor, "opencode", "ses_wait", thread_id=CODEX_THREAD)
         self.poller.poll_once()
         self.assertTrue(self.poller.any_active)
+        self.assertEqual(self.poller.next_interval(), t3_status.T3_ACTIVE_POLL_SECONDS)
+
+    def test_a_done_row_past_its_done_time_is_no_longer_checked(self) -> None:
+        done_turn(self.monitor, "opencode", "ses_done", thread_id=OPENCODE_THREAD)
+        self.monitor.completed_visible_seconds = 60  # STOP was two minutes ago
+        self.assertEqual(self.monitor.t3_settle_candidates(), [])
+        self.client.details[OPENCODE_THREAD] = detail(
+            OPENCODE_THREAD, completed=STOP, settled_at=STOP + timedelta(seconds=100),
+        )
+        self.poller.poll_once()
+        self.assertEqual(self.settles, [])
+        self.assertIsNone(self.poller.settle_interval)
 
     def test_done_rows_elsewhere_are_not_checked(self) -> None:
         done_turn(self.monitor, "claude", "remote-1", origin="Claude in T3 Code · KARLY-WSL")

@@ -234,3 +234,24 @@ def test_local_mode_ignores_rows_relayed_from_other_computers():
                                  'status': {'state': 'working', 'app': 'make'}})
     assert len(daemon.snapshot().statuses) == 2
     assert daemon.local_mode() == AgentMode.WORKING
+
+
+def test_a_t3_row_finishing_wakes_the_t3_poller_for_a_settle_check():
+    class Poller:
+        wakes = 0
+
+        def wake(self):
+            Poller.wakes += 1
+
+    daemon = sessions()
+    daemon.t3_poller = Poller()
+    t3 = {'agent_origin': 'Claude in T3 Code'}
+    daemon.ingest_line('claude', {'hook_event_name': 'UserPromptSubmit', 'session_id': 's1',
+                                  'cwd': '/tmp/project', 'prompt': 'do it', **t3})
+    assert Poller.wakes == 0
+    daemon.ingest_line('claude', {**stop_line('Committed the fix.'), **t3})
+    assert daemon.monitor.statuses_by_key['claude:session:s1'].mode == AgentMode.COMPLETED
+    assert Poller.wakes == 1
+    # Outside T3 nothing waits on a settle.
+    daemon.ingest_line('claude', stop_line('Done.', session='s2'))
+    assert Poller.wakes == 1

@@ -60,9 +60,10 @@ T3_CONNECT_TIMEOUT_SECONDS = 15 * 60.0
 
 T3_ACTIVE_POLL_SECONDS = 3.0
 T3_IDLE_POLL_SECONDS = 15.0
-# A Done row is checked for a settle at the active rate this long after it
-# finished, when it is most likely read; then at the idle rate.
-T3_SETTLE_DONE_FAST_SECONDS = 3 * 60.0
+# How often a Done row is checked for a settle, by its age: (younger than
+# this many seconds, poll every this many seconds). A reply is most likely read
+# and settled right after it lands; older rows fall back to the idle rate.
+T3_SETTLE_DONE_SCHEDULE = ((10.0, 1.0), (60.0, 3.0), (120.0, 5.0))
 T3_LINKS_REFRESH_SECONDS = 60.0
 # A thread in a project SidePulse hasn't seen refetches that machine's project
 # list, but no more often than this.
@@ -585,6 +586,14 @@ def settled_run_matches(
     return settled_at
 
 
+def settle_done_interval(age_seconds: float) -> float:
+    """How often to check a Done row this old for a settle."""
+    for younger_than, interval in T3_SETTLE_DONE_SCHEDULE:
+        if age_seconds < younger_than:
+            return interval
+    return T3_IDLE_POLL_SECONDS
+
+
 @dataclass
 class _Tracked:
     status: str
@@ -642,6 +651,8 @@ class T3StatusPoller:
         # first message never changes, so each is read once.
         self.delegate_children: dict[str, bool] = {}
         self.any_active = False
+        # Poll interval the youngest Done row asks for; None without one.
+        self.settle_interval: float | None = None
         self._stop = threading.Event()
         self._wake = threading.Event()
         self._thread: threading.Thread | None = None
@@ -659,6 +670,10 @@ class T3StatusPoller:
         self._stop.set()
         self._wake.set()
 
+    def wake(self) -> None:
+        """Poll now, e.g. for a row that just finished."""
+        self._wake.set()
+
     def reconnect(self) -> None:
         """Pick up new credentials on the next poll."""
         self.client = None
@@ -674,7 +689,10 @@ class T3StatusPoller:
     def next_interval(self) -> float:
         if self.state != STATE_CONNECTED:
             return T3_IDLE_POLL_SECONDS
-        return T3_ACTIVE_POLL_SECONDS if self.any_active else T3_IDLE_POLL_SECONDS
+        interval = T3_ACTIVE_POLL_SECONDS if self.any_active else T3_IDLE_POLL_SECONDS
+        if self.settle_interval is not None:
+            interval = min(interval, self.settle_interval)
+        return interval
 
     # one round
 
@@ -911,9 +929,10 @@ class T3StatusPoller:
     def check_local_settled(self) -> bool:
         """Clear hook rows whose T3 thread was settled.
 
-        True, for the active poll rate, while a row waits on the user or a
-        Done row finished within ``T3_SETTLE_DONE_FAST_SECONDS``.
+        True, for the active poll rate, while a row waits on the user. Done
+        rows set ``settle_interval`` from ``T3_SETTLE_DONE_SCHEDULE`` instead.
         """
+        self.settle_interval = None
         if self.local_waiting is None or self.on_local_settled is None:
             return False
         rows = list(self.local_waiting())
@@ -921,10 +940,10 @@ class T3StatusPoller:
             self.settle_misses.clear()
             return False
         now = self.wall_clock()
-        waiting = any(
-            row.waiting or (now - row.updated_at).total_seconds() < T3_SETTLE_DONE_FAST_SECONDS
-            for row in rows
-        )
+        waiting = any(row.waiting for row in rows)
+        done_ages = [(now - row.updated_at).total_seconds() for row in rows if not row.waiting]
+        if done_ages:
+            self.settle_interval = settle_done_interval(min(done_ages))
         try:
             page = self.client.call_tool(
                 "t3_thread_list",
