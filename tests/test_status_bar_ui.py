@@ -1592,6 +1592,21 @@ class PureUiLogicTests(unittest.TestCase):
         asking = replace(make_status(agent_id="agent-2", mode=AgentMode.WAITING_FOR_INPUT), event_name="Stop")
         self.assertIs(sb.state_for_snapshot(make_snapshot([failed, asking])), sb.STATE_ASK)
 
+    def test_a_colon_in_the_prompt_is_not_a_project(self):
+        from dataclasses import replace
+
+        base = make_status(cwd="/private/tmp")
+        prompt = replace(base, display_name="Reply with just: hi (session-)")
+        self.assertEqual(sb.session_title_parts(prompt), ("Reply with just: hi", None))
+        named = replace(make_status(), project="Sidepulse", display_name="Sidepulse: Fix: the bug (session-)")
+        self.assertEqual(sb.session_title_parts(named), ("Fix: the bug", "Sidepulse"))
+        scratch = "/Users/test/.t3/scratch/2026-11-08-are-you-able-to-browse-659205ab"
+        saved = replace(
+            make_status(cwd=scratch),
+            display_name="2026-11-08-are-you-able-to-browse-659205ab: Are you able to browse reddit (session-)",
+        )
+        self.assertEqual(sb.session_title_parts(saved)[0], "Are you able to browse reddit")
+
     def test_each_animated_state_has_its_own_motion(self):
         self.assertEqual(sb.status_icon_motion(sb.STATE_WORKING), "spin")
         self.assertEqual(sb.status_icon_motion(sb.STATE_ASK), "pulse")

@@ -6600,13 +6600,14 @@ def primary_session_open_action(status: AgentStatus | object) -> str | None:
 def session_title_parts(status: AgentStatus) -> tuple[str, str | None]:
     project = status_project(status)
     title = strip_session_short_id(status.display_name, status.session_id)
-    if project and title.startswith(f"{project}: "):
-        title = title[len(project) + 2 :]
-    elif ": " in title:
-        maybe_project, maybe_title = title.split(": ", 1)
-        if not project:
-            project = maybe_project
-        title = maybe_title
+    # Only strip a project SidePulse put in front: the row's project, or its
+    # folder's name on rows saved before T3 scratch threads were "No project".
+    # A colon in the prompt ("Reply with just: hi") is part of the title.
+    folder = re.split(r"[\\/]", status.cwd.rstrip("\\/"))[-1] if status.cwd else None
+    for prefix in (project, folder):
+        if prefix and title.startswith(f"{prefix}: "):
+            title = title[len(prefix) + 2 :]
+            break
     if project and normalized_menu_part(project) == normalized_menu_part(title):
         project = None
     return title or status.display_name, project
