@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import tempfile
 import textwrap
+import time
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -268,6 +269,28 @@ HARNESS = textwrap.dedent(
 )
 
 
+# A one-shot `opencode run`: the process exits as soon as its events are out,
+# with hooks still queued and, here, one session still mid-run.
+EXIT_HARNESS = textwrap.dedent(
+    """
+    const plugin = (await import(process.argv[2])).default
+    const events = JSON.parse(process.argv[3])
+    plugin.setup({
+      location: { directory: "/work/a" },
+      session: { async get() { throw new Error("not found") } },
+      event: {
+        async *subscribe({ signal }) {
+          for (const event of events) yield event
+          await new Promise((resolve) => signal.addEventListener("abort", resolve))
+        },
+      },
+    })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    process.exit(0)
+    """
+)
+
+
 def opencode_event(type_: str, data: dict, directory: str | None = "/work/a") -> dict:
     event = {"id": f"evt_{type_}", "type": type_, "data": data}
     if directory:
@@ -459,6 +482,49 @@ class OpenCodePluginTests(unittest.TestCase):
         self.assertEqual(rows[2]["message"], "shell: ls")
         self.assertNotIn("tool_input", rows[2])
         self.assertEqual(rows[-1]["last_assistant_message"], "Fixed. Want me to commit?")
+
+    def test_hooks_still_queued_at_exit_are_delivered_in_order(self) -> None:
+        done, cut = "ses_done", "ses_cut"
+        events = [
+            opencode_event("session.execution.started", {"sessionID": done}),
+            opencode_event("session.text.ended", {"sessionID": done, "text": "hi"}),
+            opencode_event("session.execution.succeeded", {"sessionID": done}),
+            opencode_event("session.execution.started", {"sessionID": cut}),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            out = root / "hook.jsonl"
+            # Slow enough that the process exits with most hooks still queued.
+            command = f"sleep 0.2; {{ cat; echo; }} >> {shlex.quote(str(out))}"
+            plugin = root / "plugin.mjs"
+            plugin.write_text(opencode_plugin_source(command))
+            harness = root / "harness.mjs"
+            harness.write_text(EXIT_HARNESS)
+            completed = subprocess.run(
+                ["node", str(harness), plugin.as_uri(), json.dumps(events)],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+
+            rows: list[dict] = []
+            deadline = time.monotonic() + 10
+            while len(rows) < 4 and time.monotonic() < deadline:
+                time.sleep(0.1)
+                if out.exists():
+                    rows = [json.loads(line) for line in out.read_text().splitlines() if line]
+
+        self.assertEqual(
+            [(row["session_id"], row["hook_event_name"]) for row in rows],
+            [
+                (done, "UserPromptSubmit"),
+                (done, "Stop"),
+                (cut, "UserPromptSubmit"),
+                (cut, "Interrupt"),
+            ],
+        )
+        self.assertEqual(rows[1]["last_assistant_message"], "hi")
 
 
 if __name__ == "__main__":

@@ -7,13 +7,23 @@
 // and hands each lifecycle change to SidePulse's hook command, in order, as
 // the same payload shape Claude-style hooks use. Monitoring never blocks or
 // fails a session: hook runs are fire-and-forget and every error is swallowed.
+//
+// A one-shot `opencode run` exits as soon as its answer is out and sends
+// SIGTERM to its child processes on the way, so hooks run in their own process
+// group, and whatever is still queued at exit is handed to one detached shell
+// that delivers it in order after the hook in flight finishes.
 
 import { spawn } from "node:child_process"
+import { mkdtempSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 
 const HOOK_COMMAND = __SIDEPULSE_HOOK_COMMAND__
 const HOOK_TIMEOUT_MS = 10000
 const LOOKUP_TIMEOUT_MS = 2000
 const MAX_SESSIONS = 256
+// How long the exit flush waits for the hook in flight before sending the rest.
+const EXIT_WAIT_TICKS = 100 // x 0.05s
 
 const EVENT_TYPES = [
   "session.created",
@@ -49,7 +59,19 @@ function sharedState() {
       controller: null,
       sessions: new Map(),
       queue: Promise.resolve(),
+      // Payloads emitted but not yet handed to a hook, oldest first.
+      pending: [],
+      // The hook process currently delivering a payload.
+      inflight: null,
+      // Top-level sessions between execution.started and its outcome.
+      running: new Set(),
     }
+    const state = globalThis[STATE_KEY]
+    process.on("exit", () => {
+      try {
+        flushOnExit(state)
+      } catch {}
+    })
   }
   return globalThis[STATE_KEY]
 }
@@ -76,15 +98,17 @@ function fallbackDirectory(state) {
   return firstString(ctx?.location?.directory)
 }
 
-function runHook(payload) {
+function runHook(state, payload) {
   return new Promise((resolve) => {
     let child
     try {
-      child = spawn("/bin/sh", ["-c", HOOK_COMMAND], { stdio: ["pipe", "ignore", "ignore"] })
+      // Its own process group: OpenCode's shutdown SIGTERM must not reach it.
+      child = spawn("/bin/sh", ["-c", HOOK_COMMAND], { stdio: ["pipe", "ignore", "ignore"], detached: true })
     } catch {
       resolve()
       return
     }
+    state.inflight = child.pid ?? null
     const timer = setTimeout(() => {
       try {
         child.kill("SIGKILL")
@@ -92,6 +116,7 @@ function runHook(payload) {
     }, HOOK_TIMEOUT_MS)
     const done = () => {
       clearTimeout(timer)
+      if (state.inflight === child.pid) state.inflight = null
       resolve()
     }
     child.on("error", done)
@@ -101,7 +126,7 @@ function runHook(payload) {
   })
 }
 
-function emit(state, eventName, sessionID, fields = {}) {
+function buildPayload(state, eventName, sessionID, fields = {}) {
   const record = sessionRecord(state, sessionID)
   const payload = {
     hook_event_name: eventName,
@@ -115,7 +140,43 @@ function emit(state, eventName, sessionID, fields = {}) {
   for (const key of Object.keys(payload)) {
     if (payload[key] === undefined) delete payload[key]
   }
-  state.queue = state.queue.then(() => runHook(payload)).catch(() => {})
+  return payload
+}
+
+function emit(state, eventName, sessionID, fields = {}) {
+  state.pending.push(buildPayload(state, eventName, sessionID, fields))
+  state.queue = state.queue
+    .then(() => {
+      const payload = state.pending.shift()
+      return payload ? runHook(state, payload) : undefined
+    })
+    .catch(() => {})
+}
+
+// Runs inside process.on("exit"), so everything here is synchronous: a run cut
+// short ends as interrupted, and the queued payloads go to one detached shell.
+function flushOnExit(state) {
+  for (const sessionID of state.running) {
+    state.pending.push(buildPayload(state, "Interrupt", sessionID))
+  }
+  state.running.clear()
+  const payloads = state.pending.splice(0)
+  if (payloads.length === 0) return
+  const dir = mkdtempSync(join(tmpdir(), "sidepulse-opencode-"))
+  payloads.forEach((payload, index) => {
+    writeFileSync(join(dir, `${String(index).padStart(4, "0")}.json`), JSON.stringify(payload))
+  })
+  const script = [
+    'n=0; while [ -n "$1" ] && kill -0 "$1" 2>/dev/null && [ "$n" -lt "$3" ]; do sleep 0.05; n=$((n+1)); done',
+    'for f in "$2"/*.json; do /bin/sh -c "$SIDEPULSE_HOOK_COMMAND" < "$f"; done',
+    'rm -rf "$2"',
+  ].join("; ")
+  const child = spawn(
+    "/bin/sh",
+    ["-c", script, "sidepulse-flush", String(state.inflight ?? ""), dir, String(EXIT_WAIT_TICKS)],
+    { stdio: "ignore", detached: true, env: { ...process.env, SIDEPULSE_HOOK_COMMAND: HOOK_COMMAND } },
+  )
+  child.unref()
 }
 
 // T3 Code runs every OpenCode thread on one shared server, so no per-thread
@@ -203,6 +264,7 @@ async function handleEvent(state, ctx, event) {
       if (data.item?.type === "user") record.prompt = firstString(data.item?.payload?.text)
       return
     case "session.execution.started":
+      state.running.add(sessionID)
       record.lastText = undefined
       emit(state, "UserPromptSubmit", sessionID, { prompt: record.prompt })
       record.prompt = undefined
@@ -263,17 +325,20 @@ async function handleEvent(state, ctx, event) {
       emit(state, "PostToolUse", sessionID, { tool_name: "question" })
       return
     case "session.execution.succeeded":
+      state.running.delete(sessionID)
       emit(state, "Stop", sessionID, { last_assistant_message: record.lastText })
       record.lastText = undefined
       record.tools.clear()
       return
     case "session.execution.failed":
+      state.running.delete(sessionID)
       emit(state, "StopFailure", sessionID, {
         error_details: firstString(data.error?.message, data.message) ?? "OpenCode run failed",
       })
       record.tools.clear()
       return
     case "session.execution.interrupted":
+      state.running.delete(sessionID)
       emit(state, "Interrupt", sessionID)
       record.tools.clear()
       return

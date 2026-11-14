@@ -22,6 +22,16 @@ T3CODE_SURFACE = "t3code"
 SERVER_HOSTED_PROVIDERS = frozenset({"opencode"})
 # relay.annotate_remote_line joins an origin and its computer with this.
 RELAY_ORIGIN_SEPARATOR = " · "
+# The agent process a hook runs under, so the daemon can tell a session whose
+# process is gone (a run killed or exited before its Stop) from a quiet one.
+AGENT_PID_KEY = "agent_pid"
+AGENT_PID_STARTED_KEY = "agent_pid_started"
+# Agents known to run their hooks from the long-lived agent process itself, not
+# from a short-lived helper that exits after each hook.
+AGENT_PID_PROVIDERS = frozenset({"claude", "codex", "opencode"})
+# lstart is printed in the caller's timezone and locale; pin both so the hook
+# and the daemon (a LaunchAgent with its own environment) agree.
+PS_ENV_OVERRIDES = {"LC_ALL": "C", "TZ": "UTC"}
 
 
 @dataclass(frozen=True)
@@ -30,6 +40,8 @@ class ProcessInfo:
     ppid: int | None
     comm: str
     command: str
+    # ps's lstart: with the pid, names the process even after the pid is reused.
+    started: str | None = None
 
 
 @dataclass(frozen=True)
@@ -249,12 +261,16 @@ def process_ancestry(pid: int, *, limit: int = 10) -> tuple[ProcessInfo, ...]:
 def process_info(pid: int) -> ProcessInfo | None:
     try:
         completed = subprocess.run(
-            ["/bin/ps", "-p", str(pid), "-o", "pid=", "-o", "ppid=", "-o", "comm=", "-o", "command="],
+            [
+                "/bin/ps", "-p", str(pid),
+                "-o", "pid=", "-o", "ppid=", "-o", "lstart=", "-o", "comm=", "-o", "command=",
+            ],
             check=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
             timeout=0.4,
+            env={**os.environ, **PS_ENV_OVERRIDES},
         )
     except Exception:
         return None
@@ -262,17 +278,76 @@ def process_info(pid: int) -> ProcessInfo | None:
     if completed.returncode != 0 or not line:
         return None
 
-    parts = line.split(None, 3)
-    if len(parts) < 3:
+    # lstart is always five words: "Fri Nov 13 17:46:10 2026".
+    parts = line.split(None, 8)
+    if len(parts) < 8:
         return None
     try:
         parsed_pid = int(parts[0])
         parsed_ppid = int(parts[1])
     except ValueError:
         return None
-    comm = parts[2]
-    command = parts[3] if len(parts) > 3 else comm
-    return ProcessInfo(parsed_pid, parsed_ppid, comm, command)
+    started = " ".join(parts[2:7])
+    comm = parts[7]
+    command = parts[8] if len(parts) > 8 else comm
+    return ProcessInfo(parsed_pid, parsed_ppid, comm, command, started)
+
+
+PROCESS_ALIVE = "alive"
+PROCESS_GONE = "gone"
+PROCESS_UNKNOWN = "unknown"
+
+
+def process_state(pid: int, started: str) -> str:
+    """Whether the process process_info saw as (pid, started) still runs.
+
+    Unknown when ps can't answer (a timeout under load), which callers must not
+    read as gone.
+    """
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return PROCESS_GONE
+    except PermissionError:
+        # Another user's process now holds the pid; the agent ran as this user.
+        return PROCESS_GONE
+    except OSError:
+        return PROCESS_UNKNOWN
+    try:
+        completed = subprocess.run(
+            ["/bin/ps", "-p", str(pid), "-o", "lstart="],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=1.0,
+            env={**os.environ, **PS_ENV_OVERRIDES},
+        )
+    except Exception:
+        return PROCESS_UNKNOWN
+    if completed.returncode != 0:
+        return PROCESS_GONE
+    current = completed.stdout.split()
+    if not current:
+        return PROCESS_UNKNOWN
+    return PROCESS_ALIVE if current == started.split() else PROCESS_GONE
+
+
+def agent_process(parent_pid: int, *, limit: int = 4) -> ProcessInfo | None:
+    """The first ancestor that isn't a shell or interpreter wrapping the hook."""
+    seen: set[int] = set()
+    current = parent_pid
+    while current > 1 and current not in seen and len(seen) < limit:
+        seen.add(current)
+        info = process_info(current)
+        if info is None:
+            return None
+        if process_basename(info):
+            return info
+        if info.ppid is None:
+            return None
+        current = info.ppid
+    return None
 
 
 def process_basename(info: ProcessInfo) -> str:
@@ -313,6 +388,11 @@ def annotate_payload_with_origin(
         thread_id = None
     if thread_id and T3CODE_THREAD_KEY not in result:
         result[T3CODE_THREAD_KEY] = thread_id
+    if provider.lower() in AGENT_PID_PROVIDERS and AGENT_PID_KEY not in result:
+        agent = agent_process(os.getppid())
+        if agent is not None and agent.started:
+            result[AGENT_PID_KEY] = agent.pid
+            result[AGENT_PID_STARTED_KEY] = agent.started
     return result
 
 

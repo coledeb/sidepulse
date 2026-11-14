@@ -22,12 +22,16 @@ from .models import (
     provider_label,
 )
 from .origin import (
+    AGENT_PID_KEY,
+    AGENT_PID_STARTED_KEY,
     RELAY_ORIGIN_SEPARATOR,
     T3CODE_SURFACE,
     T3CODE_THREAD_KEY,
     is_t3code_origin,
     is_transcript_origin,
+    PROCESS_GONE,
     origin_label_from_payload,
+    process_state,
     surface_origin,
 )
 from .ipc import ensure_private_dir
@@ -54,6 +58,8 @@ PERMISSION_PROMPT_SETTLE_SECONDS = 30.0
 # fresh request is already a real prompt and skips the settle window.
 PERMISSION_REQUEST_ALWAYS_PROMPTS = frozenset({"opencode"})
 CLAUDE_SESSION_IDLE_GRACE_SECONDS = 5.0
+# How often an active row's agent process is checked for still being alive.
+AGENT_PROCESS_CHECK_SECONDS = 10.0
 
 
 @dataclass(frozen=True)
@@ -473,6 +479,10 @@ class LiveAgentMonitor:
         self.metadata_by_status: dict[str, StatusMetadata] = {}
         self.pending_permissions_by_key: dict[str, set[str]] = {}
         self.sessions_by_t3_thread: dict[str, str] = {}
+        # The local agent process each row's hooks ran under: (pid, start time).
+        self.agent_process_by_status: dict[str, tuple[int, str]] = {}
+        self.agent_process_checked_at: dict[str, float] = {}
+        self.process_state: Callable[[int, str], str] = process_state
         # Rows owned elsewhere (the daemon's OSC program and remote sessions),
         # shown alongside this monitor's own under the same visibility rules.
         self.extra_statuses: Callable[[], Iterable[AgentStatus]] = tuple
@@ -508,6 +518,9 @@ class LiveAgentMonitor:
             ):
                 return
             self.statuses_by_key[status.agent_id] = status
+            agent = agent_process_from_record(record)
+            if agent is not None:
+                self.agent_process_by_status[status.agent_id] = agent
             self.write_latest_state()
 
     def t3_settle_candidates(self) -> list[LocalWaitingRow]:
@@ -551,6 +564,7 @@ class LiveAgentMonitor:
     def snapshot(self, include_stale: bool = False, *, with_extra: bool = True) -> MonitorSnapshot:
         now = datetime.now(timezone.utc)
         self.reconcile_claude_session_idle(now)
+        self.reconcile_exited_agent_processes(now)
         with self.lock:
             statuses = tuple(self.statuses_by_key.values())
         snapshot = snapshot_from_statuses(
@@ -567,6 +581,48 @@ class LiveAgentMonitor:
         if not with_extra:
             return snapshot
         return merge_program_statuses(snapshot, tuple(self.extra_statuses()))
+
+    def reconcile_exited_agent_processes(self, now: datetime) -> None:
+        """Idle the active rows whose agent process has exited.
+
+        A run killed, crashed, or exited before its Stop hook got out would
+        otherwise count as working until the idle timeout. Only the process's
+        own start time proves it is the same one, since pids get reused.
+        """
+        clock = time.monotonic()
+        with self.lock:
+            for key in [key for key in self.agent_process_by_status if key not in self.statuses_by_key]:
+                self.agent_process_by_status.pop(key, None)
+                self.agent_process_checked_at.pop(key, None)
+            candidates = []
+            for status in self.statuses_by_key.values():
+                agent = self.agent_process_by_status.get(status.agent_id)
+                if agent is None or not status_counts_active(status):
+                    continue
+                checked_at = self.agent_process_checked_at.get(status.agent_id)
+                if checked_at is not None and clock - checked_at < AGENT_PROCESS_CHECK_SECONDS:
+                    continue
+                self.agent_process_checked_at[status.agent_id] = clock
+                candidates.append((status, agent))
+        for status, (pid, started) in candidates:
+            if self.process_state(pid, started) != PROCESS_GONE:
+                continue
+            with self.lock:
+                # A hook arriving during the check takes precedence.
+                if self.statuses_by_key.get(status.agent_id) is not status:
+                    continue
+                self.statuses_by_key[status.agent_id] = replace(
+                    status,
+                    mode=AgentMode.IDLE_READY,
+                    event_name="ProcessExited",
+                    updated_at=max(now, status.updated_at),
+                    tool_name=None,
+                    message=None,
+                )
+                self.agent_process_by_status.pop(status.agent_id, None)
+                self.agent_process_checked_at.pop(status.agent_id, None)
+                # The newer timestamp keeps log replay from reviving the row.
+                self.write_latest_state()
 
     def reconcile_claude_session_idle(self, now: datetime) -> None:
         # Some local/cancelled Claude prompts return to idle without a Stop hook.
@@ -1895,6 +1951,20 @@ def agent_status_from_dict(data: object) -> AgentStatus | None:
         )
     except Exception:
         return None
+
+
+def agent_process_from_record(record: HookEvent) -> tuple[int, str] | None:
+    """The local agent process a hook ran under, if the hook recorded one."""
+    if RELAY_ORIGIN_SEPARATOR in str(record.origin or record.raw.get("agent_origin") or ""):
+        # Relayed from another computer: its pids mean nothing here.
+        return None
+    pid = record.raw.get(AGENT_PID_KEY)
+    started = record.raw.get(AGENT_PID_STARTED_KEY)
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 1:
+        return None
+    if not isinstance(started, str) or not started.strip():
+        return None
+    return pid, " ".join(started.split())
 
 
 def status_counts_active(status: AgentStatus) -> bool:
