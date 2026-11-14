@@ -228,6 +228,7 @@ class DaemonSessions:
     def apply_settings(self, settings) -> None:
         self.monitor.stale_after_seconds = settings.idle_timeout_seconds
         self.monitor.completed_visible_seconds = settings.completed_visible_seconds
+        self.monitor.recent_retention_seconds = settings.recent_session_retention_seconds
         sources = default_sources(settings)
         if sources != self.monitor.recovery_sources:
             # A transcript fallback was turned on or off: read the new sources now.

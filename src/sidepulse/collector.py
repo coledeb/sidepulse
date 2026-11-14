@@ -39,7 +39,12 @@ from .origin import (
 from .ipc import ensure_private_dir
 from .jsonl_log import DEFAULT_BACKUP_COUNT, backup_path
 from .providers import detect_log_path, parse_log_line
-from .settings import DEFAULT_COMPLETED_VISIBLE_SECONDS, AgentMonitorSettings, load_settings
+from .settings import (
+    DEFAULT_COMPLETED_VISIBLE_SECONDS,
+    DEFAULT_RECENT_SESSION_RETENTION_SECONDS,
+    AgentMonitorSettings,
+    load_settings,
+)
 from .t3_delegates import T3DelegateLookup
 from .t3_status import T3_EVENT_NAME, T3_REMOVED_EVENT_NAME, LocalWaitingRow
 
@@ -478,6 +483,9 @@ class LiveAgentMonitor:
         self.stale_after_seconds = stale_after_seconds
         self.tool_running_timeout_seconds = tool_running_timeout_seconds
         self.completed_visible_seconds = completed_visible_seconds
+        # The menu lists Done rows as recent sessions this long after they
+        # leave Done, so settling the thread still clears them until then.
+        self.recent_retention_seconds = DEFAULT_RECENT_SESSION_RETENTION_SECONDS
         self.idle_visible_seconds = idle_visible_seconds
         self.post_tool_working_visible_seconds = post_tool_working_visible_seconds
         self.latest_state_path = latest_state_path
@@ -543,8 +551,9 @@ class LiveAgentMonitor:
         Those are Done rows and rows waiting on a closing question. Nothing an
         agent sends says the user read its reply; T3 records that as the thread
         being settled, so these rows are checked against T3. Permission prompts
-        are left alone: the agent is still blocked on them. A row that aged
-        out of the list (its Done time ran out) is no longer checked.
+        are left alone: the agent is still blocked on them. A row is checked
+        while the menu still lists it: a Done row until it leaves the recent
+        sessions, a wait until it goes stale.
         """
         now = datetime.now(timezone.utc)
         with self.lock:
@@ -562,13 +571,17 @@ class LiveAgentMonitor:
                 )
                 for status in self.statuses_by_key.values()
                 if is_local_t3_settle_candidate(status)
-                and not status_is_stale(
-                    status,
-                    now,
-                    stale_after_seconds=self.stale_after_seconds,
-                    tool_running_timeout_seconds=self.tool_running_timeout_seconds,
-                    completed_visible_seconds=self.completed_visible_seconds,
-                    idle_visible_seconds=self.idle_visible_seconds,
+                and (
+                    status.age_seconds(now) <= self.recent_retention_seconds
+                    if status.mode == AgentMode.COMPLETED
+                    else not status_is_stale(
+                        status,
+                        now,
+                        stale_after_seconds=self.stale_after_seconds,
+                        tool_running_timeout_seconds=self.tool_running_timeout_seconds,
+                        completed_visible_seconds=self.completed_visible_seconds,
+                        idle_visible_seconds=self.idle_visible_seconds,
+                    )
                 )
             ]
 

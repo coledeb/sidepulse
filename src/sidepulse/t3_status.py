@@ -41,7 +41,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
@@ -978,8 +978,11 @@ class T3StatusPoller:
             for thread in candidates:
                 thread_id = thread["threadId"]
                 settled_at = parse_t3_time(thread.get("settledAt"))
-                # Settled before this turn ended: that was an earlier turn.
-                if settled_at is None or settled_at < row.updated_at:
+                # Settled before this turn ended: that was an earlier turn. Hooks
+                # log whole seconds, and settling a Claude thread ends its
+                # session, whose SessionEnd can land a fraction after the
+                # settle; the run check below rules out a truly earlier turn.
+                if settled_at is None or settled_at < row.updated_at - timedelta(seconds=T3_RUN_MATCH_SECONDS):
                     continue
                 miss = (row.agent_id, row.updated_at.isoformat(), thread_id, str(thread.get("settledAt")))
                 if miss in self.settle_misses:

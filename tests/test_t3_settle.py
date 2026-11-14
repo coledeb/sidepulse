@@ -275,16 +275,33 @@ class SettleTests(unittest.TestCase):
         self.assertTrue(self.poller.any_active)
         self.assertEqual(self.poller.next_interval(), t3_status.T3_ACTIVE_POLL_SECONDS)
 
-    def test_a_done_row_past_its_done_time_is_no_longer_checked(self) -> None:
+    def test_a_done_row_listed_as_a_recent_session_still_clears(self) -> None:
         done_turn(self.monitor, "opencode", "ses_done", thread_id=OPENCODE_THREAD)
-        self.monitor.completed_visible_seconds = 60  # STOP was two minutes ago
-        self.assertEqual(self.monitor.t3_settle_candidates(), [])
+        self.monitor.completed_visible_seconds = 60  # out of Done, still in recent sessions
         self.client.details[OPENCODE_THREAD] = detail(
             OPENCODE_THREAD, completed=STOP, settled_at=STOP + timedelta(seconds=100),
         )
         self.poller.poll_once()
-        self.assertEqual(self.settles, [])
-        self.assertIsNone(self.poller.settle_interval)
+        self.assertEqual(self.mode("opencode:session:ses_done"), AgentMode.IDLE_READY)
+
+    def test_a_done_row_past_the_recent_sessions_is_not_checked(self) -> None:
+        done_turn(self.monitor, "opencode", "ses_done", thread_id=OPENCODE_THREAD)
+        self.monitor.recent_retention_seconds = 60  # STOP was two minutes ago
+        self.assertEqual(self.monitor.t3_settle_candidates(), [])
+
+    def test_settle_that_ends_the_session_a_moment_later_still_counts(self) -> None:
+        # Settling a Claude thread ends its session; SessionEnd logs whole
+        # seconds, so it can read just after the settle itself.
+        done_turn(self.monitor, "claude", "ses_end", thread_id=OPENCODE_THREAD)
+        self.monitor.ingest_record(hook("claude", "SessionEnd", "ses_end", at=STOP + timedelta(seconds=12),
+                                        thread_id=OPENCODE_THREAD))
+        agent_id = "claude:session:ses_end"
+        self.assertEqual(self.mode(agent_id), AgentMode.COMPLETED)
+        self.client.details[OPENCODE_THREAD] = detail(
+            OPENCODE_THREAD, completed=STOP, settled_at=STOP + timedelta(seconds=11.9), provider="claudeAgent",
+        )
+        self.poller.poll_once()
+        self.assertEqual(self.mode(agent_id), AgentMode.IDLE_READY)
 
     def test_done_rows_elsewhere_are_not_checked(self) -> None:
         done_turn(self.monitor, "claude", "remote-1", origin="Claude in T3 Code · KARLY-WSL")
