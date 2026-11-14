@@ -82,10 +82,10 @@ T3_SETTLED_SCAN_LIMIT = 50
 # with no parentThreadId; only the sending machine knows it is a subagent.
 # T3 opens every delegate prompt with this line, which threads an agent opens
 # on request (t3_thread_launch, create_threads) don't have.
-# T3 knows exactly (thread.delegatedFrom), but its MCP tools don't return that
-# field and includeSubagents only drops relationshipToParent == "subagent":
-# https://github.com/pingdotgg/t3code/issues/36956. Once fixed, filter on
-# delegatedFrom (null or absent means not delegated) or includeSubagents alone.
+# T3 knows exactly (thread.delegatedFrom). Builds before t3code PR 36961
+# (issue 36956) neither return that field over MCP nor drop such threads with
+# includeSubagents, so a thread without the key falls back to this match.
+# Once every machine runs a newer build, includeSubagents alone is enough.
 T3_DELEGATE_PROMPT = re.compile(r"Act as the [\w-]+ sub-agent for this task\.")
 
 ACTIVE_STATUSES = frozenset({"preparing", "queued", "starting", "running", "waiting"})
@@ -846,6 +846,15 @@ class T3StatusPoller:
     def _is_delegate_child(self, environment_id: str, thread: dict[str, Any]) -> bool:
         """A subagent another machine delegated here (includeSubagents can't tell)."""
         thread_id = thread.get("threadId")
+        if "delegatedFrom" in thread and isinstance(thread_id, str):
+            # A newer T3 says so outright; null means not delegated.
+            key = f"{environment_id}/{thread_id}"
+            delegated = bool(thread.get("delegatedFrom"))
+            if delegated and not self.delegate_children.get(key):
+                provider = provider_for_t3_instance(thread.get("providerInstanceId"))
+                self._report_removed(environment_id, thread_id, provider)
+            self.delegate_children[key] = delegated
+            return delegated
         if not (
             isinstance(thread_id, str)
             and thread_id.startswith("mcp:launch:")

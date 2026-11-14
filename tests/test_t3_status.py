@@ -177,6 +177,23 @@ class PollerTests(unittest.TestCase):
         reads = [args["threadId"] for name, args in self.client.calls if name == "t3_thread_read"]
         self.assertEqual(sorted(reads), ["mcp:launch:delegate", "mcp:launch:requested"])
 
+    def test_delegated_from_decides_without_reading_the_thread(self) -> None:
+        def launched(thread_id: str, delegated_from) -> dict:
+            return {**thread(thread_id, "completed"), "createdBy": "agent", "creationSource": "mcp",
+                    "parentThreadId": None, "delegatedFrom": delegated_from}
+
+        self.client.threads[KARLY_WSL] = [
+            launched("mcp:launch:delegate", {"threadId": "parent", "environmentId": "local"}),
+            launched("mcp:launch:requested", None),
+        ]
+        self.poller.poll_once()
+        self.poller.poll_once()
+        shown = [r.session_id for r in self.records if r.event_name == t3_status.T3_EVENT_NAME]
+        self.assertEqual(shown, ["mcp:launch:requested"])
+        removed = [r.session_id for r in self.records if r.event_name == t3_status.T3_REMOVED_EVENT_NAME]
+        self.assertEqual(removed, ["mcp:launch:delegate"])
+        self.assertEqual([name for name, _ in self.client.calls if name == "t3_thread_read"], [])
+
     def test_reports_each_change_once(self) -> None:
         self.client.threads[KARLY_WSL] = [thread("t1", "running")]
         self.poller.poll_once()
