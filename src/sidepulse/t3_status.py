@@ -45,7 +45,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
 from .models import HookEvent, provider_label
-from .origin import RELAY_ORIGIN_SEPARATOR
+from .origin import RELAY_ORIGIN_SEPARATOR, T3_NO_PROJECT_NAME, is_t3_scratch_path
 from .settings import default_config_dir
 
 T3_EVENT_NAME = "T3ThreadStatus"
@@ -466,9 +466,10 @@ T3_UNKNOWN_PROJECT = T3Project(None, None)
 def t3_project(project: dict[str, Any]) -> T3Project:
     root = project.get("workspaceRoot")
     root = root if isinstance(root, str) and root else None
-    if root and root.replace("\\", "/").rstrip("/").endswith("/.t3/scratch"):
-        # T3's catch-all for threads started outside a project.
-        return T3Project(None, None)
+    if root and is_t3_scratch_path(root):
+        # T3's catch-all for threads started outside a project; its root is
+        # the parent of every such thread's folder, not any one thread's.
+        return T3Project(None, T3_NO_PROJECT_NAME)
     title = project.get("title")
     title = title.strip() if isinstance(title, str) else ""
     if not title or title == T3_NO_PROJECT_TITLE:

@@ -27,6 +27,8 @@ from .origin import (
     RELAY_ORIGIN_SEPARATOR,
     T3CODE_SURFACE,
     T3CODE_THREAD_KEY,
+    T3_NO_PROJECT_NAME,
+    is_t3_scratch_path,
     is_t3code_origin,
     is_transcript_origin,
     PROCESS_GONE,
@@ -2329,6 +2331,8 @@ def status_project(status: AgentStatus) -> str | None:
 def project_name(cwd: str | None) -> str | None:
     if not cwd:
         return None
+    if is_t3_scratch_path(cwd):
+        return T3_NO_PROJECT_NAME
     if "\\" in cwd and "/" not in cwd:
         # A Windows folder on a linked machine, read from T3.
         return PureWindowsPath(cwd).name or cwd

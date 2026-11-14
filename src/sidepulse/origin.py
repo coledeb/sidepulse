@@ -22,6 +22,15 @@ T3CODE_SURFACE = "t3code"
 SERVER_HOSTED_PROVIDERS = frozenset({"opencode"})
 # relay.annotate_remote_line joins an origin and its computer with this.
 RELAY_ORIGIN_SEPARATOR = " · "
+# T3 Code starts threads outside a project in their own folder under
+# ~/.t3/scratch; rows from them show this instead of the folder's slug.
+T3_NO_PROJECT_NAME = "No project"
+
+
+def is_t3_scratch_path(path: str) -> bool:
+    """A folder under, or the root of, T3 Code's ~/.t3/scratch."""
+    parts = [part for part in path.replace("\\", "/").split("/") if part]
+    return any(parts[i:i + 2] == [".t3", "scratch"] for i in range(len(parts) - 1))
 # The agent process a hook runs under, so the daemon can tell a session whose
 # process is gone (a run killed or exited before its Stop) from a quiet one.
 AGENT_PID_KEY = "agent_pid"

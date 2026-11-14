@@ -163,7 +163,7 @@ class PollerTests(unittest.TestCase):
         self.poller.poll_once()
         self.assertEqual(
             [(record.cwd, record.raw.get("sidepulse_project")) for record in self.records],
-            [("/home/karly/docker/DUMB", "Plex"), (None, None), (None, None)],
+            [("/home/karly/docker/DUMB", "Plex"), (None, "No project"), (None, None)],
         )
 
         # The row is named after T3's project, not its folder.
@@ -173,7 +173,8 @@ class PollerTests(unittest.TestCase):
         rows = {status.session_id: status for status in monitor.statuses_by_key.values()}
         self.assertEqual(rows["t1"].project, "Plex")
         self.assertEqual(rows["t1"].display_name, "Plex: Fix the build (t1)")
-        self.assertIsNone(rows["t2"].project)
+        self.assertEqual(rows["t2"].project, "No project")
+        self.assertEqual(rows["t2"].display_name, "No project: Fix the build (t2)")
 
         # A project T3 doesn't list is retried, but not on every poll.
         def project_fetches() -> int:

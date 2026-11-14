@@ -1844,6 +1844,17 @@ class AgentMonitorTests(unittest.TestCase):
         self.assertEqual(project_name("C:\\Users\\karly\\Sidepulse"), "Sidepulse")
         self.assertEqual(project_name("/home/karly/Sidepulse"), "Sidepulse")
 
+    def test_project_name_calls_t3_scratch_folders_no_project(self) -> None:
+        for cwd in (
+            "/Users/me/.t3/scratch/2026-11-14-i-just-installed-an-app-4c518006",
+            "/Users/me/.t3/scratch/thread/sub",
+            "/home/karly/.t3/scratch",
+            "C:\\Users\\karly\\.t3\\scratch\\thread",
+        ):
+            with self.subTest(cwd=cwd):
+                self.assertEqual(project_name(cwd), "No project")
+        self.assertEqual(project_name("/Users/me/.t3/worktrees/Sidepulse"), "Sidepulse")
+
     def test_status_bar_native_session_row_uses_task_title(self) -> None:
         try:
             from sidepulse import status_bar
