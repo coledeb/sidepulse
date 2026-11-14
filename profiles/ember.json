@@ -6,6 +6,7 @@
     "lid_closed": "lid-closed",
     "lid_open": "ember-lid-open",
     "long_task_progress": "ember-tide",
+    "settled": "ember-settled",
     "tool_running": "ember-tide",
     "unknown": "ember-idle",
     "waiting_for_input": "ember-attention",

@@ -66,6 +66,10 @@ COUNT_SPECIFIC_ANIMATIONS = frozenset(
         "purple-lid-open",
         "lid-open",
         "lid-closed",
+        "settled",
+        "cyan-settled",
+        "ember-settled",
+        "purple-settled",
     }
 )
 # Built-in idle breaths whose cycle length follows the "Idle pulse" setting.
@@ -325,6 +329,10 @@ def _program_for_agent_mode(
         "purple-lid-open",
         "lid-open",
         "lid-closed",
+        "settled",
+        "cyan-settled",
+        "ember-settled",
+        "purple-settled",
     }:
         return apply_brightness(
             builtin_animation_program(animation_style, led_count),

@@ -6542,6 +6542,25 @@ class AgentMonitorTests(unittest.TestCase):
 
         self.assertEqual(loaded.custom_agent_animations[animation_id].program, "#00BEEF")
 
+    def test_settled_animation_follows_the_done_theme_until_picked(self) -> None:
+        from sidepulse.settings import ANIMATION_STATE_SETTLED
+        settings = AgentMonitorSettings()
+        self.assertEqual(settings.agent_animation_id(ANIMATION_STATE_SETTLED), "cyan-settled")
+        for profile_id, expected in (
+            ("profile:ember", "ember-settled"),
+            ("profile:purple", "purple-settled"),
+        ):
+            with self.subTest(profile=profile_id):
+                themed = settings.with_agent_animation(
+                    AgentMode.COMPLETED, f"{profile_id.split(':')[1]}-complete"
+                )
+                self.assertEqual(themed.agent_animation_id(ANIMATION_STATE_SETTLED), expected)
+                applied = settings.with_applied_agent_animation_profile(profile_id)
+                self.assertEqual(applied.agent_animation_id(ANIMATION_STATE_SETTLED), expected)
+                self.assertEqual(applied.matching_agent_animation_profile_id(), profile_id)
+        picked = settings.with_agent_animation(ANIMATION_STATE_SETTLED, "kitt")
+        self.assertEqual(picked.agent_animation_id(ANIMATION_STATE_SETTLED), "kitt")
+
     def test_agent_animation_catalog_is_shared_by_every_state(self) -> None:
         settings = AgentMonitorSettings()
         animation_id = custom_agent_animation_id(
@@ -6578,6 +6597,10 @@ class AgentMonitorTests(unittest.TestCase):
             AGENT_ANIMATION_NIGHT_RIDER,
             AGENT_ANIMATION_LID_OPEN,
             AGENT_ANIMATION_LID_CLOSED,
+            "settled",
+            "cyan-settled",
+            "ember-settled",
+            "purple-settled",
             animation_id,
         )
         self.assertEqual(settings.agent_animation_choices(), expected)

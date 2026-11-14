@@ -276,7 +276,7 @@ class ProgramServer:
                             raise StatusError('Hook events are not accepted here')
                         self.on_hook_event(provider, line)
                         ack = {'ok': True}
-                    elif report.get('type') in {'output_control', 'write_led', 'play_lid_animation', 'service_stop', 't3_reconnect'} and self.on_command:
+                    elif report.get('type') in {'output_control', 'write_led', 'play_lid_animation', 'play_settled_animation', 'service_stop', 't3_reconnect'} and self.on_command:
                         ack = self.on_command(report)
                     else:
                         ack = self.state.submit(report)

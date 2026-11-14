@@ -41,7 +41,7 @@ from .jsonl_log import DEFAULT_BACKUP_COUNT, backup_path
 from .providers import detect_log_path, parse_log_line
 from .settings import DEFAULT_COMPLETED_VISIBLE_SECONDS, AgentMonitorSettings, load_settings
 from .t3_delegates import T3DelegateLookup
-from .t3_status import T3_REMOVED_EVENT_NAME, LocalWaitingRow
+from .t3_status import T3_EVENT_NAME, T3_REMOVED_EVENT_NAME, LocalWaitingRow
 
 
 CODEX_TRANSCRIPT_PROVIDER = "codex-transcripts"
@@ -538,11 +538,12 @@ class LiveAgentMonitor:
             self.write_latest_state()
 
     def t3_settle_candidates(self) -> list[LocalWaitingRow]:
-        """Rows on this Mac, hosted by T3, waiting on a closing question.
+        """Rows on this Mac, hosted by T3, that settling the thread clears.
 
-        Nothing an agent sends says the user read its question; T3 records that
-        as the thread being settled, so these rows are checked against T3.
-        Permission prompts are left alone: the agent is still blocked on them.
+        Those are Done rows and rows waiting on a closing question. Nothing an
+        agent sends says the user read its reply; T3 records that as the thread
+        being settled, so these rows are checked against T3. Permission prompts
+        are left alone: the agent is still blocked on them.
         """
         with self.lock:
             threads_by_session = {
@@ -557,14 +558,18 @@ class LiveAgentMonitor:
                     t3_thread_id=threads_by_session.get(status.session_id or ""),
                 )
                 for status in self.statuses_by_key.values()
-                if is_local_t3_question_wait(status)
+                if is_local_t3_settle_candidate(status)
             ]
 
     def settle_waiting_session(self, row: LocalWaitingRow, settled_at: datetime) -> bool:
-        """Mark ``row`` read once T3 says its thread was settled; False if it moved on."""
+        """Clear ``row`` once T3 says its thread was settled; False if it moved on.
+
+        The row goes idle, which the list hides, as a linked machine's settled
+        thread does.
+        """
         with self.lock:
             status = self.statuses_by_key.get(row.agent_id)
-            if status is None or status.updated_at != row.updated_at or not is_local_t3_question_wait(status):
+            if status is None or status.updated_at != row.updated_at or not is_local_t3_settle_candidate(status):
                 return False
             self.statuses_by_key[row.agent_id] = replace(
                 status,
@@ -1401,6 +1406,19 @@ def is_local_t3_question_wait(status: AgentStatus) -> bool:
     return (
         status.mode == AgentMode.WAITING_FOR_INPUT
         and status.event_name == "Stop"
+        and is_t3code_origin(origin)
+        and RELAY_ORIGIN_SEPARATOR not in origin
+    )
+
+
+def is_local_t3_settle_candidate(status: AgentStatus) -> bool:
+    """A hook row on this Mac, hosted by T3, that settling its thread clears."""
+    if is_local_t3_question_wait(status):
+        return True
+    origin = status.origin or ""
+    return (
+        status.mode == AgentMode.COMPLETED
+        and status.event_name != T3_EVENT_NAME
         and is_t3code_origin(origin)
         and RELAY_ORIGIN_SEPARATOR not in origin
     )

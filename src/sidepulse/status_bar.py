@@ -196,6 +196,7 @@ from .settings import (
     VISUALIZER_STYLES,
     ANIMATION_STATE_LID_CLOSED,
     ANIMATION_STATE_LID_OPEN,
+    ANIMATION_STATE_SETTLED,
     ANIMATION_STATES,
     AGENT_ANIMATION_ADD_CUSTOM,
     AGENT_ANIMATION_AMBER_PULSE,
@@ -222,6 +223,10 @@ from .settings import (
     AGENT_ANIMATION_PURPLE_LID_OPEN,
     AGENT_ANIMATION_PURPLE_TIDE,
     AGENT_ANIMATION_SOLID_GREEN,
+    AGENT_ANIMATION_SETTLED,
+    AGENT_ANIMATION_CYAN_SETTLED,
+    AGENT_ANIMATION_EMBER_SETTLED,
+    AGENT_ANIMATION_PURPLE_SETTLED,
     AGENT_ANIMATION_BUILT_IN_PROFILE_IDS,
     DEFAULT_COMPLETED_VISIBLE_SECONDS,
     DEFAULT_IDLE_TIMEOUT_SECONDS,
@@ -426,6 +431,7 @@ ANIMATION_STATE_LABELS = {
     **{mode.value: MODE_LABELS[mode] for mode in AgentMode},
     ANIMATION_STATE_LID_OPEN: "Lid Open",
     ANIMATION_STATE_LID_CLOSED: "Lid Closed",
+    ANIMATION_STATE_SETTLED: "Settled",
 }
 ANIMATION_UI_STATES = tuple(
     state
@@ -2692,6 +2698,14 @@ class StatusBarController(NSObject):
             self.set_settings_message(
                 f"Showing {ANIMATION_STATE_LABELS[state]} on device."
             )
+            return
+        if state == ANIMATION_STATE_SETTLED:
+            try:
+                daemon_command({'type': 'play_settled_animation'}, timeout=5)
+            except Exception as exc:
+                self.set_settings_message(f"Could not play Settled animation: {exc}")
+                return
+            self.set_settings_message("Showing Settled on device.")
             return
 
         mode = AgentMode(state)
@@ -5230,6 +5244,10 @@ def agent_animation_label(settings: AgentMonitorSettings, animation_id: str) -> 
         AGENT_ANIMATION_NIGHT_RIDER: "Night Rider",
         AGENT_ANIMATION_LID_OPEN: "Lid Open Sweep",
         AGENT_ANIMATION_LID_CLOSED: "Lid Closed Sweep",
+        AGENT_ANIMATION_SETTLED: "Settled",
+        AGENT_ANIMATION_CYAN_SETTLED: "Cyan Settled",
+        AGENT_ANIMATION_EMBER_SETTLED: "Ember Settled",
+        AGENT_ANIMATION_PURPLE_SETTLED: "Purple Settled",
     }.get(animation_id)
     if built_in is not None:
         return built_in

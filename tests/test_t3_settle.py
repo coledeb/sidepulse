@@ -1,4 +1,4 @@
-"""Settling a T3 thread on this Mac clears its hook row's closing-question wait."""
+"""Settling a T3 thread on this Mac clears its hook row: a closing-question wait or Done."""
 
 from __future__ import annotations
 
@@ -92,6 +92,14 @@ def question_turn(monitor: LiveAgentMonitor, provider: str, session_id: str, *,
                                thread_id=thread_id, origin=origin, prompt="hi"))
     monitor.ingest_record(hook(provider, "Stop", session_id, at=STOP, thread_id=thread_id, origin=origin,
                                last_assistant_message="Hello! Second test received. What's next?"))
+
+
+def done_turn(monitor: LiveAgentMonitor, provider: str, session_id: str, *,
+              thread_id: str | None = None, origin: str | None = None) -> None:
+    monitor.ingest_record(hook(provider, "UserPromptSubmit", session_id, at=STOP - timedelta(seconds=4),
+                               thread_id=thread_id, origin=origin, prompt="hi"))
+    monitor.ingest_record(hook(provider, "Stop", session_id, at=STOP, thread_id=thread_id, origin=origin,
+                               last_assistant_message="Committed the fix and the tests pass."))
 
 
 class MatchTests(unittest.TestCase):
@@ -233,6 +241,27 @@ class SettleTests(unittest.TestCase):
                                         thread_id=OPENCODE_THREAD, prompt="more"))
         self.assertFalse(self.monitor.settle_waiting_session(row, STOP + timedelta(seconds=9)))
         self.assertEqual(self.mode("opencode:session:ses_1"), AgentMode.WORKING)
+
+    def test_done_row_clears_when_its_thread_is_settled(self) -> None:
+        done_turn(self.monitor, "opencode", "ses_1", thread_id=OPENCODE_THREAD)
+        agent_id = "opencode:session:ses_1"
+        self.assertEqual(self.mode(agent_id), AgentMode.COMPLETED)
+        self.assertEqual(self.monitor.t3_settle_candidates()[0].t3_thread_id, OPENCODE_THREAD)
+
+        settled_at = STOP + timedelta(seconds=100)
+        self.client.details[OPENCODE_THREAD] = detail(
+            OPENCODE_THREAD, completed=STOP + timedelta(milliseconds=30), settled_at=settled_at,
+        )
+        self.poller.poll_once()
+        status = self.monitor.statuses_by_key[agent_id]
+        self.assertEqual(status.mode, AgentMode.IDLE_READY)
+        self.assertEqual(status.event_name, T3_SETTLED_EVENT_NAME)
+        self.assertEqual(self.monitor.t3_settle_candidates(), [])
+
+    def test_done_rows_elsewhere_are_not_checked(self) -> None:
+        done_turn(self.monitor, "claude", "remote-1", origin="Claude in T3 Code · KARLY-WSL")
+        done_turn(self.monitor, "codex", "cli-1", origin="Codex CLI")
+        self.assertEqual(self.monitor.t3_settle_candidates(), [])
 
 
 if __name__ == "__main__":

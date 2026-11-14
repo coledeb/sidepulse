@@ -606,8 +606,11 @@ class T3StatusPoller:
         credentials_signature: Callable[[], object] | None = None,
         local_waiting: Callable[[], Sequence[LocalWaitingRow]] | None = None,
         on_local_settled: Callable[[LocalWaitingRow, datetime], None] | None = None,
+        on_remote_settled: Callable[[], None] | None = None,
     ) -> None:
         self.ingest = ingest
+        # Called when a linked machine's thread leaves the unsettled list.
+        self.on_remote_settled = on_remote_settled
         self.local_waiting = local_waiting
         self.on_local_settled = on_local_settled
         # (row, thread, settle time) checks that did not match, so a thread is
@@ -1017,10 +1020,14 @@ class T3StatusPoller:
             self.tracked[key] = _Tracked(status, record.provider, now, project)
 
         # A thread that left the unsettled list was looked at (or archived) in T3.
+        settled_any = False
         for key in [key for key in self.tracked if key.startswith(prefix) and key not in seen]:
             tracked = self.tracked.pop(key)
             if tracked.status != "idle":
                 self._report_idle(environment_id, label, key[len(prefix):], tracked.provider, observed_at)
+                settled_any = True
+        if settled_any and self.on_remote_settled is not None:
+            self.on_remote_settled()
         return any_active
 
     def _set_state(self, state: str) -> None:

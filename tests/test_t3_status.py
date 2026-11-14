@@ -83,6 +83,25 @@ def make_poller(client: FakeClient, clock: Clock, records: list) -> t3_status.T3
     )
 
 
+class RemoteSettleTests(unittest.TestCase):
+    def test_a_thread_leaving_the_unsettled_list_reports_a_settle_once(self) -> None:
+        client, clock, records = FakeClient(), Clock(), []
+        poller = make_poller(client, clock, records)
+        settles = []
+        poller.on_remote_settled = lambda: settles.append(clock.wall)
+        client.threads[KARLY_WSL] = [thread("a", "completed"), thread("b", "completed")]
+        poller.poll_once()
+        self.assertEqual(settles, [])
+        client.threads[KARLY_WSL] = []
+        clock.advance(3)
+        poller.poll_once()
+        self.assertEqual(len(settles), 1)  # two threads settled together play once
+        self.assertEqual([record.raw["sidepulse_status"] for record in records[-2:]], ["idle", "idle"])
+        clock.advance(3)
+        poller.poll_once()
+        self.assertEqual(len(settles), 1)
+
+
 class MappingTests(unittest.TestCase):
     def test_thread_status_mapping(self) -> None:
         cases = [

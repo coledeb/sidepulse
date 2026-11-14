@@ -59,6 +59,10 @@ AGENT_ANIMATION_PURPLE_LID_OPEN = "purple-lid-open"
 AGENT_ANIMATION_NIGHT_RIDER = "night-rider"
 AGENT_ANIMATION_LID_OPEN = "lid-open"
 AGENT_ANIMATION_LID_CLOSED = "lid-closed"
+AGENT_ANIMATION_CYAN_SETTLED = "cyan-settled"
+AGENT_ANIMATION_SETTLED = "settled"
+AGENT_ANIMATION_EMBER_SETTLED = "ember-settled"
+AGENT_ANIMATION_PURPLE_SETTLED = "purple-settled"
 AGENT_ANIMATION_CUSTOM = "custom"
 AGENT_ANIMATION_ADD_CUSTOM = "add-custom"
 AGENT_ANIMATION_CUSTOM_PREFIX = "custom:"
@@ -99,6 +103,10 @@ AGENT_ANIMATION_BUILT_INS = (
     AGENT_ANIMATION_NIGHT_RIDER,
     AGENT_ANIMATION_LID_OPEN,
     AGENT_ANIMATION_LID_CLOSED,
+    AGENT_ANIMATION_SETTLED,
+    AGENT_ANIMATION_CYAN_SETTLED,
+    AGENT_ANIMATION_EMBER_SETTLED,
+    AGENT_ANIMATION_PURPLE_SETTLED,
 )
 AGENT_ANIMATION_MODES = tuple(mode.value for mode in AgentMode)
 AGENT_ANIMATION_WORKING_MODES = (
@@ -108,10 +116,20 @@ AGENT_ANIMATION_WORKING_MODES = (
 )
 ANIMATION_STATE_LID_OPEN = "lid_open"
 ANIMATION_STATE_LID_CLOSED = "lid_closed"
+# Plays once when a T3 thread is settled (its row is cleared from the list).
+ANIMATION_STATE_SETTLED = "settled"
 ANIMATION_STATES = AGENT_ANIMATION_MODES + (
     ANIMATION_STATE_LID_OPEN,
     ANIMATION_STATE_LID_CLOSED,
+    ANIMATION_STATE_SETTLED,
 )
+# How long a Settled animation holds the LEDs before the status comes back.
+SETTLED_ANIMATION_SECONDS = 1.5
+# Settings saved before the Settled state follow the theme of their Done pick.
+SETTLED_ANIMATION_BY_COMPLETE = {
+    AGENT_ANIMATION_EMBER_COMPLETE: AGENT_ANIMATION_EMBER_SETTLED,
+    AGENT_ANIMATION_PURPLE_COMPLETE: AGENT_ANIMATION_PURPLE_SETTLED,
+}
 
 
 def default_agent_animation_id(mode: AgentMode | str) -> str:
@@ -132,6 +150,8 @@ def default_agent_animation_id(mode: AgentMode | str) -> str:
         return AGENT_ANIMATION_LID_OPEN
     if key == ANIMATION_STATE_LID_CLOSED:
         return AGENT_ANIMATION_LID_CLOSED
+    if key == ANIMATION_STATE_SETTLED:
+        return AGENT_ANIMATION_CYAN_SETTLED
     if key in AGENT_ANIMATION_MODES:
         return AGENT_ANIMATION_IDLE_PULSE
     raise ValueError(f"Unknown animation state: {key}")
@@ -282,6 +302,7 @@ def builtin_agent_animation_profiles() -> dict[str, AgentAnimationProfile]:
         AgentMode.UNKNOWN.value: AGENT_ANIMATION_EMBER_IDLE,
         ANIMATION_STATE_LID_OPEN: AGENT_ANIMATION_EMBER_LID_OPEN,
         ANIMATION_STATE_LID_CLOSED: AGENT_ANIMATION_LID_CLOSED,
+        ANIMATION_STATE_SETTLED: AGENT_ANIMATION_EMBER_SETTLED,
     }
     purple = {
         AgentMode.IDLE_READY.value: AGENT_ANIMATION_PURPLE_IDLE,
@@ -294,6 +315,7 @@ def builtin_agent_animation_profiles() -> dict[str, AgentAnimationProfile]:
         AgentMode.UNKNOWN.value: AGENT_ANIMATION_PURPLE_IDLE,
         ANIMATION_STATE_LID_OPEN: AGENT_ANIMATION_PURPLE_LID_OPEN,
         ANIMATION_STATE_LID_CLOSED: AGENT_ANIMATION_LID_CLOSED,
+        ANIMATION_STATE_SETTLED: AGENT_ANIMATION_PURPLE_SETTLED,
     }
     return {
         AGENT_ANIMATION_PROFILE_CYAN: AgentAnimationProfile("Cyan", cyan),
@@ -649,6 +671,11 @@ class AgentMonitorSettings:
         key = mode.value if isinstance(mode, AgentMode) else str(mode)
         if key not in ANIMATION_STATES:
             raise ValueError(f"Unknown animation state: {key}")
+        if key == ANIMATION_STATE_SETTLED and key not in self.agent_animations:
+            return SETTLED_ANIMATION_BY_COMPLETE.get(
+                self.agent_animation_id(AgentMode.COMPLETED),
+                AGENT_ANIMATION_CYAN_SETTLED,
+            )
         selected = self.agent_animations.get(key, AgentAnimationSetting()).style
         if selected == AGENT_ANIMATION_DEFAULT:
             return default_agent_animation_id(key)

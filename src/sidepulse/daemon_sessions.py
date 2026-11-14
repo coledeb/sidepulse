@@ -123,10 +123,13 @@ class DaemonSessions:
         monitor: LiveAgentMonitor | None = None,
         start_t3: bool = True,
         on_change: Callable[[], None] | None = None,
+        on_settled: Callable[[], None] | None = None,
     ) -> None:
         settings = load_settings()
         self.program_state = program_state
         self.on_change = on_change
+        # Plays the Settled animation when a T3 thread's row is cleared.
+        self.on_settled = on_settled
         self.monitor = monitor or LiveAgentMonitor(
             recovery_sources=default_sources(settings),
             stale_after_seconds=settings.idle_timeout_seconds,
@@ -153,6 +156,7 @@ class DaemonSessions:
                 on_state_change=lambda state: log_sessions(f"t3 state={state}"),
                 local_waiting=self.monitor.t3_settle_candidates,
                 on_local_settled=self.settle,
+                on_remote_settled=self.settled,
             )
             if t3_installed():
                 self.t3_poller.start()
@@ -187,6 +191,15 @@ class DaemonSessions:
         if self.monitor.settle_waiting_session(row, settled_at):
             log_sessions(f"t3 settled agent={row.agent_id} thread={row.t3_thread_id or 'by-timing'}")
             self.changed()
+            self.settled()
+
+    def settled(self) -> None:
+        if self.on_settled is None:
+            return
+        try:
+            self.on_settled()
+        except Exception as exc:
+            log_sessions(f"settled animation error: {exc}")
 
     def reconnect_t3(self) -> None:
         if self.t3_poller is None:

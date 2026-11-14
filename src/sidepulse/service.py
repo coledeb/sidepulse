@@ -35,7 +35,7 @@ class SidePulseService:
         from .daemon_sessions import DaemonSessions
         self.program_state = ProgramState()
         # Agent hook sessions; also shows the OSC program and remote rows.
-        self.sessions = DaemonSessions(self.program_state)
+        self.sessions = DaemonSessions(self.program_state, on_settled=self.play_settled_animation)
         self.program_server = ProgramServer(
             self.program_state,
             on_command=self.handle_command,
@@ -299,6 +299,38 @@ class SidePulseService:
                 )
                 self.animation_until += settings.battery_power_change_preview_seconds
 
+    def play_settled_animation(self):
+        """Play the Settled animation once, then let the status come back.
+
+        Settling several threads at once plays it once: it never interrupts
+        an animation that is still running, a lid one included.
+        """
+        from .models import AgentMode
+        from .settings import ANIMATION_STATE_SETTLED, SETTLED_ANIMATION_SECONDS
+        with self.output_lock:
+            now = time.monotonic()
+            if not self.outputs_enabled or now < max(self.ui_pause_until, self.manual_pause_until, self.animation_until):
+                return
+            settings = load_settings()
+            selected = settings.agent_animation(ANIMATION_STATE_SETTLED)
+            for candidate in self.runtime.devices:
+                device_id = candidate.device_id or str(candidate.root.expanduser())
+                if settings.display_for_device(device_id) == LED_DISPLAY_CUSTOM:
+                    continue
+                if led_lease_holder(candidate.target.parent) is not None:
+                    continue  # `sidepulse visualize` owns the LEDs
+                try:
+                    program = program_for_agent_mode(AgentMode.IDLE_READY,
+                        led_count=led_count_for_target(candidate.target),
+                        brightness=settings.brightness_for_device(device_id),
+                        animation_style=selected.style, custom_program=selected.custom_program,
+                        idle_pulse_seconds=settings.idle_pulse_seconds)
+                    write_led_program(program, device_path=candidate.target)
+                    self.last_program_by_target.pop(f'file:{candidate.target}', None)
+                except Exception as exc:
+                    self.output_errors[device_id] = str(exc)
+            self.animation_until = now + SETTLED_ANIMATION_SECONDS + LID_ANIMATION_RESTORE_FUDGE_SECONDS
+
     def play_lid_charging_fill(self):
         """Show the charging fill alone when the lid closes but the Mac stays awake.
 
@@ -405,6 +437,9 @@ class SidePulseService:
                             self.output_errors[candidate.device_id or str(candidate.root)] = str(exc)
                     self.last_program_by_target.clear()
                 return {'ok': True, 'output_errors': dict(self.output_errors)}
+            if kind == 'play_settled_animation':
+                self.play_settled_animation()
+                return {'ok': True}
             if kind == 'play_lid_animation':
                 self.play_lid_animation(command.get('kind'), program=command.get('program'),
                     duration=command.get('duration_seconds'))
