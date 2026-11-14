@@ -33,7 +33,6 @@ import hashlib
 import http.server
 import json
 import os
-import re
 import secrets
 import threading
 import time
@@ -50,8 +49,6 @@ from .origin import RELAY_ORIGIN_SEPARATOR, T3_NO_PROJECT_NAME, is_t3_scratch_pa
 from .settings import default_config_dir
 
 T3_EVENT_NAME = "T3ThreadStatus"
-# Drops a thread's row outright, as for a delegate child shown before.
-T3_REMOVED_EVENT_NAME = "T3ThreadRemoved"
 T3_SCOPE = "orchestration:read"
 T3_CLIENT_NAME = "SidePulse"
 T3_MCP_PROTOCOL_VERSION = "2025-06-18"
@@ -78,16 +75,6 @@ T3_FINISHED_MAX_AGE_SECONDS = 60 * 60.0
 # T3 marks a run done a few milliseconds after the agent's Stop.
 T3_RUN_MATCH_SECONDS = 3.0
 T3_SETTLED_SCAN_LIMIT = 50
-
-# A delegate_task sent to another machine becomes a top-level thread there,
-# with no parentThreadId; only the sending machine knows it is a subagent.
-# T3 opens every delegate prompt with this line, which threads an agent opens
-# on request (t3_thread_launch, create_threads) don't have.
-# T3 knows exactly (thread.delegatedFrom). Builds before t3code PR 36961
-# (issue 36956) neither return that field over MCP nor drop such threads with
-# includeSubagents, so a thread without the key falls back to this match.
-# Once every machine runs a newer build, includeSubagents alone is enough.
-T3_DELEGATE_PROMPT = re.compile(r"Act as the [\w-]+ sub-agent for this task\.")
 
 ACTIVE_STATUSES = frozenset({"preparing", "queued", "starting", "running", "waiting"})
 
@@ -647,9 +634,6 @@ class T3StatusPoller:
         self.tracked: dict[str, _Tracked] = {}
         # environment id -> (monotonic time fetched, project id -> project)
         self.projects: dict[str, tuple[float, dict[str, T3Project]]] = {}
-        # "environment/thread" -> whether it is a delegate child; a thread's
-        # first message never changes, so each is read once.
-        self.delegate_children: dict[str, bool] = {}
         self.any_active = False
         # Poll interval the youngest Done row asks for; None without one.
         self.settle_interval: float | None = None
@@ -852,6 +836,8 @@ class T3StatusPoller:
                     "environmentId": environment_id,
                     "allProjects": True,
                     "settled": False,
+                    # Drops delegate_task children, including those another
+                    # machine sent here (t3code PR 36961).
                     "includeSubagents": False,
                     "limit": 100,
                     "cursor": cursor,
@@ -860,71 +846,7 @@ class T3StatusPoller:
             threads.extend(thread for thread in page.get("threads") or () if isinstance(thread, dict))
             next_cursor = page.get("nextCursor")
             cursor = next_cursor if isinstance(next_cursor, int) and next_cursor > cursor else None
-        return [thread for thread in threads if not self._is_delegate_child(environment_id, thread)]
-
-    def _is_delegate_child(self, environment_id: str, thread: dict[str, Any]) -> bool:
-        """A subagent another machine delegated here (includeSubagents can't tell)."""
-        thread_id = thread.get("threadId")
-        if "delegatedFrom" in thread and isinstance(thread_id, str):
-            # A newer T3 says so outright; null means not delegated.
-            key = f"{environment_id}/{thread_id}"
-            delegated = bool(thread.get("delegatedFrom"))
-            if delegated and not self.delegate_children.get(key):
-                provider = provider_for_t3_instance(thread.get("providerInstanceId"))
-                self._report_removed(environment_id, thread_id, provider)
-            self.delegate_children[key] = delegated
-            return delegated
-        if not (
-            isinstance(thread_id, str)
-            and thread_id.startswith("mcp:launch:")
-            and thread.get("createdBy") == "agent"
-            and thread.get("creationSource") == "mcp"
-            and thread.get("parentThreadId") is None
-        ):
-            return False
-        key = f"{environment_id}/{thread_id}"
-        if key not in self.delegate_children:
-            try:
-                result = self.client.call_tool(
-                    "t3_thread_read", {"environmentId": environment_id, "threadId": thread_id}
-                )
-            except T3AuthError:
-                raise
-            except T3Error:
-                return False  # show it for now; read again next poll
-            first = next(
-                (
-                    item for item in result.get("items") or ()
-                    if isinstance(item, dict) and item.get("type") == "user_message"
-                ),
-                {},
-            )
-            text = first.get("text")
-            self.delegate_children[key] = isinstance(text, str) and bool(T3_DELEGATE_PROMPT.match(text))
-            if self.delegate_children[key]:
-                # A row saved before this check (or before a restart) goes too.
-                provider = provider_for_t3_instance(thread.get("providerInstanceId"))
-                self._report_removed(environment_id, thread_id, provider)
-        return self.delegate_children[key]
-
-    def _report_removed(self, environment_id: str, thread_id: str, provider: str) -> None:
-        label = dict(self.environments).get(environment_id, environment_id[:8])
-        origin = t3_thread_origin(provider, label)
-        self.ingest(
-            HookEvent(
-                provider=provider,
-                logged_at=self.wall_clock(),
-                event_name=T3_REMOVED_EVENT_NAME,
-                raw={
-                    "hook_event_name": T3_REMOVED_EVENT_NAME,
-                    "agent_origin": origin,
-                    "t3code_thread_id": thread_id,
-                    "t3code_environment_id": environment_id,
-                },
-                session_id=thread_id,
-                origin=origin,
-            )
-        )
+        return threads
 
     def check_local_settled(self) -> bool:
         """Clear hook rows whose T3 thread was settled.

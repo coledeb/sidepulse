@@ -41,7 +41,6 @@ class FakeClient:
         self.threads: dict[str, list[dict]] = {KARLY_WSL: []}
         self.projects: dict[str, list[dict]] = {KARLY_WSL: []}
         self.fail: dict[str, Exception] = {}
-        self.first_messages: dict[str, str] = {}
         self.calls: list[tuple[str, dict]] = []
 
     def call_tool(self, name: str, arguments: dict) -> dict:
@@ -56,9 +55,6 @@ class FakeClient:
                 raise self.fail[environment]
             assert arguments["settled"] is False and arguments["allProjects"] is True
             return {"threads": list(self.threads.get(environment, [])), "nextCursor": None}
-        if name == "t3_thread_read":
-            text = self.first_messages[arguments["threadId"]]
-            return {"items": [{"type": "user_message", "text": text}]}
         if name == "t3_project_list":
             return {"projects": list(self.projects.get(arguments["environmentId"], [])), "nextCursor": None}
         raise AssertionError(name)
@@ -156,42 +152,12 @@ class PollerTests(unittest.TestCase):
     def statuses(self) -> list[str]:
         return [record.raw["sidepulse_status"] for record in self.records]
 
-    def test_hides_threads_delegated_from_another_machine(self) -> None:
-        def launched(thread_id: str, prompt: str) -> dict:
-            self.client.first_messages[thread_id] = prompt
-            return {**thread(thread_id, "completed"), "createdBy": "agent", "creationSource": "mcp",
-                    "parentThreadId": None}
-
-        self.client.threads[KARLY_WSL] = [
-            launched("mcp:launch:delegate", "Act as the implementation sub-agent for this task.\n\nEdit it."),
-            launched("mcp:launch:requested", "Handoff from another machine: keep going."),
-            thread("user-thread", "completed"),
-        ]
+    def test_asks_t3_to_leave_out_delegate_children(self) -> None:
+        self.client.threads[KARLY_WSL] = [thread("user-thread", "completed")]
         self.poller.poll_once()
-        self.poller.poll_once()
-        shown = sorted(r.session_id for r in self.records if r.event_name == t3_status.T3_EVENT_NAME)
-        self.assertEqual(shown, ["mcp:launch:requested", "user-thread"])
-        # A row saved before (e.g. across a restart) is dropped, once.
-        removed = [r.session_id for r in self.records if r.event_name == t3_status.T3_REMOVED_EVENT_NAME]
-        self.assertEqual(removed, ["mcp:launch:delegate"])
-        reads = [args["threadId"] for name, args in self.client.calls if name == "t3_thread_read"]
-        self.assertEqual(sorted(reads), ["mcp:launch:delegate", "mcp:launch:requested"])
-
-    def test_delegated_from_decides_without_reading_the_thread(self) -> None:
-        def launched(thread_id: str, delegated_from) -> dict:
-            return {**thread(thread_id, "completed"), "createdBy": "agent", "creationSource": "mcp",
-                    "parentThreadId": None, "delegatedFrom": delegated_from}
-
-        self.client.threads[KARLY_WSL] = [
-            launched("mcp:launch:delegate", {"threadId": "parent", "environmentId": "local"}),
-            launched("mcp:launch:requested", None),
-        ]
-        self.poller.poll_once()
-        self.poller.poll_once()
-        shown = [r.session_id for r in self.records if r.event_name == t3_status.T3_EVENT_NAME]
-        self.assertEqual(shown, ["mcp:launch:requested"])
-        removed = [r.session_id for r in self.records if r.event_name == t3_status.T3_REMOVED_EVENT_NAME]
-        self.assertEqual(removed, ["mcp:launch:delegate"])
+        lists = [args for name, args in self.client.calls if name == "t3_thread_list"]
+        self.assertTrue(lists)
+        self.assertTrue(all(args["includeSubagents"] is False for args in lists))
         self.assertEqual([name for name, _ in self.client.calls if name == "t3_thread_read"], [])
 
     def test_reports_each_change_once(self) -> None:

@@ -46,7 +46,7 @@ from .settings import (
     load_settings,
 )
 from .t3_delegates import T3DelegateLookup
-from .t3_status import T3_EVENT_NAME, T3_REMOVED_EVENT_NAME, LocalWaitingRow
+from .t3_status import T3_EVENT_NAME, LocalWaitingRow
 
 
 CODEX_TRANSCRIPT_PROVIDER = "codex-transcripts"
@@ -513,7 +513,7 @@ class LiveAgentMonitor:
             record = resolve_record_session(record, self.sessions_by_t3_thread)
             if record is None:
                 return
-            if record.event_name == T3_REMOVED_EVENT_NAME or self.t3_delegates.is_delegate(record):
+            if self.t3_delegates.is_delegate(record):
                 if self.statuses_by_key.pop(record.status_key, None) is not None:
                     self.write_latest_state()
                 return

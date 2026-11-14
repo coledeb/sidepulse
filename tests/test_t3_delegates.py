@@ -131,12 +131,6 @@ class T3DelegateLookupTests(unittest.TestCase):
         finally:
             collector.T3DelegateLookup = original
         self.assertEqual(sorted(second.statuses_by_key), ["opencode:session:mcp:launch:remote"])
-        second.ingest_record(HookEvent(
-            provider="opencode", logged_at=NOW, event_name=t3_status.T3_REMOVED_EVENT_NAME,
-            raw={"hook_event_name": t3_status.T3_REMOVED_EVENT_NAME},
-            session_id="mcp:launch:remote", origin="OpenCode in T3 Code · KARLY",
-        ))
-        self.assertEqual(second.statuses_by_key, {})
 
 
 if __name__ == "__main__":
