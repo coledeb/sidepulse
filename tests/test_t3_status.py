@@ -41,6 +41,7 @@ class FakeClient:
         self.threads: dict[str, list[dict]] = {KARLY_WSL: []}
         self.projects: dict[str, list[dict]] = {KARLY_WSL: []}
         self.fail: dict[str, Exception] = {}
+        self.first_messages: dict[str, str] = {}
         self.calls: list[tuple[str, dict]] = []
 
     def call_tool(self, name: str, arguments: dict) -> dict:
@@ -55,6 +56,9 @@ class FakeClient:
                 raise self.fail[environment]
             assert arguments["settled"] is False and arguments["allProjects"] is True
             return {"threads": list(self.threads.get(environment, [])), "nextCursor": None}
+        if name == "t3_thread_read":
+            text = self.first_messages[arguments["threadId"]]
+            return {"items": [{"type": "user_message", "text": text}]}
         if name == "t3_project_list":
             return {"projects": list(self.projects.get(arguments["environmentId"], [])), "nextCursor": None}
         raise AssertionError(name)
@@ -132,6 +136,25 @@ class PollerTests(unittest.TestCase):
 
     def statuses(self) -> list[str]:
         return [record.raw["sidepulse_status"] for record in self.records]
+
+    def test_hides_threads_delegated_from_another_machine(self) -> None:
+        def launched(thread_id: str, prompt: str) -> dict:
+            self.client.first_messages[thread_id] = prompt
+            return {**thread(thread_id, "completed"), "createdBy": "agent", "creationSource": "mcp",
+                    "parentThreadId": None}
+
+        self.client.threads[KARLY_WSL] = [
+            launched("mcp:launch:delegate", "Act as the implementation sub-agent for this task.\n\nEdit it."),
+            launched("mcp:launch:requested", "Handoff from another machine: keep going."),
+            thread("user-thread", "completed"),
+        ]
+        self.poller.poll_once()
+        self.poller.poll_once()
+        self.assertEqual(
+            sorted(record.session_id for record in self.records), ["mcp:launch:requested", "user-thread"]
+        )
+        reads = [args["threadId"] for name, args in self.client.calls if name == "t3_thread_read"]
+        self.assertEqual(sorted(reads), ["mcp:launch:delegate", "mcp:launch:requested"])
 
     def test_reports_each_change_once(self) -> None:
         self.client.threads[KARLY_WSL] = [thread("t1", "running")]

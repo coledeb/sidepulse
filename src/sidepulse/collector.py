@@ -40,6 +40,7 @@ from .ipc import ensure_private_dir
 from .jsonl_log import DEFAULT_BACKUP_COUNT, backup_path
 from .providers import detect_log_path, parse_log_line
 from .settings import DEFAULT_COMPLETED_VISIBLE_SECONDS, AgentMonitorSettings, load_settings
+from .t3_delegates import T3DelegateLookup
 from .t3_status import LocalWaitingRow
 
 
@@ -153,6 +154,8 @@ class AgentMonitor:
         max_lines_per_source: int = 5000,
     ) -> None:
         self.sources = tuple(sources) if sources is not None else default_sources()
+        # T3 subagents on this Mac are the parent's work, not rows of their own.
+        self.t3_delegates = T3DelegateLookup()
         self.stale_after_seconds = stale_after_seconds
         self.tool_running_timeout_seconds = tool_running_timeout_seconds
         self.completed_visible_seconds = completed_visible_seconds
@@ -246,6 +249,9 @@ class AgentMonitor:
         for record in records:
             record = resolve_record_session(record, sessions_by_t3_thread)
             if record is None:
+                continue
+            if self.t3_delegates.is_delegate(record):
+                statuses_by_key.pop(record.status_key, None)
                 continue
             metadata = metadata_for_record(
                 record,
@@ -481,6 +487,8 @@ class LiveAgentMonitor:
         self.metadata_by_status: dict[str, StatusMetadata] = {}
         self.pending_permissions_by_key: dict[str, set[str]] = {}
         self.sessions_by_t3_thread: dict[str, str] = {}
+        # T3 subagents on this Mac are the parent's work, not rows of their own.
+        self.t3_delegates = T3DelegateLookup()
         # The local agent process each row's hooks ran under: (pid, start time).
         self.agent_process_by_status: dict[str, tuple[int, str]] = {}
         self.agent_process_checked_at: dict[str, float] = {}
@@ -496,6 +504,10 @@ class LiveAgentMonitor:
         with self.lock:
             record = resolve_record_session(record, self.sessions_by_t3_thread)
             if record is None:
+                return
+            if self.t3_delegates.is_delegate(record):
+                if self.statuses_by_key.pop(record.status_key, None) is not None:
+                    self.write_latest_state()
                 return
             metadata = metadata_for_record(
                 record,
