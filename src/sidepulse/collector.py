@@ -556,6 +556,7 @@ class LiveAgentMonitor:
                     provider=status.provider,
                     updated_at=status.updated_at,
                     t3_thread_id=threads_by_session.get(status.session_id or ""),
+                    waiting=is_local_t3_question_wait(status),
                 )
                 for status in self.statuses_by_key.values()
                 if is_local_t3_settle_candidate(status)

@@ -60,6 +60,9 @@ T3_CONNECT_TIMEOUT_SECONDS = 15 * 60.0
 
 T3_ACTIVE_POLL_SECONDS = 3.0
 T3_IDLE_POLL_SECONDS = 15.0
+# A Done row is checked for a settle at the active rate this long after it
+# finished, when it is most likely read; then at the idle rate.
+T3_SETTLE_DONE_FAST_SECONDS = 3 * 60.0
 T3_LINKS_REFRESH_SECONDS = 60.0
 # A thread in a project SidePulse hasn't seen refetches that machine's project
 # list, but no more often than this.
@@ -540,12 +543,14 @@ def t3_thread_record(
 
 @dataclass(frozen=True)
 class LocalWaitingRow:
-    """A hook row on this Mac, hosted by T3, that waits on a closing question."""
+    """A hook row on this Mac, hosted by T3, that settling its thread clears."""
 
     agent_id: str
     provider: str
     updated_at: datetime
     t3_thread_id: str | None = None
+    # False for a Done row, which polls fast only while it is recent.
+    waiting: bool = True
 
 
 def settled_run_matches(
@@ -894,13 +899,22 @@ class T3StatusPoller:
         )
 
     def check_local_settled(self) -> bool:
-        """Clear waiting hook rows whose T3 thread was settled; True while any wait."""
+        """Clear hook rows whose T3 thread was settled.
+
+        True, for the active poll rate, while a row waits on the user or a
+        Done row finished within ``T3_SETTLE_DONE_FAST_SECONDS``.
+        """
         if self.local_waiting is None or self.on_local_settled is None:
             return False
         rows = list(self.local_waiting())
         if not rows:
             self.settle_misses.clear()
             return False
+        now = self.wall_clock()
+        waiting = any(
+            row.waiting or (now - row.updated_at).total_seconds() < T3_SETTLE_DONE_FAST_SECONDS
+            for row in rows
+        )
         try:
             page = self.client.call_tool(
                 "t3_thread_list",
@@ -915,7 +929,7 @@ class T3StatusPoller:
             raise
         except T3Error as exc:
             self.last_error = f"this Mac: {exc}"
-            return True
+            return waiting
         settled = {
             thread["threadId"]: thread
             for thread in page.get("threads") or ()
@@ -954,7 +968,7 @@ class T3StatusPoller:
                 self.on_local_settled(row, matches[0])
         if len(self.settle_misses) > 1000:
             self.settle_misses.clear()
-        return True
+        return waiting
 
     def _thread_detail(self, thread_id: str) -> dict[str, Any] | None:
         try:

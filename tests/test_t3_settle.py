@@ -258,6 +258,19 @@ class SettleTests(unittest.TestCase):
         self.assertEqual(status.event_name, T3_SETTLED_EVENT_NAME)
         self.assertEqual(self.monitor.t3_settle_candidates(), [])
 
+    def test_done_rows_poll_fast_for_three_minutes_then_slow(self) -> None:
+        done_turn(self.monitor, "opencode", "ses_done", thread_id=OPENCODE_THREAD)
+        self.poller.wall_clock = lambda: STOP + timedelta(minutes=2)
+        self.poller.poll_once()
+        self.assertTrue(self.poller.any_active)
+        self.poller.wall_clock = lambda: STOP + timedelta(minutes=4)
+        self.poller.poll_once()
+        self.assertFalse(self.poller.any_active)
+        # A closing question keeps the fast rate however old it is.
+        question_turn(self.monitor, "opencode", "ses_wait", thread_id=CODEX_THREAD)
+        self.poller.poll_once()
+        self.assertTrue(self.poller.any_active)
+
     def test_done_rows_elsewhere_are_not_checked(self) -> None:
         done_turn(self.monitor, "claude", "remote-1", origin="Claude in T3 Code · KARLY-WSL")
         done_turn(self.monitor, "codex", "cli-1", origin="Codex CLI")
