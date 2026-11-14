@@ -50,6 +50,8 @@ try:
         NSOffState,
         NSOnState,
         NSOpenPanel,
+        NSMutableParagraphStyle,
+        NSParagraphStyleAttributeName,
         NSPopUpButton,
         NSPasteboard,
         NSPasteboardTypeString,
@@ -60,7 +62,9 @@ try:
         NSStatusBar,
         NSTabView,
         NSTabViewItem,
+        NSTextAlignmentRight,
         NSTextField,
+        NSTextTab,
         NSTextView,
         NSView,
         NSViewHeightSizable,
@@ -169,7 +173,7 @@ from .sd_eject_guard_launch import (
     sd_eject_guard_installed,
     uninstall_sd_eject_guard,
 )
-from .origin import T3CODE_BUNDLE_ID, is_t3code_origin
+from .origin import RELAY_ORIGIN_SEPARATOR, T3CODE_BUNDLE_ID, is_relayed_origin, is_t3code_origin
 from .t3_status import (
     STATE_DISCONNECTED as T3_STATE_DISCONNECTED,
     STATE_NEEDS_RECONNECT as T3_STATE_NEEDS_RECONNECT,
@@ -3256,12 +3260,17 @@ def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> 
         menu.addItem_(disabled_menu_item("No recent sessions"))
     else:
         collision_keys = session_title_collision_keys(statuses)
-        for status in statuses:
+        disambiguate = [session_title_collision_key(status) in collision_keys for status in statuses]
+        tag_tab = session_tag_tab_location(
+            [session_row_parts(status, disambiguate=flag) for status, flag in zip(statuses, disambiguate)]
+        )
+        for status, flag in zip(statuses, disambiguate):
             session_item = build_session_menu_item(
                 status,
                 snapshot.collected_at,
                 target,
-                disambiguate_title=session_title_collision_key(status) in collision_keys,
+                disambiguate_title=flag,
+                tag_tab=tag_tab,
             )
             menu.addItem_(session_item)
 
@@ -5828,12 +5837,23 @@ def build_session_menu_item(
     *,
     width: float | None = None,
     disambiguate_title: bool = False,
+    tag_tab: float | None = None,
 ) -> NSMenuItem:
     item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
         native_session_menu_title(status, disambiguate=disambiguate_title),
         "openSessionPrimary:",
         "",
     )
+    title, tags = session_row_parts(status, disambiguate=disambiguate_title)
+    if tags and tag_tab is not None:
+        # The bracketed tags end at one shared right-aligned tab stop, so they
+        # line up down the right edge of the menu.
+        style = NSMutableParagraphStyle.alloc().init()
+        style.setTabStops_([NSTextTab.alloc().initWithTextAlignment_location_options_(NSTextAlignmentRight, tag_tab, {})])
+        item.setAttributedTitle_(NSMutableAttributedString.alloc().initWithString_attributes_(
+            f"{title}\t{tags}",
+            {NSFontAttributeName: NSFont.menuFontOfSize_(0), NSParagraphStyleAttributeName: style},
+        ))
     item.setTarget_(target)
     item.setRepresentedObject_(status)
     image = session_row_icon_for_status(status)
@@ -5842,7 +5862,34 @@ def build_session_menu_item(
     return item
 
 
-def native_session_menu_title(status: AgentStatus, *, disambiguate: bool = False) -> str:
+SESSION_TAG_GAP = 16.0
+
+
+def session_tag_tab_location(rows: list[tuple[str, str]]) -> float | None:
+    """Where the rows' right-aligned tags end: just past the widest title-plus-tags row."""
+    tagged = [(title, tags) for title, tags in rows if tags]
+    if not tagged:
+        return None
+    attributes = {NSFontAttributeName: NSFont.menuFontOfSize_(0)}
+
+    def width(text: str) -> float:
+        return NSString.stringWithString_(text).sizeWithAttributes_(attributes).width
+
+    # Untagged rows' titles may run under the tag column, as long as no
+    # tagged row's title meets its own tags.
+    widest = max(width(title) + SESSION_TAG_GAP + width(tags) for title, tags in tagged)
+    return max([widest] + [width(title) for title, tags in rows if not tags])
+
+
+def session_environment(status: AgentStatus) -> str | None:
+    """The other computer a session runs on, or None for one on this Mac."""
+    if not is_relayed_origin(status.origin):
+        return None
+    return str(status.origin).split(RELAY_ORIGIN_SEPARATOR, 1)[1].strip() or None
+
+
+def session_row_parts(status: AgentStatus, *, disambiguate: bool = False) -> tuple[str, str]:
+    """A row's title and its bracketed tags: the other computer, then the project."""
     title, project = session_title_parts(status)
     cwd_project = status_project(status)
     if (
@@ -5854,10 +5901,15 @@ def native_session_menu_title(status: AgentStatus, *, disambiguate: bool = False
         title = f"[{title}]"
     if disambiguate and status.session_id:
         title = f"{title} ({status.session_id[:8]})"
-    parts = [title]
-    if project:
-        parts.append(f"[{project}]")
-    return "  ".join(parts)
+    environment = session_environment(status)
+    tag = " ".join(part for part in (environment and f"({environment})", project) if part)
+    tags = f"[{tag}]" if tag else ""
+    return title, tags
+
+
+def native_session_menu_title(status: AgentStatus, *, disambiguate: bool = False) -> str:
+    title, tags = session_row_parts(status, disambiguate=disambiguate)
+    return f"{title}  {tags}" if tags else title
 
 
 def build_session_options_menu(

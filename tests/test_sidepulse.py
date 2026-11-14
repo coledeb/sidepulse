@@ -1991,6 +1991,54 @@ class AgentMonitorTests(unittest.TestCase):
             ],
         )
 
+    def test_status_bar_tags_remote_machine_and_right_aligns_tags(self) -> None:
+        try:
+            from sidepulse import status_bar
+        except SystemExit as exc:
+            self.skipTest(str(exc))
+        now = datetime(2026, 11, 14, 12, 0, tzinfo=timezone.utc)
+        remote = AgentStatus(
+            provider="claude",
+            agent_id="claude:t3:remote",
+            display_name="Reconcile T3 Agent Thread Visibility",
+            mode=AgentMode.COMPLETED,
+            updated_at=now,
+            event_name="T3Thread",
+            session_id="remote-thread",
+            cwd="/Users/someone/General Stuff",
+            origin="Claude in T3 Code · Cole's Mac Mini",
+        )
+        local = replace(
+            remote,
+            agent_id="claude:session:local",
+            display_name="Fix the flaky test",
+            session_id="local-session",
+            cwd="/Users/someone/Sidepulse",
+            origin="Claude in T3 Code",
+        )
+        self.assertEqual(
+            status_bar.native_session_menu_title(remote),
+            "Reconcile T3 Agent Thread Visibility  [(Cole's Mac Mini) General Stuff]",
+        )
+        self.assertEqual(status_bar.native_session_menu_title(local), "Fix the flaky test  [Sidepulse]")
+
+        target = SimpleNamespace(settings=AgentMonitorSettings())
+        rows = [status_bar.session_row_parts(status) for status in (remote, local)]
+        tab = status_bar.session_tag_tab_location(rows)
+        items = [status_bar.build_session_menu_item(s, now, target, tag_tab=tab) for s in (remote, local)]
+        self.assertEqual(
+            [item.title() for item in items],
+            [
+                "Reconcile T3 Agent Thread Visibility\t[(Cole's Mac Mini) General Stuff]",
+                "Fix the flaky test\t[Sidepulse]",
+            ],
+        )
+        for item in items:
+            stops = item.attributedTitle().attribute_atIndex_effectiveRange_(
+                status_bar.NSParagraphStyleAttributeName, 0, None
+            )[0].tabStops()
+            self.assertEqual([(stop.alignment(), stop.location()) for stop in stops], [(status_bar.NSTextAlignmentRight, tab)])
+
     def test_status_bar_disambiguates_same_visible_session_titles(self) -> None:
         try:
             from sidepulse import status_bar
@@ -2040,8 +2088,8 @@ class AgentMonitorTests(unittest.TestCase):
             if menu.itemAtIndex_(index).title()
         ]
 
-        self.assertIn("What is here (019ffd37)  [msdosfs]", titles)
-        self.assertIn("What is here (019ffd2e)  [msdosfs]", titles)
+        self.assertIn("What is here (019ffd37)\t[msdosfs]", titles)
+        self.assertIn("What is here (019ffd2e)\t[msdosfs]", titles)
 
     def test_status_bar_recent_statuses_coalesce_subagents_by_session(self) -> None:
         try:
