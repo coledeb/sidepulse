@@ -207,7 +207,7 @@ class MenuBarVisibilityTests(StatusBarTestCase):
         self.addCleanup(controller.stop_status_icon_animation)
         controller.status_item = Mock()
         button = controller.status_item.button.return_value
-        for state in (sb.STATE_IDLE, sb.STATE_WORKING, sb.STATE_DONE, sb.STATE_ASK):
+        for state in (sb.STATE_IDLE, sb.STATE_WORKING, sb.STATE_DONE, sb.STATE_ASK, sb.STATE_ERROR):
             controller.set_status(state)
             button.setTitle_.assert_called_with("")
             self.assertIsNotNone(button.setImage_.call_args.args[0])
@@ -1279,7 +1279,7 @@ class StatusIconAnimationTests(StatusBarTestCase):
         self.addCleanup(context.stop)
 
     def test_working_and_ask_frames_change_but_keep_template_and_size(self):
-        for state in (sb.STATE_WORKING, sb.STATE_ASK):
+        for state in (sb.STATE_WORKING, sb.STATE_ASK, sb.STATE_ERROR):
             first = sb.animated_status_icon(state, 0)
             later = sb.animated_status_icon(state, 12)
             self.assertNotEqual(bytes(first.TIFFRepresentation()), bytes(later.TIFFRepresentation()))
@@ -1403,6 +1403,16 @@ class NativeStatusIconRendererTests(StatusBarTestCase):
             self.assertAlmostEqual(min(animation.values()), minimum)
             self.assertAlmostEqual(max(animation.values()), 1.0)
             self.assertEqual(animation.values()[0], animation.values()[-1])
+
+    def test_fade_changes_only_opacity(self):
+        self.renderer.update(sb.animated_status_icon(sb.STATE_ERROR, 0), "fade")
+        layer = self.renderer.view.glyph_layer
+        animation = layer.animationForKey_("opacity")
+        self.assertAlmostEqual(animation.duration(), 1.6)
+        self.assertAlmostEqual(min(animation.values()), sb.FADE_MIN_OPACITY)
+        self.assertAlmostEqual(max(animation.values()), 1.0)
+        self.assertEqual(animation.values()[0], animation.values()[-1])
+        self.assertIsNone(layer.animationForKey_("transform.scale"))
 
     def test_layer_bitmap_preserves_the_original_mask_with_template_tint(self):
         from AppKit import NSColorSpace
@@ -1551,7 +1561,7 @@ class IconTests(StatusBarTestCase):
         self.assertIsNone(sb.provider_app_icon("definitely-not-an-installed-app"))
 
     def test_state_symbols_render(self):
-        for state in (sb.STATE_IDLE, sb.STATE_WORKING, sb.STATE_DONE, sb.STATE_ASK):
+        for state in (sb.STATE_IDLE, sb.STATE_WORKING, sb.STATE_DONE, sb.STATE_ASK, sb.STATE_ERROR):
             with self.subTest(state=state.label):
                 self.assertIsInstance(
                     sb.image_for_symbol(state.symbol, state.label), NSImage
@@ -1560,6 +1570,33 @@ class IconTests(StatusBarTestCase):
 
 class PureUiLogicTests(unittest.TestCase):
     """Label and formatting helpers -- no AppKit objects, fast and exhaustive."""
+
+    def test_failed_tool_shows_working_and_turn_ending_error_shows_error(self):
+        from dataclasses import replace
+
+        failed = replace(make_status(mode=AgentMode.BLOCKED_ERROR), event_name="PostToolUseFailure")
+        denied = replace(failed, event_name="PermissionDenied")
+        ended = replace(failed, event_name="StopFailure")
+        self.assertIs(sb.state_for_status(failed), sb.STATE_WORKING)
+        self.assertIs(sb.state_for_status(denied), sb.STATE_WORKING)
+        self.assertIs(sb.state_for_status(ended), sb.STATE_ERROR)
+        self.assertIs(sb.state_for_mode(AgentMode.BLOCKED_ERROR), sb.STATE_ERROR)
+        self.assertIs(sb.state_for_mode(AgentMode.WAITING_FOR_INPUT), sb.STATE_ASK)
+        self.assertIs(sb.state_for_snapshot(make_snapshot([failed])), sb.STATE_WORKING)
+        self.assertIs(sb.state_for_snapshot(make_snapshot([ended])), sb.STATE_ERROR)
+
+    def test_failed_tool_does_not_hide_another_sessions_question(self):
+        from dataclasses import replace
+
+        failed = replace(make_status(mode=AgentMode.BLOCKED_ERROR), event_name="PostToolUseFailure")
+        asking = replace(make_status(agent_id="agent-2", mode=AgentMode.WAITING_FOR_INPUT), event_name="Stop")
+        self.assertIs(sb.state_for_snapshot(make_snapshot([failed, asking])), sb.STATE_ASK)
+
+    def test_each_animated_state_has_its_own_motion(self):
+        self.assertEqual(sb.status_icon_motion(sb.STATE_WORKING), "spin")
+        self.assertEqual(sb.status_icon_motion(sb.STATE_ASK), "pulse")
+        self.assertEqual(sb.status_icon_motion(sb.STATE_ERROR), "fade")
+
 
     def test_format_byte_count_is_monotonic_and_labelled(self):
         for size in (0, 1, 1023, 1024, 1024**2, 1024**3, 1024**4):

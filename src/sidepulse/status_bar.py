@@ -95,7 +95,7 @@ from .battery import (
     format_watts,
     program_for_battery,
 )
-from .status_icon import GLYPH_CANVAS, NativeStatusIconRenderer, centered_glyph_rect
+from .status_icon import FADE_MIN_OPACITY, GLYPH_CANVAS, NativeStatusIconRenderer, centered_glyph_rect
 from .audit import (
     default_status_audit_log_path,
     default_status_history_log_path,
@@ -103,7 +103,7 @@ from .audit import (
     export_status_audit_html,
     read_status_history_records,
 )
-from .collector import status_project
+from .collector import MonitorSnapshot, status_project
 from .device_writer import (
     DEFAULT_FILE_NAME,
     MOUNT_ROOT,
@@ -397,6 +397,7 @@ STATE_IDLE = StatusBarState("Idle", "circle", 4)
 STATE_WORKING = StatusBarState("Working", "arrow.triangle.2.circlepath", 2)
 STATE_DONE = StatusBarState("Done", "checkmark.circle", 3)
 STATE_ASK = StatusBarState("Ask", "questionmark.circle", 1)
+STATE_ERROR = StatusBarState("Error", "exclamationmark.triangle", 1)
 STATUS_ICON_FRAME_SECONDS = 1.0 / 30.0
 STATUS_ICON_FRAME_COUNT = 48
 STATUS_BAR_DEVICE_PRIORITY = ("sidepulsepro", "sidepulsedot", "pulsedot")
@@ -494,8 +495,10 @@ TERMINAL_APP_SPECS = (
 
 
 def state_for_mode(mode: AgentMode) -> StatusBarState:
-    if mode in {AgentMode.WAITING_FOR_INPUT, AgentMode.BLOCKED_ERROR}:
+    if mode == AgentMode.WAITING_FOR_INPUT:
         return STATE_ASK
+    if mode == AgentMode.BLOCKED_ERROR:
+        return STATE_ERROR
     if mode in {
         AgentMode.WORKING,
         AgentMode.TOOL_RUNNING,
@@ -505,6 +508,32 @@ def state_for_mode(mode: AgentMode) -> StatusBarState:
     if mode == AgentMode.COMPLETED:
         return STATE_DONE
     return STATE_IDLE
+
+
+def state_for_status(status: AgentStatus) -> StatusBarState:
+    """A row's state. A failed tool call shows as Working: the agent carries on."""
+    if status.mid_turn_error:
+        return STATE_WORKING
+    return state_for_mode(status.mode)
+
+
+def state_for_snapshot(snapshot: MonitorSnapshot) -> StatusBarState:
+    """The menu-bar state. The LEDs follow the aggregate mode, so a failed tool
+    call still plays the error there; here it reads as Working, unless another
+    session needs attention."""
+    representative = snapshot.aggregate.representative
+    if representative is None:
+        return state_for_mode(snapshot.aggregate.mode)
+    state = state_for_status(representative)
+    if representative.mid_turn_error:
+        attention = [
+            row_state
+            for row_state in map(state_for_status, snapshot.statuses)
+            if row_state in (STATE_ASK, STATE_ERROR)
+        ]
+        if attention:
+            return attention[0]
+    return state
 
 
 def format_percent_value(value: float | int) -> str:
@@ -641,7 +670,7 @@ class StatusBarController(NSObject):
             snapshot = self.monitor.snapshot(include_stale=False)
         except Exception as exc:
             log_status_bar(f"refresh error: {exc}")
-            self.set_status(STATE_ASK)
+            self.set_status(STATE_ERROR)
             battery_snapshot = self.read_battery_snapshot()
             self.sync_leds(AgentMode.BLOCKED_ERROR, battery_snapshot, LED_DISPLAY_AGENT)
             self.status_item.setMenu_(build_error_menu(exc, self))
@@ -657,7 +686,7 @@ class StatusBarController(NSObject):
         self.daemon_unavailable_since = time.monotonic()
         self.last_snapshot = snapshot
         battery_snapshot = self.read_battery_snapshot()
-        state = state_for_mode(snapshot.aggregate.mode)
+        state = state_for_snapshot(snapshot)
         self.observe_connected_devices()
         self.check_firmware()
         self.sync_leds(
@@ -1386,7 +1415,7 @@ class StatusBarController(NSObject):
     def update_status_icon_animation(self) -> None:
         visible = self.status_item is not None and self.status_item.isVisible()
         motion = not NSWorkspace.sharedWorkspace().accessibilityDisplayShouldReduceMotion()
-        animated_header = motion and visible and self.current_state in (STATE_WORKING, STATE_ASK)
+        animated_header = motion and visible and self.current_state in (STATE_WORKING, STATE_ASK, STATE_ERROR)
         frame = int(time.monotonic() / STATUS_ICON_FRAME_SECONDS) % STATUS_ICON_FRAME_COUNT
         renderer = getattr(self, "status_icon_renderer", None)
         native_failed = getattr(self, "status_icon_native_failed", False)
@@ -1402,7 +1431,7 @@ class StatusBarController(NSObject):
                 renderer.update(
                     animated_status_icon(state, 0) if animated_header
                     else image_for_symbol(state.symbol, state.label),
-                    ("spin" if state == STATE_WORKING else "pulse") if animated_header else None,
+                    status_icon_motion(state) if animated_header else None,
                 )
             except Exception as exc:
                 # Keep the existing image-based path if native rendering is unavailable.
@@ -6016,7 +6045,7 @@ def session_row_icon_for_status(status: AgentStatus, *, dark_mode: bool | None =
 
 
 def status_icon_for_status(status: AgentStatus):
-    return static_status_icon(state_for_mode(status.mode))
+    return static_status_icon(state_for_status(status))
 
 
 # Static menu rows stand the Working arrows nearly upright, on a slight slant.
@@ -6036,7 +6065,18 @@ def animated_status_icon(state: StatusBarState, frame: int):
     pulse = (1.0 + math.cos(2.0 * math.pi * phase)) / 2.0
     if state == STATE_WORKING:
         return status_glyph_image(state, -360.0 * phase, 1.0, 1.0)
+    if state == STATE_ERROR:
+        return status_glyph_image(state, 0.0, 1.0, FADE_MIN_OPACITY + (1.0 - FADE_MIN_OPACITY) * pulse)
     return status_glyph_image(state, 0.0, 0.82 + 0.18 * pulse, 0.45 + 0.55 * pulse)
+
+
+def status_icon_motion(state: StatusBarState) -> str:
+    """Working spins, Error fades in and out, Ask pulses."""
+    if state == STATE_WORKING:
+        return "spin"
+    if state == STATE_ERROR:
+        return "fade"
+    return "pulse"
 
 
 def status_glyph_image(state: StatusBarState, degrees: float, scale: float, opacity: float):
@@ -6522,7 +6562,7 @@ def menu_status_sort_key(status: AgentStatus) -> tuple[int, int, float]:
 
 
 def menu_title_for_status(status: AgentStatus, now: datetime) -> str:
-    state = state_for_mode(status.mode)
+    state = state_for_status(status)
     title, project = session_title_parts(status)
     origin = menu_origin_label(status)
     if origin:
@@ -6535,7 +6575,7 @@ def menu_title_for_status(status: AgentStatus, now: datetime) -> str:
 
 
 def session_detail_for_status(status: AgentStatus, now: datetime) -> str:
-    state = state_for_mode(status.mode)
+    state = state_for_status(status)
     age = format_age(status.age_seconds(now))
     details = [state.label, age]
     if status.origin:

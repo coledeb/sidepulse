@@ -30,6 +30,8 @@ from Quartz import (
 
 
 GLYPH_CANVAS = 18.0
+# Lowest opacity of the Error icon's fade.
+FADE_MIN_OPACITY = 0.15
 
 
 def centered_glyph_rect(image, canvas: float = GLYPH_CANVAS):
@@ -175,6 +177,14 @@ class NativeStatusIconRenderer:
                 animation.setKeyTimes_([n / 48 for n in range(49)])
                 animation.setCalculationMode_(kCAAnimationLinear)
                 self._add_animation(layer, animation, path)
+        elif motion == "fade":
+            # Opacity only, deeper than the pulse, so an error reads apart from Ask.
+            fade = [(1 + math.cos(2 * math.pi * n / 48)) / 2 for n in range(49)]
+            animation = CAKeyframeAnimation.animationWithKeyPath_("opacity")
+            animation.setValues_([FADE_MIN_OPACITY + (1 - FADE_MIN_OPACITY) * value for value in fade])
+            animation.setKeyTimes_([n / 48 for n in range(49)])
+            animation.setCalculationMode_(kCAAnimationLinear)
+            self._add_animation(layer, animation, "opacity")
         self.button.setNeedsDisplay_(True)
 
     def _add_animation(self, layer, animation, key: str) -> None:

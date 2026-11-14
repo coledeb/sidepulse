@@ -29,6 +29,12 @@ MODE_PRIORITY: dict[AgentMode, int] = {
 }
 
 
+# Errors the agent handles within its turn. The LEDs still play the error, but
+# the menu bar shows the agent as working; a turn-ending error (StopFailure)
+# shows as an error.
+MID_TURN_ERROR_EVENTS = frozenset({"PostToolUseFailure", "PermissionDenied", "PostToolUse"})
+
+
 MODE_LABELS: dict[AgentMode, str] = {
     AgentMode.IDLE_READY: "Idle / Ready",
     AgentMode.WORKING: "Working",
@@ -91,6 +97,11 @@ class AgentStatus:
     @property
     def mode_label(self) -> str:
         return MODE_LABELS.get(self.mode, self.mode.value)
+
+    @property
+    def mid_turn_error(self) -> bool:
+        """A failed or denied tool call: the agent sees it and carries on."""
+        return self.mode == AgentMode.BLOCKED_ERROR and self.event_name in MID_TURN_ERROR_EVENTS
 
     def age_seconds(self, now: datetime | None = None) -> float:
         current = now or datetime.now(timezone.utc)

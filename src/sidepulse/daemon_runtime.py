@@ -30,8 +30,9 @@ def log_runtime(message):
     print(f"sidepulse service: {message}", file=sys.stderr)
 
 
-def display_status_for_mode(mode):
-    if mode in {AgentMode.WAITING_FOR_INPUT, AgentMode.BLOCKED_ERROR}: return 'Ask'
+def display_status_for_mode(mode, mid_turn_error=False):
+    if mode == AgentMode.WAITING_FOR_INPUT: return 'Ask'
+    if mode == AgentMode.BLOCKED_ERROR: return 'Working' if mid_turn_error else 'Error'
     if mode in {AgentMode.WORKING, AgentMode.TOOL_RUNNING, AgentMode.LONG_TASK_PROGRESS}: return 'Working'
     if mode == AgentMode.COMPLETED: return 'Done'
     return 'Idle'
@@ -244,8 +245,12 @@ class DaemonRuntime:
                 if self.last_mac_sleep_error else MAC_SLEEP_POLL_SECONDS)
         if now >= self.next_history_sample:
             self.next_history_sample = now + HISTORY_SAMPLE_SECONDS
-            mode = self.last_snapshot.aggregate.mode
-            self.record_status_history(mode, battery, self.last_mac_sleep_snapshot)
+            aggregate = self.last_snapshot.aggregate
+            representative = aggregate.representative
+            self.record_status_history(
+                aggregate.mode, battery, self.last_mac_sleep_snapshot,
+                mid_turn_error=bool(representative and representative.mid_turn_error),
+            )
         self.view = self.snapshot()
 
     def read_pro_keepalive(self):
@@ -347,11 +352,13 @@ class DaemonRuntime:
         mode: AgentMode,
         battery_snapshot: BatterySnapshot | None,
         mac_sleep_snapshot: MacSleepSnapshot | None,
+        *,
+        mid_turn_error: bool = False,
     ) -> None:
         try:
             record = status_history_record(
                 agent_mode=mode.value,
-                display_status=display_status_for_mode(mode),
+                display_status=display_status_for_mode(mode, mid_turn_error),
                 battery=battery_snapshot,
                 mac_sleep=mac_sleep_snapshot,
                 lid_closed=self.last_lid_closed,
