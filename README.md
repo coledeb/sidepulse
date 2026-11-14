@@ -46,7 +46,7 @@ Firmware downloads and release notes are available in
 > - **Custom animation edits are saved.** Editing a custom animation in the menu bar keeps the new program.
 > - **Upstream update proposals.** A scheduled workflow syncs upstream SidePulse into the `upstream` branch twice a day and opens a pull request for manual review and merging.
 >
-> Several of these changes are ports of open upstream pull requests (Blocked state, Done duration, native menu bar animation, status and eject-guard fixes) and of liadicicco's and Lawrence Chang's SidePulse forks (relay privacy, private logs, compaction, clean quit and permission fixes), credited in each commit.
+> Several of these changes are ports of open upstream pull requests (Blocked state, Done duration, native menu bar animation, status and eject-guard fixes) and of liadicicco's [arkdev1/sidepulse](https://github.com/arkdev1/sidepulse) and Lawrence Chang's [xlwc/sidepulse](https://github.com/xlwc/sidepulse) forks (relay privacy, private logs, compaction, clean quit and permission fixes), credited in each commit.
 >
 > For full details of each change, see the [commits list](https://github.com/coledeb/sidepulse/commits/main).
 
