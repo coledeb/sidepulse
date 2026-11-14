@@ -21,6 +21,35 @@ The LED control DSL is described in [`LEDS_FORMAT.md`](LEDS_FORMAT.md).
 Firmware downloads and release notes are available in
 [`firmware/README.md`](firmware/README.md).
 
+> [!NOTE]
+> **About this fork (agent monitoring and T3 Code)**
+>
+> This fork of [SidePulse](https://github.com/inteliwear/sidepulse) widens agent monitoring for my personal setup, where most agents run inside [T3 Code](https://github.com/pingdotgg/t3code), alongside LED, menu bar and power refinements.
+>
+> - **T3 Code awareness.** Claude, Codex, Cursor, OpenCode and Antigravity sessions hosted by T3 Code show T3 as their host, with the agent icon beside it. `sidepulse t3 connect` (or **Connect T3 Code...** in the menu) signs in read-only, so threads running on T3's linked environments (other machines) are followed too. Settling a thread clears its question wait, and thread-title helper sessions are hidden.
+> - **OpenCode support (OpenCode 2).** `sidepulse setup opencode` installs a plugin that follows the OpenCode server's event stream, including permission and question prompts; one-shot `opencode run` sessions no longer stay stuck on Working.
+> - **Antigravity support.** `sidepulse setup antigravity` adds an observe-only hook for the `agy` CLI, the IDE and the app, including T3 Code's private Antigravity homes.
+> - **Clearer menu rows.** Rows show the provider's own logo (Claude, Codex, Cursor, Antigravity, Grok, OpenCode) and the project name in brackets, using T3's project name for T3 threads ("No project" for threads started outside one). Titles survive a daemon restart, Codex guardian reviews fold into their thread, and probe sessions that never ran a prompt are dropped.
+> - **A distinct Blocked state.** Failed runs show the Blocked Blink animation instead of looking like a question, and questions are recognized however the agent phrases them.
+> - **Music visualizer.** `sidepulse visualize` (or **Music Visualizer** in the menu) turns system, per-app or microphone audio into a frequency display, streamed over READ2ME so nothing is written to the device's flash. See [Music Visualizer](#music-visualizer).
+> - **Charging fill animation.** While charging, the battery LEDs fill from the current level to the end; the plug/unplug preview length is editable.
+> - **Lid close follows keep-awake.** Closing the lid with agents idle ends the keep-awake grace so the Mac sleeps and the lid-close animation plays; when agents keep the Mac awake, the charging fill plays instead and the LEDs aren't left dark.
+> - **More settings.** How long Done stays on screen, and the idle pulse speed (4-30 seconds).
+> - **Lower CPU.** The menu bar icon animates with Core Animation, and menu-row status icons stay static.
+>
+> **Other improvements**
+>
+> - **Relay sends status only.** A linked VM forwards the agent state, provider and session id, never prompts, tool output, paths or its hostname. The relay is off until `sidepulse relay receive`, and can be rotated or removed (`sidepulse relay rotate`, `sidepulse relay off`).
+> - **Private local data.** Hook event sockets are owner-only, and hook logs are private and size-bounded.
+> - **Status fixes.** Context compaction leaves the status alone, a failed gated tool call clears its permission prompt, a stopping subagent clears pending approvals, and dead agent sessions stop counting as working.
+> - **Clean quit.** Ctrl-C and SIGTERM quit the status bar app and turn the LEDs off.
+> - **Custom animation edits are saved.** Editing a custom animation in the menu bar keeps the new program.
+> - **Upstream update proposals.** A scheduled workflow syncs upstream SidePulse into the `upstream` branch twice a day and opens a pull request for manual review and merging.
+>
+> Several of these changes are ports of open upstream pull requests (Blocked state, Done duration, native menu bar animation, status and eject-guard fixes) and of liadicicco's and Lawrence Chang's SidePulse forks (relay privacy, private logs, compaction, clean quit and permission fixes), credited in each commit.
+>
+> For full details of each change, see the [commits list](https://github.com/coledeb/sidepulse/commits/main).
+
 ## Installation
 
 Choose the level that fits how you want to use SidePulse.
