@@ -310,14 +310,22 @@ class OpenCodePluginTests(unittest.TestCase):
             harness = root / "harness.mjs"
             harness.write_text(HARNESS)
 
+            flush_tmp = root / "tmp"
+            flush_tmp.mkdir()
             completed = subprocess.run(
                 ["node", str(harness), plugin.as_uri(), json.dumps(events), json.dumps(sessions or {})],
                 capture_output=True,
                 text=True,
                 timeout=30,
+                env={**os.environ, "TMPDIR": str(flush_tmp)},
             )
 
             self.assertEqual(completed.returncode, 0, completed.stderr)
+            # Runs still open at exit end as Interrupt, delivered by a detached
+            # shell that removes its spool directory once done.
+            deadline = time.monotonic() + 10
+            while any(flush_tmp.glob("sidepulse-opencode-*")) and time.monotonic() < deadline:
+                time.sleep(0.05)
             rows = (
                 [json.loads(line) for line in out.read_text().splitlines() if line]
                 if out.exists()
@@ -429,6 +437,9 @@ class OpenCodePluginTests(unittest.TestCase):
                 ("ses_b", "UserPromptSubmit", thread_b),
                 ("ses_c", "UserPromptSubmit", thread_b),
                 ("ses_cli", "UserPromptSubmit", None),
+                ("ses_b", "Interrupt", thread_b),
+                ("ses_c", "Interrupt", thread_b),
+                ("ses_cli", "Interrupt", None),
             ],
         )
 

@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import subprocess
 from unittest.mock import patch
 
 from sidepulse.collector import AGENT_PROCESS_CHECK_SECONDS, LiveAgentMonitor, SourceSpec
@@ -17,6 +18,7 @@ from sidepulse.origin import (
     PROCESS_UNKNOWN,
     ProcessInfo,
     annotate_payload_with_origin,
+    process_state,
 )
 from sidepulse.providers import parse_log_line
 
@@ -136,6 +138,23 @@ class HookRecordsAgentProcessTests(unittest.TestCase):
         self.assertNotIn(AGENT_PID_KEY, self.annotate("cursor"))
         relayed = self.annotate("opencode", {"hook_event_name": "Stop", "agent_origin": "OpenCode · KARLY"})
         self.assertNotIn(AGENT_PID_KEY, relayed)
+
+
+class ProcessStateTests(unittest.TestCase):
+    def state(self, kill_error: BaseException | None, lstart: str) -> str:
+        completed = subprocess.CompletedProcess([], 0, stdout=lstart + "\n")
+        with patch("sidepulse.origin.os.kill", side_effect=kill_error), patch(
+            "sidepulse.origin.subprocess.run", return_value=completed
+        ):
+            return process_state(4242, STARTED)
+
+    def test_another_users_process_is_judged_by_its_start_time(self) -> None:
+        # Hooks replayed or run under sudo record a root-owned ancestor.
+        self.assertEqual(self.state(PermissionError(), STARTED), PROCESS_ALIVE)
+        self.assertEqual(self.state(PermissionError(), "Sat Nov 14 01:00:00 2026"), PROCESS_GONE)
+
+    def test_a_missing_pid_is_gone(self) -> None:
+        self.assertEqual(self.state(ProcessLookupError(), STARTED), PROCESS_GONE)
 
 
 if __name__ == "__main__":

@@ -309,8 +309,9 @@ def process_state(pid: int, started: str) -> str:
     except ProcessLookupError:
         return PROCESS_GONE
     except PermissionError:
-        # Another user's process now holds the pid; the agent ran as this user.
-        return PROCESS_GONE
+        # Owned by another user, such as a sudo the agent runs under: lstart
+        # below still tells it from a reused pid.
+        pass
     except OSError:
         return PROCESS_UNKNOWN
     try:
