@@ -563,12 +563,22 @@ class LiveAgentMonitor:
             self.write_latest_state()
             return True
 
-    def snapshot(self, include_stale: bool = False, *, with_extra: bool = True) -> MonitorSnapshot:
+    def snapshot(
+        self,
+        include_stale: bool = False,
+        *,
+        with_extra: bool = True,
+        only: Callable[[AgentStatus], bool] | None = None,
+    ) -> MonitorSnapshot:
+        """Current rows; ``only`` keeps just the rows it accepts, before Done
+        rows are hidden behind active ones, so a subset gets its own snapshot."""
         now = datetime.now(timezone.utc)
         self.reconcile_claude_session_idle(now)
         self.reconcile_exited_agent_processes(now)
         with self.lock:
             statuses = tuple(self.statuses_by_key.values())
+        if only is not None:
+            statuses = tuple(status for status in statuses if only(status))
         snapshot = snapshot_from_statuses(
             statuses,
             sources=self.sources,
@@ -582,7 +592,10 @@ class LiveAgentMonitor:
         )
         if not with_extra:
             return snapshot
-        return merge_program_statuses(snapshot, tuple(self.extra_statuses()))
+        extra = tuple(self.extra_statuses())
+        if only is not None:
+            extra = tuple(status for status in extra if only(status))
+        return merge_program_statuses(snapshot, extra)
 
     def reconcile_exited_agent_processes(self, now: datetime) -> None:
         """Idle the active rows whose agent process has exited.

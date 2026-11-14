@@ -197,3 +197,40 @@ def test_daemon_rewrites_leds_once_a_killed_visualizer_lease_is_gone():
         holder.clear()  # it is killed without restoring the agent program
         service.sync_outputs()
     assert len(writes) == 2 and writes[0] == writes[1]
+
+
+def remote_t3_working(daemon):
+    from sidepulse.t3_status import t3_thread_record
+    record = t3_thread_record({'threadId': 'remote-thread', 'providerInstanceId': 'codex', 'status': 'running'},
+                              environment_id='env-remote', environment_label='Mac Mini',
+                              status='working', observed_at=datetime.now(timezone.utc))
+    daemon.ingest_record(record)
+
+
+def test_local_mode_ignores_remote_t3_threads():
+    # A remote thread keeps running while this Mac sleeps, so it must not keep it awake.
+    daemon = sessions()
+    remote_t3_working(daemon)
+    assert daemon.snapshot().aggregate.mode == AgentMode.WORKING
+    assert daemon.local_mode() == AgentMode.IDLE_READY
+
+
+def test_local_mode_sees_local_done_hidden_behind_a_remote_working_thread():
+    daemon = sessions()
+    daemon.ingest_line('claude', stop_line('All done.'))
+    remote_t3_working(daemon)
+    assert [row.mode for row in daemon.snapshot().statuses] == [AgentMode.WORKING]
+    assert daemon.local_mode() == AgentMode.COMPLETED
+
+
+def test_local_mode_ignores_rows_relayed_from_other_computers():
+    daemon = sessions()
+    daemon.program_state.receive_update('relay:pc', {'v': 1, 'type': 'program_status', 'scope': 'agent-x',
+                                                     'status': {'state': 'working', 'app': 'codex'},
+                                                     'context': {'origin': 'Codex CLI', 'source_name': 'PC'},
+                                                     'publisher': 'pc', 'seq': 1,
+                                                     'updated_at': int(datetime.now(timezone.utc).timestamp() * 1000)})
+    daemon.program_state.submit({'v': 1, 'type': 'program_status', 'scope': 'build',
+                                 'status': {'state': 'working', 'app': 'make'}})
+    assert len(daemon.snapshot().statuses) == 2
+    assert daemon.local_mode() == AgentMode.WORKING

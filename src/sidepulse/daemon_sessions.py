@@ -102,13 +102,17 @@ def mirrored_update(status: AgentStatus, source_name: str) -> dict | None:
     }
 
 
-def should_mirror(status: AgentStatus) -> bool:
+def runs_on_this_machine(status: AgentStatus) -> bool:
+    """False for threads read from linked T3 environments and rows relayed
+    from other computers: they run elsewhere and report themselves."""
     from .origin import is_relayed_origin
     from .t3_status import T3_EVENT_NAME
 
-    # Threads read from linked T3 environments run on other machines, which
-    # report them themselves.
     return status.event_name != T3_EVENT_NAME and not is_relayed_origin(status.origin)
+
+
+def should_mirror(status: AgentStatus) -> bool:
+    return runs_on_this_machine(status)
 
 
 class DaemonSessions:
@@ -221,6 +225,13 @@ class DaemonSessions:
             {"publisher": self.program_state.publisher, "scope": scope},
             quote_via=urllib.parse.quote,
         )
+
+    def local_mode(self) -> AgentMode:
+        """Aggregate mode of the agents running on this machine only.
+
+        Remote work keeps going while this Mac sleeps, so it must not keep it awake.
+        """
+        return self.monitor.snapshot(only=runs_on_this_machine).aggregate.mode
 
     def snapshot(self, include_stale: bool = False) -> MonitorSnapshot:
         snapshot = self.monitor.snapshot(include_stale=include_stale)

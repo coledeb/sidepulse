@@ -5768,6 +5768,7 @@ class AgentMonitorTests(unittest.TestCase):
         runtime.keep_awake.ensure_awake = lambda: None
         runtime.last_battery_snapshot = None
         runtime.last_lid_closed = False
+        runtime.keep_awake_mode = lambda: runtime.last_snapshot.aggregate.mode
         plays = []
         runtime.play_lid_animation = plays.append
         for mode, ends in (

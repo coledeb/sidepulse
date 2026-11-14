@@ -8,6 +8,10 @@ be put to sleep by SidePulse.
 
 ## Policy
 
+"Agent work" here means agents running on this Mac. Threads read from linked
+T3 Code environments and rows relayed from other computers keep running while
+this Mac sleeps, so they never hold it awake.
+
 - **Clamshell eligible** — the lid is closed, an external display is in use,
   the Mac has power, and its input accessories have been approved by macOS.
   Let macOS run clamshell mode. SidePulse keeps its normal `caffeinate -ims`

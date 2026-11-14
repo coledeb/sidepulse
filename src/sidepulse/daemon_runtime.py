@@ -225,7 +225,7 @@ class DaemonRuntime:
         if self.is_mac:
             # Only the runtime loop mutates sleep controllers, never socket threads.
             self.keep_awake.set_enabled(self.service.keep_awake_enabled)
-            self.sync_keep_awake(self.last_snapshot.aggregate.mode, battery)
+            self.sync_keep_awake(self.keep_awake_mode(), battery)
         if self.is_mac and now >= self.next_lid_poll:
             self.next_lid_poll = now + 1
             try:
@@ -439,6 +439,17 @@ class DaemonRuntime:
 
         self.sync_closed_lid_awake(agents_active=agents_active)
 
+    def keep_awake_mode(self) -> AgentMode:
+        """The mode that decides keep-awake: local agents only.
+
+        Remote T3 threads and relayed rows run on other machines, so closing
+        the lid doesn't interrupt them and they must not hold this Mac awake.
+        """
+        local_mode = getattr(self.service.monitor, "local_mode", None)
+        if local_mode is None:
+            return self.last_snapshot.aggregate.mode
+        return local_mode()
+
     def end_agent_awake_grace_if_idle(self) -> None:
         """Let the Mac sleep when the lid closes and no agent is mid-turn.
 
@@ -448,7 +459,7 @@ class DaemonRuntime:
         """
         if self.last_snapshot is None:
             return
-        mode = self.last_snapshot.aggregate.mode
+        mode = self.keep_awake_mode()
         if mode in AGENT_WORKING_MODES:
             return
         grace_until = self.agent_awake_grace_until_monotonic
