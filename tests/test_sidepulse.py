@@ -1132,6 +1132,8 @@ class AgentMonitorTests(unittest.TestCase):
         events = [
             ("probe", "SessionStart", {"source": "startup"}),
             ("probe", "SessionEnd", {"reason": "other"}),
+            # T3 Code's background sessions send only the SessionEnd.
+            ("t3-probe", "SessionEnd", {"reason": "other"}),
             ("real", "SessionStart", {"source": "startup"}),
             ("real", "UserPromptSubmit", {"prompt": "Fix the icons"}),
             ("real", "Stop", {}),

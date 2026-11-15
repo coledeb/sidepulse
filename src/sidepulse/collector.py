@@ -1482,12 +1482,13 @@ def is_empty_session_end(record: HookEvent, previous: AgentStatus | None) -> boo
     Apps that bundle an agent (Tinycast, for one) start a session just to check
     it works and close it a moment later: no prompt, no tool, no Stop. Nobody
     used it, so it gets no row; the SessionStart row it left is removed too.
+    T3 Code's background Claude sessions send no SessionStart at all, only the
+    SessionEnd, so a session never seen before counts as empty as well.
     """
-    return (
-        record.event_name == "SessionEnd"
-        and previous is not None
-        and previous.event_name == "SessionStart"
-        and previous.mode == AgentMode.IDLE_READY
+    if record.event_name != "SessionEnd":
+        return False
+    return previous is None or (
+        previous.event_name == "SessionStart" and previous.mode == AgentMode.IDLE_READY
     )
 
 
