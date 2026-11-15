@@ -70,6 +70,9 @@ COUNT_SPECIFIC_ANIMATIONS = frozenset(
         "cyan-settled",
         "ember-settled",
         "purple-settled",
+        "startup-fill",
+        "cyan-startup",
+        "ember-startup",
     }
 )
 # Built-in idle breaths whose cycle length follows the "Idle pulse" setting.
@@ -333,6 +336,9 @@ def _program_for_agent_mode(
         "cyan-settled",
         "ember-settled",
         "purple-settled",
+        "startup-fill",
+        "cyan-startup",
+        "ember-startup",
     }:
         return apply_brightness(
             builtin_animation_program(animation_style, led_count),

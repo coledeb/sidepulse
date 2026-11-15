@@ -7,6 +7,7 @@
     "lid_open": "lid-open",
     "long_task_progress": "cyan-roll",
     "settled": "cyan-settled",
+    "startup": "startup-fill",
     "tool_running": "cyan-roll",
     "unknown": "idle-pulse",
     "waiting_for_input": "amber-pulse",

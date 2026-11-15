@@ -197,6 +197,7 @@ from .settings import (
     ANIMATION_STATE_LID_CLOSED,
     ANIMATION_STATE_LID_OPEN,
     ANIMATION_STATE_SETTLED,
+    ANIMATION_STATE_STARTUP,
     ANIMATION_STATES,
     AGENT_ANIMATION_ADD_CUSTOM,
     AGENT_ANIMATION_AMBER_PULSE,
@@ -227,6 +228,9 @@ from .settings import (
     AGENT_ANIMATION_CYAN_SETTLED,
     AGENT_ANIMATION_EMBER_SETTLED,
     AGENT_ANIMATION_PURPLE_SETTLED,
+    AGENT_ANIMATION_STARTUP_FILL,
+    AGENT_ANIMATION_CYAN_STARTUP,
+    AGENT_ANIMATION_EMBER_STARTUP,
     AGENT_ANIMATION_BUILT_IN_PROFILE_IDS,
     DEFAULT_COMPLETED_VISIBLE_SECONDS,
     DEFAULT_IDLE_TIMEOUT_SECONDS,
@@ -415,7 +419,7 @@ STATUS_BAR_MAX_LINES_PER_SOURCE = 500
 SETTINGS_WINDOW_WIDTH = 680
 SETTINGS_WINDOW_HEIGHT = 560
 SETTINGS_ANIMATIONS_WINDOW_WIDTH = 720
-SETTINGS_ANIMATIONS_WINDOW_HEIGHT = 500
+SETTINGS_ANIMATIONS_WINDOW_HEIGHT = 528
 SETTINGS_TAB_Y = 44
 SETTINGS_TAB_TOP_MARGIN = 20
 STATUS_BAR_HISTORY_CHART_RECORD_LIMIT = 2400
@@ -433,6 +437,7 @@ ANIMATION_STATE_LABELS = {
     ANIMATION_STATE_LID_OPEN: "Lid Open",
     ANIMATION_STATE_LID_CLOSED: "Lid Closed",
     ANIMATION_STATE_SETTLED: "Settled",
+    ANIMATION_STATE_STARTUP: "Startup",
 }
 ANIMATION_UI_STATES = tuple(
     state
@@ -2580,6 +2585,11 @@ class StatusBarController(NSObject):
         self.set_settings_message(
             f"{ANIMATION_STATE_LABELS[state]} animation: "
             f"{agent_animation_label(self.settings, str(animation_id))}."
+            + (
+                " Saved to the card; it plays when the device powers up."
+                if state == ANIMATION_STATE_STARTUP
+                else ""
+            )
         )
         self.refresh_settings_window()
         self.refresh_(None)
@@ -2740,7 +2750,9 @@ class StatusBarController(NSObject):
             self.set_settings_message("Showing Settled on device.")
             return
 
-        mode = AgentMode(state)
+        startup = state == ANIMATION_STATE_STARTUP
+        mode = AgentMode.IDLE_READY if startup else AgentMode(state)
+        label = ANIMATION_STATE_LABELS[state] if startup else MODE_LABELS[mode]
 
         devices = [
             device
@@ -2757,13 +2769,13 @@ class StatusBarController(NSObject):
             return
 
         self.set_settings_message(
-            f"Showing {MODE_LABELS[mode]} on device for "
+            f"Showing {label} on device for "
             f"{AGENT_ANIMATION_DEVICE_PREVIEW_SECONDS:g} seconds."
         )
         thread = threading.Thread(
             target=self.show_agent_animation_on_device_worker,
             args=(mode, animation.style, animation.custom_program, devices),
-            kwargs={"idle_pulse_seconds": self.settings.idle_pulse_seconds},
+            kwargs={"idle_pulse_seconds": None if startup else self.settings.idle_pulse_seconds},
             daemon=True,
         )
         thread.start()
@@ -4718,18 +4730,18 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
         "toggleClaudeTranscripts:",
     )
 
-    add_label(agent_animations_tab, "Profile", 32, 360, 56, 24)
+    add_label(agent_animations_tab, "Profile", 32, 388, 56, 24)
     animation_profile = add_agent_animation_profile_popup(
         agent_animations_tab,
         88,
-        360,
+        388,
         target,
     )
     add_button(
         agent_animations_tab,
         "Save Profile…",
         288,
-        359,
+        387,
         112,
         28,
         target,
@@ -4739,7 +4751,7 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
         agent_animations_tab,
         "Delete",
         408,
-        359,
+        387,
         82,
         28,
         target,
@@ -4759,7 +4771,7 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
         agent_animations_tab,
         "Export JSON",
         32,
-        321,
+        349,
         110,
         28,
         target,
@@ -4769,7 +4781,7 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
         agent_animations_tab,
         "Import JSON",
         150,
-        321,
+        349,
         110,
         28,
         target,
@@ -4779,20 +4791,20 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
         agent_animations_tab,
         "Add Custom…",
         492,
-        321,
+        349,
         138,
         28,
         target,
         "addCustomAgentAnimation:",
     )
-    add_label(agent_animations_tab, "State", 24, 287, 178, 24)
-    add_label(agent_animations_tab, "Animation", 210, 287, 190, 24)
-    add_label(agent_animations_tab, "Live Preview", 410, 287, 90, 24)
-    add_label(agent_animations_tab, "Actions", 510, 287, 126, 24)
+    add_label(agent_animations_tab, "State", 24, 315, 178, 24)
+    add_label(agent_animations_tab, "Animation", 210, 315, 190, 24)
+    add_label(agent_animations_tab, "Live Preview", 410, 315, 90, 24)
+    add_label(agent_animations_tab, "Actions", 510, 315, 126, 24)
     animation_popups = {}
     animation_previews = {}
     for index, mode_value in enumerate(ANIMATION_UI_STATES):
-        row_y = 253 - index * 28
+        row_y = 281 - index * 28
         add_label(
             agent_animations_tab,
             ANIMATION_STATE_LABELS[mode_value],
@@ -5280,6 +5292,9 @@ def agent_animation_label(settings: AgentMonitorSettings, animation_id: str) -> 
         AGENT_ANIMATION_CYAN_SETTLED: "Cyan Settled",
         AGENT_ANIMATION_EMBER_SETTLED: "Ember Settled",
         AGENT_ANIMATION_PURPLE_SETTLED: "Purple Settled",
+        AGENT_ANIMATION_STARTUP_FILL: "Startup Fill",
+        AGENT_ANIMATION_CYAN_STARTUP: "Cyan Startup",
+        AGENT_ANIMATION_EMBER_STARTUP: "Ember Startup",
     }.get(animation_id)
     if built_in is not None:
         return built_in

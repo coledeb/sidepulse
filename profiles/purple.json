@@ -7,6 +7,7 @@
     "lid_open": "purple-lid-open",
     "long_task_progress": "purple-tide",
     "settled": "purple-settled",
+    "startup": "startup-fill",
     "tool_running": "purple-tide",
     "unknown": "purple-idle",
     "waiting_for_input": "purple-attention",

@@ -63,6 +63,11 @@ AGENT_ANIMATION_CYAN_SETTLED = "cyan-settled"
 AGENT_ANIMATION_SETTLED = "settled"
 AGENT_ANIMATION_EMBER_SETTLED = "ember-settled"
 AGENT_ANIMATION_PURPLE_SETTLED = "purple-settled"
+# Power-up programs for the Startup state (written to the card's INIT.LED).
+# The plain fill is the firmware's own factory INIT.LED.
+AGENT_ANIMATION_STARTUP_FILL = "startup-fill"
+AGENT_ANIMATION_CYAN_STARTUP = "cyan-startup"
+AGENT_ANIMATION_EMBER_STARTUP = "ember-startup"
 AGENT_ANIMATION_CUSTOM = "custom"
 AGENT_ANIMATION_ADD_CUSTOM = "add-custom"
 AGENT_ANIMATION_CUSTOM_PREFIX = "custom:"
@@ -107,6 +112,9 @@ AGENT_ANIMATION_BUILT_INS = (
     AGENT_ANIMATION_CYAN_SETTLED,
     AGENT_ANIMATION_EMBER_SETTLED,
     AGENT_ANIMATION_PURPLE_SETTLED,
+    AGENT_ANIMATION_STARTUP_FILL,
+    AGENT_ANIMATION_CYAN_STARTUP,
+    AGENT_ANIMATION_EMBER_STARTUP,
 )
 AGENT_ANIMATION_MODES = tuple(mode.value for mode in AgentMode)
 AGENT_ANIMATION_WORKING_MODES = (
@@ -118,10 +126,15 @@ ANIMATION_STATE_LID_OPEN = "lid_open"
 ANIMATION_STATE_LID_CLOSED = "lid_closed"
 # Plays once when a T3 thread is settled (its row is cleared from the list).
 ANIMATION_STATE_SETTLED = "settled"
+# Plays on the device itself each time it powers up (INIT.LED on the card).
+# Only written once the user picks one, so an untouched card keeps its own.
+ANIMATION_STATE_STARTUP = "startup"
+STARTUP_FILE_NAME = "INIT.LED"
 ANIMATION_STATES = AGENT_ANIMATION_MODES + (
     ANIMATION_STATE_LID_OPEN,
     ANIMATION_STATE_LID_CLOSED,
     ANIMATION_STATE_SETTLED,
+    ANIMATION_STATE_STARTUP,
 )
 # How long a Settled animation holds the LEDs before the status comes back.
 SETTLED_ANIMATION_SECONDS = 1.5
@@ -152,6 +165,8 @@ def default_agent_animation_id(mode: AgentMode | str) -> str:
         return AGENT_ANIMATION_LID_CLOSED
     if key == ANIMATION_STATE_SETTLED:
         return AGENT_ANIMATION_CYAN_SETTLED
+    if key == ANIMATION_STATE_STARTUP:
+        return AGENT_ANIMATION_STARTUP_FILL
     if key in AGENT_ANIMATION_MODES:
         return AGENT_ANIMATION_IDLE_PULSE
     raise ValueError(f"Unknown animation state: {key}")
@@ -303,6 +318,7 @@ def builtin_agent_animation_profiles() -> dict[str, AgentAnimationProfile]:
         ANIMATION_STATE_LID_OPEN: AGENT_ANIMATION_EMBER_LID_OPEN,
         ANIMATION_STATE_LID_CLOSED: AGENT_ANIMATION_LID_CLOSED,
         ANIMATION_STATE_SETTLED: AGENT_ANIMATION_EMBER_SETTLED,
+        ANIMATION_STATE_STARTUP: AGENT_ANIMATION_EMBER_STARTUP,
     }
     purple = {
         AgentMode.IDLE_READY.value: AGENT_ANIMATION_PURPLE_IDLE,
@@ -316,6 +332,7 @@ def builtin_agent_animation_profiles() -> dict[str, AgentAnimationProfile]:
         ANIMATION_STATE_LID_OPEN: AGENT_ANIMATION_PURPLE_LID_OPEN,
         ANIMATION_STATE_LID_CLOSED: AGENT_ANIMATION_LID_CLOSED,
         ANIMATION_STATE_SETTLED: AGENT_ANIMATION_PURPLE_SETTLED,
+        ANIMATION_STATE_STARTUP: AGENT_ANIMATION_STARTUP_FILL,
     }
     return {
         AGENT_ANIMATION_PROFILE_CYAN: AgentAnimationProfile("Cyan", cyan),

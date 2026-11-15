@@ -225,6 +225,39 @@ def write_text_synced(target: Path, text: str) -> None:
         sync_directory(target.parent)
 
 
+
+def read_startup_program(root: Path, file_name: str) -> str | None:
+    """The card's current power-up program, or None if it can't be read."""
+    try:
+        return normalize_led_text((root / file_name).read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return None
+
+
+def write_startup_program(root: Path, file_name: str, program: str) -> Path:
+    """Persist a power-up program (INIT.LED) on a mounted card.
+
+    Unlike LEDS.LED this must land on the card's flash, so there is no
+    read-only fallback: a card that refuses the write raises instead.
+    """
+    program = normalize_led_text(program)
+    validate_led_text(program)
+    target = root / file_name
+    holder = led_lease_holder(root)
+    if holder is not None:
+        raise DeviceBusyError(
+            f"{root} is in use by {holder.get('owner') or 'another process'} (pid {holder.get('pid')})."
+        )
+    with device_write_lock(root):
+        is_new = not path_exists(target)
+        with target.open("w", encoding="utf-8", newline="\n") as handle:
+            handle.write(program)
+            handle.flush()
+            sync_fd(handle.fileno())
+        if is_new:
+            sync_directory(root)
+    return target
+
 def sync_fd(fd: int) -> None:
     try:
         os.fsync(fd)

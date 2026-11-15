@@ -9,7 +9,7 @@ import threading
 
 from .battery import program_for_battery, program_for_charging_preview, snapshot_shows_charging_fill
 from .daemon_runtime import DaemonRuntime
-from .device_writer import DeviceBusyError, DeviceWriteError, led_lease_holder, write_led_program, normalize_led_text, validate_led_text
+from .device_writer import DeviceBusyError, DeviceWriteError, led_lease_holder, read_startup_program, write_led_program, write_startup_program, normalize_led_text, validate_led_text
 from .led_status import apply_brightness, led_count_for_target, program_at_phase, program_for_agent_mode
 from .relay import (
     RelayConfig,
@@ -24,6 +24,9 @@ LID_ANIMATION_RESTORE_FUDGE_SECONDS = 0.15
 # Skip the lid-close charging fill when it would start this late, meaning the
 # Mac slept in between; lighting up on a later background wake is wrong.
 LID_CHARGING_PREVIEW_MAX_LATE_SECONDS = 2.0
+# The firmware plays a newly written INIT.LED at once; give it this long
+# before the status program is written back.
+STARTUP_WRITE_SHOW_SECONDS = 2.5
 
 
 class SidePulseService:
@@ -59,6 +62,9 @@ class SidePulseService:
         self.manual_pause_until = 0.0
         self.battery_preview_until = 0.0
         self.animation_until = 0.0
+        # INIT.LED contents known to be on each card, so it is read once and
+        # written only when the Startup pick changes.
+        self.startup_program_by_root: dict[str, str] = {}
         # (monotonic due, wall-clock due, battery snapshot, seconds) for the
         # charging fill that follows the lid-close animation.
         self.lid_charging_followup = None
@@ -180,6 +186,9 @@ class SidePulseService:
                 return
             self.runtime.lid_closed_led_hold_active = False
         settings = load_settings()
+        if self.sync_startup_programs(settings):
+            self.animation_until = time.monotonic() + STARTUP_WRITE_SHOW_SECONDS
+            return
         snapshot = self.monitor.snapshot(include_stale=False)
         mode = snapshot.aggregate.mode
         battery = self.runtime.last_battery_snapshot
@@ -244,6 +253,65 @@ class SidePulseService:
             self.last_program_by_target.pop(key, None)
         for key in set(self.program_started_by_target) - active_targets:
             self.program_started_by_target.pop(key, None)
+
+    def sync_startup_programs(self, settings) -> bool:
+        """Write the chosen Startup animation to each card's INIT.LED if it differs.
+
+        Nothing is written until the user picks a Startup animation (or applies
+        a profile), so an untouched card keeps its own power-up program.
+        Returns True when a card was written.
+        """
+        from .settings import ANIMATION_STATE_STARTUP, STARTUP_FILE_NAME
+        from .models import AgentMode
+        if ANIMATION_STATE_STARTUP not in settings.agent_animations:
+            return False
+        animation = settings.agent_animation(ANIMATION_STATE_STARTUP)
+        wrote = False
+        connected: set[str] = set()
+        for candidate in self.runtime.devices:
+            if candidate.connection != 'drive':
+                continue
+            device_id = candidate.device_id or str(candidate.root.expanduser())
+            if settings.display_for_device(device_id) == LED_DISPLAY_CUSTOM:
+                continue
+            root = candidate.target.parent
+            key = str(root)
+            connected.add(key)
+            try:
+                program = normalize_led_text(program_for_agent_mode(
+                    AgentMode.IDLE_READY,
+                    led_count=led_count_for_target(candidate.target),
+                    brightness=settings.brightness_for_device(device_id),
+                    animation_style=animation.style,
+                    custom_program=animation.custom_program,
+                ))
+            except DeviceWriteError as exc:
+                self.output_errors[device_id] = str(exc)
+                continue
+            known = self.startup_program_by_root.get(key)
+            if known is None:
+                known = read_startup_program(root, STARTUP_FILE_NAME)
+            if known is not None and known.strip() == program.strip():
+                self.startup_program_by_root[key] = known
+                continue
+            try:
+                write_startup_program(root, STARTUP_FILE_NAME, program)
+            except DeviceBusyError:
+                continue
+            except Exception as exc:
+                # Don't retry every second (each try is a flash write); try
+                # again when the pick changes or the card is reconnected.
+                self.startup_program_by_root[key] = program
+                self.output_errors[device_id] = f"Startup animation: {exc}"
+                print(f"sidepulse service: startup write failed: {exc}", file=sys.stderr)
+                continue
+            print(f"sidepulse service: startup animation written to {root}", file=sys.stderr)
+            self.startup_program_by_root[key] = program
+            self.last_program_by_target.pop(f"file:{candidate.target}", None)
+            wrote = True
+        for key in set(self.startup_program_by_root) - connected:
+            self.startup_program_by_root.pop(key, None)
+        return wrote
 
     def play_lid_animation(self, kind, *, program=None, duration=None):
         if kind not in (LID_ANIMATION_CLOSED, LID_ANIMATION_OPEN):

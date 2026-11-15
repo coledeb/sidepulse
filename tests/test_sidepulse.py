@@ -6603,6 +6603,9 @@ class AgentMonitorTests(unittest.TestCase):
             "cyan-settled",
             "ember-settled",
             "purple-settled",
+            "startup-fill",
+            "cyan-startup",
+            "ember-startup",
             animation_id,
         )
         self.assertEqual(settings.agent_animation_choices(), expected)
