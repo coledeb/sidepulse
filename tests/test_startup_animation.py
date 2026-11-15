@@ -7,6 +7,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from sidepulse.device_writer import DeviceCandidate
 from sidepulse.settings import (
     AGENT_ANIMATION_CYAN_STARTUP,
@@ -23,6 +25,7 @@ FACTORY_INIT = (
 ).read_text()
 
 
+@pytest.mark.startup_io
 class StartupAnimationTests(unittest.TestCase):
     def setUp(self) -> None:
         from sidepulse.service import SidePulseService

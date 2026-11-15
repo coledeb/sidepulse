@@ -6576,6 +6576,9 @@ class AgentMonitorTests(unittest.TestCase):
         )
 
         expected = (
+            "startup-fill",
+            "cyan-startup",
+            "ember-startup",
             AGENT_ANIMATION_SLOW_OFF,
             AGENT_ANIMATION_IMMEDIATE_OFF,
             AGENT_ANIMATION_IDLE_PULSE,
@@ -6603,9 +6606,6 @@ class AgentMonitorTests(unittest.TestCase):
             "cyan-settled",
             "ember-settled",
             "purple-settled",
-            "startup-fill",
-            "cyan-startup",
-            "ember-startup",
             animation_id,
         )
         self.assertEqual(settings.agent_animation_choices(), expected)

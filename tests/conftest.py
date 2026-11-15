@@ -50,6 +50,29 @@ def isolated_publisher(tmp_path, monkeypatch):
                         lambda path=None: original(path or tmp_path / 'publisher-id'))
 
 
+
+@pytest.fixture(autouse=True)
+def no_real_startup_writes(request, monkeypatch):
+    """Never read or write a real card's INIT.LED (the Startup animation).
+
+    Service tests point at /Volumes/SidePulse and can load the developer's
+    real settings; with a Startup pick saved there, the sync would write the
+    mounted card. Tests of the sync itself opt out with the `startup_io` mark.
+    """
+    if request.node.get_closest_marker("startup_io"):
+        return
+    from sidepulse import service
+    monkeypatch.setattr(service, "read_startup_program", lambda root, name: None)
+
+    def refuse(root, name, program):
+        raise AssertionError(f"test tried to write {root / name}")
+
+    monkeypatch.setattr(service, "write_startup_program", refuse)
+
+
+def pytest_configure(config):
+    config.addinivalue_line("markers", "startup_io: may read/write INIT.LED in a temp dir")
+
 @pytest.fixture
 def program_client():
     from contextlib import contextmanager

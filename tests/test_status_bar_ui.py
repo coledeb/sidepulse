@@ -1148,7 +1148,13 @@ class WindowBuildTests(StatusBarTestCase):
                     ]
                 )
             self.assertTrue(catalogs)
+            self.assertEqual(sb.ANIMATION_UI_STATES[0], sb.ANIMATION_STATE_STARTUP)
             self.assertTrue(all(catalog == catalogs[0] for catalog in catalogs))
+            # The power-up presets lead every dropdown.
+            self.assertEqual(
+                catalogs[0][:3],
+                ["startup-fill", "cyan-startup", "ember-startup"],
+            )
             self.assertIn("kitt", catalogs[0])
             self.assertIn(animation_id, catalogs[0])
             self.assertEqual(catalogs[0][-1], "add-custom")
@@ -1165,6 +1171,9 @@ class WindowBuildTests(StatusBarTestCase):
                     )
                 ],
                 [
+                    "Startup Fill",
+                    "Cyan Startup",
+                    "Ember Startup",
                     "Slow Off",
                     "Immediate Off",
                     "Idle Pulse",
@@ -1192,9 +1201,6 @@ class WindowBuildTests(StatusBarTestCase):
                     "Cyan Settled",
                     "Ember Settled",
                     "Purple Settled",
-                    "Startup Fill",
-                    "Cyan Startup",
-                    "Ember Startup",
                     "Purple Sweep",
                     "Add Custom…",
                 ],

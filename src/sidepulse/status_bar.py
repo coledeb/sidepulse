@@ -439,13 +439,15 @@ ANIMATION_STATE_LABELS = {
     ANIMATION_STATE_SETTLED: "Settled",
     ANIMATION_STATE_STARTUP: "Startup",
 }
-ANIMATION_UI_STATES = tuple(
+# Startup is listed first: it plays before anything else on the device.
+ANIMATION_UI_STATES = (ANIMATION_STATE_STARTUP,) + tuple(
     state
     for state in ANIMATION_STATES
     if state
     not in {
         AgentMode.TOOL_RUNNING.value,
         AgentMode.LONG_TASK_PROGRESS.value,
+        ANIMATION_STATE_STARTUP,
     }
 )
 ANIMATION_STATE_LABELS[AgentMode.WORKING.value] = "Working / Tool / Long Task"
