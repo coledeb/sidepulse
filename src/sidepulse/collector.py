@@ -767,9 +767,11 @@ class LiveAgentMonitor:
                 if previous is not None:
                     if recovered.updated_at < previous.updated_at:
                         continue
-                    if (
-                        recovered.updated_at == previous.updated_at
-                        and previous is not initial_statuses.get(agent_id)
+                    if recovered.updated_at == previous.updated_at and (
+                        previous is not initial_statuses.get(agent_id)
+                        # Settling a Claude thread ends its session, so the
+                        # replayed SessionEnd can share the settle's second.
+                        or previous.event_name == T3_SETTLED_EVENT_NAME
                     ):
                         continue
                 if recovered != previous:

@@ -303,6 +303,40 @@ class SettleTests(unittest.TestCase):
         self.poller.poll_once()
         self.assertEqual(self.mode(agent_id), AgentMode.IDLE_READY)
 
+    def test_a_settle_survives_a_restart_that_replays_the_session_end(self) -> None:
+        # The replayed SessionEnd shares the settle's second; the settle must win.
+        import json
+        import tempfile
+        from pathlib import Path
+
+        from sidepulse.collector import SourceSpec
+
+        end = STOP + timedelta(seconds=12)
+        events = [
+            ("UserPromptSubmit", STOP - timedelta(seconds=4), {"prompt": "hi"}),
+            ("Stop", STOP, {"last_assistant_message": "Committed the fix and the tests pass."}),
+            ("SessionEnd", end, {"reason": "other"}),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "claude.jsonl"
+            log.write_text("".join(
+                json.dumps({"logged_at": iso(at), "hook_event_name": event, "session_id": "ses_end",
+                            "cwd": tmp, "agent_origin": "Claude in T3 Code",
+                            "t3code_thread_id": OPENCODE_THREAD, **fields}) + "\n"
+                for event, at, fields in events
+            ))
+            latest = Path(tmp) / "latest.json"
+            first = LiveAgentMonitor(latest_state_path=latest, recovery_sources=(SourceSpec("claude", log),))
+            agent_id = "claude:session:ses_end"
+            self.assertEqual(first.statuses_by_key[agent_id].mode, AgentMode.COMPLETED)
+            row = first.t3_settle_candidates()[0]
+            self.assertTrue(first.settle_waiting_session(row, end - timedelta(milliseconds=100)))
+
+            second = LiveAgentMonitor(latest_state_path=latest, recovery_sources=(SourceSpec("claude", log),))
+            status = second.statuses_by_key[agent_id]
+            self.assertEqual(status.event_name, T3_SETTLED_EVENT_NAME)
+            self.assertEqual(status.mode, AgentMode.IDLE_READY)
+
     def test_done_rows_elsewhere_are_not_checked(self) -> None:
         done_turn(self.monitor, "claude", "remote-1", origin="Claude in T3 Code · KARLY-WSL")
         done_turn(self.monitor, "codex", "cli-1", origin="Codex CLI")
