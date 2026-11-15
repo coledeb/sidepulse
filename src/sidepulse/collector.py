@@ -2135,6 +2135,7 @@ def should_ignore_status_transition(
 # asking an agent (Claude or Codex) for a title.
 HOST_INTERNAL_PROMPTS = (
     "generate a title that will help the user recognize this t3 code",
+    "regenerate the title for an existing t3 code thread",
 )
 CODEX_INTERNAL_PROMPTS = (
     "generate 0 to 3 hyperpersonalized suggestions",

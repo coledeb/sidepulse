@@ -8315,12 +8315,14 @@ class AgentMonitorTests(unittest.TestCase):
             self.assertEqual(snapshot.statuses, ())
 
     def test_t3_title_generation_sessions_are_ignored(self) -> None:
-        prompt = (
+        prompts = (
             "Generate a title that will help the user recognize this T3 Code thread.\n"
-            "Return only the title."
+            "Return only the title.",
+            "Regenerate the title for an existing T3 Code thread so the user can recognize it"
+            " weeks later.\nThe previous title was \"Restore Charging Mint Animation\".",
         )
-        for provider in ("claude", "codex"):
-            with self.subTest(provider=provider), tempfile.TemporaryDirectory() as tmp:
+        for provider, prompt in ((p, q) for p in ("claude", "codex") for q in prompts):
+            with self.subTest(provider=provider, prompt=prompt[:10]), tempfile.TemporaryDirectory() as tmp:
                 log = Path(tmp) / f"{provider}.jsonl"
                 now = datetime.now(timezone.utc).isoformat()
                 events = [
@@ -8364,6 +8366,8 @@ class AgentMonitorTests(unittest.TestCase):
             origin="Codex in T3 Code",
         )
         self.assertTrue(collector_module.is_internal_status(status))
+        regenerate = "Regenerate the title for an existing T3 Code thread so the user can... (01a1beee)"
+        self.assertTrue(collector_module.is_internal_status(replace(status, display_name=regenerate)))
         self.assertFalse(
             collector_module.is_internal_status(replace(status, display_name="Sidepulse"))
         )
