@@ -696,7 +696,10 @@ class StatusBarController(NSObject):
         )
         self.set_status(state)
         self.visualizer.poll()
-        self.visualizer.refresh_apps_async(self.request_menu_refresh)
+        # Opening the menu forces a scan; only keep rescanning while it is open,
+        # so the apptap helper isn't launched every 10s all day (and night).
+        if self.tracking_status_menu is not None:
+            self.visualizer.refresh_apps_async(self.request_menu_refresh)
         self.status_item.setMenu_(build_menu(snapshot, state, self))
 
     def request_menu_refresh(self) -> None:
