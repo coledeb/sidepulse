@@ -541,6 +541,11 @@ class LocalWaitingRow:
     waiting: bool = True
 
 
+# Runs read per settled thread: enough to see past the unstarted runs that
+# messages sent mid-turn leave behind.
+T3_SETTLE_RUN_LIMIT = 10
+
+
 def settled_run_matches(
     detail: dict[str, Any] | None,
     row: LocalWaitingRow,
@@ -561,7 +566,12 @@ def settled_run_matches(
     if thread.get("activeRunId"):
         return None
     settled_at = parse_t3_time(thread.get("settledAt"))
-    runs = [run for run in detail.get("recentRuns") or () if isinstance(run, dict)]
+    # A message sent while a turn runs queues a run that T3 cancels unstarted
+    # once the turn takes it in; the turn that ran is the one to match.
+    runs = [
+        run for run in detail.get("recentRuns") or ()
+        if isinstance(run, dict) and not (run.get("status") == "cancelled" and not run.get("startedAt"))
+    ]
     if settled_at is None or not runs:
         return None
     latest = max(runs, key=lambda run: run.get("ordinal") if isinstance(run.get("ordinal"), int) else -1)
@@ -928,7 +938,7 @@ class T3StatusPoller:
         try:
             return self.client.call_tool(
                 "t3_thread_read",
-                {"threadId": thread_id, "limit": 1, "runLimit": 3, "maxCharsPerItem": 1},
+                {"threadId": thread_id, "limit": 1, "runLimit": T3_SETTLE_RUN_LIMIT, "maxCharsPerItem": 1},
             )
         except T3AuthError:
             raise

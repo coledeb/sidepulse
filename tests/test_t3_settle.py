@@ -135,6 +135,20 @@ class MatchTests(unittest.TestCase):
         # A known thread id needs no timing.
         self.assertEqual(settled_run_matches(far, self.row, exact=True), settled)
 
+    def test_unstarted_cancelled_runs_are_skipped(self) -> None:
+        # Messages sent mid-turn queue runs T3 cancels unstarted; the turn that
+        # ran ends with the Stop.
+        settled = STOP + timedelta(seconds=10)
+        item = detail(CODEX_THREAD, completed=STOP + timedelta(milliseconds=13), settled_at=settled,
+                      provider="codex")
+        item["recentRuns"][:0] = [
+            {"ordinal": 4, "status": "cancelled", "startedAt": None,
+             "completedAt": iso(STOP - timedelta(seconds=52))},
+            {"ordinal": 3, "status": "cancelled", "startedAt": None,
+             "completedAt": iso(STOP - timedelta(minutes=19))},
+        ]
+        self.assertEqual(settled_run_matches(item, self.row, exact=False), settled)
+
 
 class SettleTests(unittest.TestCase):
     def setUp(self) -> None:
