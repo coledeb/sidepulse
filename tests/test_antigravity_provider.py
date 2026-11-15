@@ -102,6 +102,12 @@ class AntigravityEventMapTests(unittest.TestCase):
         # The ACP harness reports the previous session closing when a session starts.
         self.assertIsNone(normalize_payload("Stop", {**ACP_COMMON, "terminationReason": "session_end"}))
 
+    def test_event_without_conversation_is_dropped(self) -> None:
+        # T3 starting the ACP harness without a session sends a bare Stop.
+        self.assertIsNone(normalize_payload("Stop", {}))
+        no_id = {key: value for key, value in ACP_COMMON.items() if key != "conversationId"}
+        self.assertIsNone(normalize_payload("PostInvocation", {**no_id, "invocationNum": 2}))
+
     def test_tool_events(self) -> None:
         pre = normalize_payload(
             "PreToolUse",

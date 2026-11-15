@@ -67,6 +67,11 @@ def is_acp_payload(payload: dict[str, Any]) -> bool:
 
 def normalize_payload(event_name: str, payload: dict[str, Any]) -> dict[str, Any] | None:
     """The SidePulse hook payload for one Antigravity event, or None to drop it."""
+    session_id = str(payload.get("conversationId") or "")
+    if not session_id:
+        # Every real turn carries a conversation id. The ACP harness also fires a
+        # bare Stop when T3 starts it without a session (e.g. around a restart).
+        return None
     acp = is_acp_payload(payload)
     sidepulse_event = sidepulse_event_name(event_name, payload, acp=acp)
     if sidepulse_event is None:
@@ -75,7 +80,7 @@ def normalize_payload(event_name: str, payload: dict[str, Any]) -> dict[str, Any
     normalized: dict[str, Any] = {
         "hook_event_name": sidepulse_event,
         "antigravity_event": event_name,
-        "session_id": str(payload.get("conversationId") or ""),
+        "session_id": session_id,
     }
     workspace_paths = payload.get("workspacePaths")
     if isinstance(workspace_paths, list) and workspace_paths and isinstance(workspace_paths[0], str):
