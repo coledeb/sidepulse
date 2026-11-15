@@ -106,6 +106,8 @@ class MappingTests(unittest.TestCase):
             (thread("t", "queued"), "working"),
             (thread("t", "preparing"), "working"),
             (thread("t", "waiting"), "waiting"),
+            (thread("t", "waiting") | {"pendingBackgroundTasks": [{"kind": "subagent"}]}, "working"),
+            (thread("t", "waiting") | {"blockedOnThreadWait": True}, "working"),
             (thread("t", "completed"), "completed"),
             (thread("t", "completed", settled=True), "idle"),
             (thread("t", "completed", snoozed=True), "idle"),

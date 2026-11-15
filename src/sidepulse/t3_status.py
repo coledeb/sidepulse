@@ -428,11 +428,16 @@ def provider_for_t3_instance(instance: object) -> str:
     return lowered or "t3code"
 
 
+def t3_thread_waits_on_background_work(thread: dict[str, Any]) -> bool:
+    """Whether a waiting T3 thread waits on its own subagents or tasks, not the user."""
+    return bool(thread.get("pendingBackgroundTasks")) or bool(thread.get("blockedOnThreadWait"))
+
+
 def sidepulse_status_for_thread(thread: dict[str, Any]) -> str:
     """The SidePulse status a T3 thread shows: working, waiting, completed, error or idle."""
     status = str(thread.get("status") or "").strip().lower()
     unseen = not thread.get("settled") and not thread.get("snoozed")
-    if status == "waiting":
+    if status == "waiting" and not t3_thread_waits_on_background_work(thread):
         return "waiting"
     if status in ACTIVE_STATUSES:
         return "working"
