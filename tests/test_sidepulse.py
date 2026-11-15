@@ -8275,6 +8275,14 @@ class AgentMonitorTests(unittest.TestCase):
         self.assertEqual(snapshot.statuses[0].event_name, "Stop")
 
     def test_internal_codex_helper_sessions_are_ignored(self) -> None:
+        prompts = (
+            "Overview\nGenerate 0 to 3 hyperpersonalized suggestions for what this user might do.",
+            "## Memory Writing Agent: Phase 2 (Consolidation)\n\nYou are a Memory Writing Agent.",
+        )
+        for prompt in prompts:
+            self._assert_codex_helper_ignored(prompt)
+
+    def _assert_codex_helper_ignored(self, prompt: str) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             log = Path(tmp) / "codex.jsonl"
             now = datetime.now(timezone.utc).isoformat()
@@ -8288,7 +8296,7 @@ class AgentMonitorTests(unittest.TestCase):
                                     "hook_event_name": "UserPromptSubmit",
                                     "session_id": "codex-helper",
                                     "cwd": "/Users/example/pgit/sidepulse",
-                                    "prompt": "Overview\nGenerate 0 to 3 hyperpersonalized suggestions for what this user might do.",
+                                    "prompt": prompt,
                                 },
                             }
                         ),
@@ -8385,6 +8393,8 @@ class AgentMonitorTests(unittest.TestCase):
         self.assertTrue(collector_module.is_internal_status(status))
         regenerate = "Regenerate the title for an existing T3 Code thread so the user can... (01a1beee)"
         self.assertTrue(collector_module.is_internal_status(replace(status, display_name=regenerate)))
+        memory = "Memory Writing Agent: Phase 2 (Consolidation) You are a Memory... (01a1dfaf)"
+        self.assertTrue(collector_module.is_internal_status(replace(status, display_name=memory)))
         opencode = replace(status, provider="opencode", display_name="Sidepulse: T3 Code generateThreadTitle (ses_e204)")
         self.assertTrue(collector_module.is_internal_status(opencode))
         self.assertFalse(

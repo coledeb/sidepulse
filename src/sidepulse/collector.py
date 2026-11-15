@@ -1508,6 +1508,8 @@ def is_internal_status(status: AgentStatus) -> bool:
         return True
     if HOST_INTERNAL_TITLE.search(status.display_name):
         return True
+    if status.provider == "codex" and any(prompt in name for prompt in CODEX_INTERNAL_PROMPTS):
+        return True
     # Rows saved before Codex's guardian subagents were folded into their parent.
     return (
         status.provider == "codex"
@@ -2147,6 +2149,8 @@ HOST_INTERNAL_TITLE = re.compile(r"\bT3 Code generate[A-Z]\w*\b")
 CODEX_INTERNAL_PROMPTS = (
     "generate 0 to 3 hyperpersonalized suggestions",
     "you are an expert at upholding safety and compliance standards",
+    # Codex's background memory jobs ("## Memory Writing Agent: Phase 2 ...").
+    "memory writing agent: phase",
 )
 
 
