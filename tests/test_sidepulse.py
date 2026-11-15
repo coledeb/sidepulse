@@ -6128,21 +6128,29 @@ class AgentMonitorTests(unittest.TestCase):
         sync(AgentMode.IDLE_READY)
         self.assertFalse(fake.display_awake.process_running())
 
-    def test_done_grace_is_one_minute_and_ask_grace_five(self) -> None:
+    def test_done_holds_display_one_minute_and_mac_five(self) -> None:
         fake = SimpleNamespace(
             keep_awake=KeepAwakeController(grace_seconds=300),
             agent_awake_last_mode=None,
             agent_awake_grace_until_monotonic=None,
+            agent_display_grace_until_monotonic=None,
             agent_awake_requested=False,
+            agent_display_requested=False,
         )
-        with patch("sidepulse.daemon_runtime.time.monotonic", return_value=1000.0):
-            daemon_runtime.DaemonRuntime.update_agent_awake_request(fake, AgentMode.COMPLETED)
-        self.assertEqual(fake.agent_awake_grace_until_monotonic, 1060.0)
-        with patch("sidepulse.daemon_runtime.time.monotonic", return_value=1000.0):
-            daemon_runtime.DaemonRuntime.update_agent_awake_request(
-                fake, AgentMode.WAITING_FOR_INPUT
-            )
-        self.assertEqual(fake.agent_awake_grace_until_monotonic, 1300.0)
+
+        def update(mode, at):
+            with patch("sidepulse.daemon_runtime.time.monotonic", return_value=at):
+                daemon_runtime.DaemonRuntime.update_agent_awake_request(fake, mode)
+            return fake.agent_awake_requested, fake.agent_display_requested
+
+        self.assertEqual(update(AgentMode.WORKING, 990.0), (True, True))
+        self.assertEqual(update(AgentMode.COMPLETED, 1000.0), (True, True))
+        self.assertEqual(update(AgentMode.COMPLETED, 1059.0), (True, True))
+        self.assertEqual(update(AgentMode.COMPLETED, 1061.0), (True, False))
+        self.assertEqual(update(AgentMode.COMPLETED, 1299.0), (True, False))
+        self.assertEqual(update(AgentMode.COMPLETED, 1301.0), (False, False))
+        self.assertEqual(update(AgentMode.WAITING_FOR_INPUT, 2000.0), (True, True))
+        self.assertEqual(update(AgentMode.WAITING_FOR_INPUT, 2299.0), (True, True))
 
     def test_sleep_prevention_battery_safeguard_activates_only_on_battery(self) -> None:
         active, reason = daemon_runtime.sleep_prevention_battery_safeguard(

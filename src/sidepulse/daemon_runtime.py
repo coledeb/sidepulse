@@ -152,6 +152,8 @@ class DaemonRuntime:
         self.agent_awake_last_mode = None
         self.agent_awake_grace_until_monotonic = None
         self.agent_awake_requested = False
+        self.agent_display_grace_until_monotonic = None
+        self.agent_display_requested = False
         self.closed_lid_display_sleep_requested = False
         self.lid_closed_led_hold_active = False
         self.next_lid_poll = self.next_sleep_poll = self.next_history_sample = 0.0
@@ -493,12 +495,15 @@ class DaemonRuntime:
                 self.agent_awake_last_mode != mode
                 or self.agent_awake_grace_until_monotonic is None
             ):
-                grace = (
-                    DONE_GRACE_SECONDS
-                    if mode == AgentMode.COMPLETED
-                    else self.keep_awake.grace_seconds
+                self.agent_awake_grace_until_monotonic = (
+                    current + self.keep_awake.grace_seconds
                 )
-                self.agent_awake_grace_until_monotonic = current + grace
+                # The display hold ends sooner after Done; the Mac stays awake.
+                self.agent_display_grace_until_monotonic = (
+                    current + DONE_GRACE_SECONDS
+                    if mode == AgentMode.COMPLETED
+                    else self.agent_awake_grace_until_monotonic
+                )
             requested = current < self.agent_awake_grace_until_monotonic
         else:
             requested = (
@@ -507,7 +512,16 @@ class DaemonRuntime:
             )
 
         self.agent_awake_last_mode = mode
+        if mode in AGENT_WORKING_MODES:
+            self.agent_display_grace_until_monotonic = None
+            display_requested = True
+        else:
+            display_until = getattr(self, "agent_display_grace_until_monotonic", None)
+            if display_until is None:
+                display_until = self.agent_awake_grace_until_monotonic
+            display_requested = requested and display_until is not None and current < display_until
         self.agent_awake_requested = requested
+        self.agent_display_requested = display_requested
         return requested
 
     def sync_closed_lid_awake(self, *, agents_active: bool | None = None) -> None:
@@ -551,6 +565,10 @@ class DaemonRuntime:
             display_should_hold = bool(
                 self.keep_awake.enabled
                 and self.keep_awake.holding_requested
+                and (
+                    self.settings.sleep_prevention_policy == SLEEP_PREVENTION_ALWAYS
+                    or getattr(self, "agent_display_requested", False)
+                )
                 and not (lid_closed is True and external_display_active is not True)
             )
             display_was_running = display_awake.process_running()

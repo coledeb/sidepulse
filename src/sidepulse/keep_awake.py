@@ -9,8 +9,7 @@ from .models import AgentMode
 
 
 AWAKE_GRACE_SECONDS = 300.0
-# Done is a clear end of work, so it holds the Mac awake for less time than
-# Ask / Error, where the user is likely to reply and the turn resumes.
+# After Done, the display hold (not the Mac's sleep hold) lasts only this long.
 DONE_GRACE_SECONDS = 60.0
 CAFFEINATE_COMMAND = ("/usr/bin/caffeinate", "-ims")
 # Keeps the display from dimming or sleeping while the lid is open.

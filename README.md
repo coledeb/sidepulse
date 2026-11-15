@@ -966,7 +966,8 @@ prevention policy:
 While SidePulse holds the Mac awake, it also keeps the display from dimming or
 sleeping (`caffeinate -d`) as long as the lid is open or an external display is
 active. With the lid closed and no external display, the built-in panel is left
-to sleep.
+to sleep. After Done, the display hold lasts one minute while the Mac stays
+awake for the full five; after Ask / Error it lasts the full five.
 
 The intended closed-lid behavior, including the distinction between macOS
 clamshell mode and SidePulse's no-external-display fallback, is documented in
@@ -975,7 +976,7 @@ clamshell mode and SidePulse's no-external-display fallback, is documented in
 | Choice | Behavior |
 | --- | --- |
 | Never | Do not use the closed-lid sleep override. |
-| When Agents Work | Keep the Mac awake while agents are Working / Tool Running / Progressing, plus a grace period after: one minute after Done, five minutes after Ask / Error. |
+| When Agents Work | Keep the Mac awake while agents are Working / Tool Running / Progressing, plus the existing five-minute Ask / Done / Error grace period. |
 | Always | Keep the closed-lid sleep override active while the status-bar app is running. |
 
 The daemon caches connected devices and refreshes discovery on USB or mount

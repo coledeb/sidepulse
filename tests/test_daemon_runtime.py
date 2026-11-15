@@ -227,10 +227,14 @@ def test_daemon_owns_sleep_grace_and_low_battery_safeguard(background):
     assert b.runtime.keep_awake.process_running()
     assert b.runtime.display_awake.process_running()
     b.tick(162)
+    assert b.runtime.display_awake.process_running()
+    b.tick(164)  # Done holds the display for one minute...
     assert b.runtime.keep_awake.process_running()
-    b.tick(163)  # Done holds the Mac awake for one minute.
-    assert not b.runtime.keep_awake.process_running()
     assert not b.runtime.display_awake.process_running()
+    b.tick(402)
+    assert b.runtime.keep_awake.process_running()
+    b.tick(403)  # ...and the Mac for five.
+    assert not b.runtime.keep_awake.process_running()
 
 
 def test_daemon_lid_animation_hold_and_restore_require_no_tray(background):
