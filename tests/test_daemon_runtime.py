@@ -50,6 +50,9 @@ def background(tmp_path):
         process = Mock()
         process.poll.return_value = None
         service.runtime.keep_awake.process_factory = Mock(return_value=process)
+        display_process = Mock()
+        display_process.poll.return_value = None
+        service.runtime.display_awake.process_factory = Mock(return_value=display_process)
         with tempfile.TemporaryDirectory(prefix='sp-runtime-', dir=None if os.name == 'nt' else '/tmp') as directory:
             service.program_server.path = Path(directory)/'status.sock'
             service.program_server.start()
@@ -222,10 +225,12 @@ def test_daemon_owns_sleep_grace_and_low_battery_safeguard(background):
     submit_report(report('done'), path=b.path)
     b.tick(103)
     assert b.runtime.keep_awake.process_running()
-    b.tick(402)
+    assert b.runtime.display_awake.process_running()
+    b.tick(162)
     assert b.runtime.keep_awake.process_running()
-    b.tick(403)
+    b.tick(163)  # Done holds the Mac awake for one minute.
     assert not b.runtime.keep_awake.process_running()
+    assert not b.runtime.display_awake.process_running()
 
 
 def test_daemon_lid_animation_hold_and_restore_require_no_tray(background):

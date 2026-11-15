@@ -11,7 +11,7 @@ from dataclasses import asdict
 from .audit import append_status_history_record, status_history_record
 from .battery import BatterySnapshot, read_battery_snapshot
 from .device_writer import discover_devices, device_write_lock
-from .keep_awake import KeepAwakeController
+from .keep_awake import DISPLAY_CAFFEINATE_COMMAND, DONE_GRACE_SECONDS, KeepAwakeController
 from .lid_sleep import (ClosedLidAwakeController, MacSleepSnapshot, external_display_is_active,
     read_lid_closed, read_mac_sleep_snapshot, run_pmset_displaysleepnow,
     sleep_helper_installed)
@@ -132,6 +132,7 @@ class DaemonRuntime:
         self.service = service
         self.is_mac = sys.platform == 'darwin'
         self.keep_awake = KeepAwakeController()
+        self.display_awake = KeepAwakeController(command=DISPLAY_CAFFEINATE_COMMAND)
         self.closed_lid_awake = ClosedLidAwakeController(
             use_system_disable=self.is_mac and sleep_helper_installed(), use_caffeinate=False)
         self.settings = None
@@ -308,6 +309,7 @@ class DaemonRuntime:
         try:
             self.closed_lid_awake.release()
         finally:
+            self.display_awake.release()
             self.keep_awake.release()
     def accept_lid_state(self, closed):
         if closed is None:
@@ -491,9 +493,12 @@ class DaemonRuntime:
                 self.agent_awake_last_mode != mode
                 or self.agent_awake_grace_until_monotonic is None
             ):
-                self.agent_awake_grace_until_monotonic = (
-                    current + self.keep_awake.grace_seconds
+                grace = (
+                    DONE_GRACE_SECONDS
+                    if mode == AgentMode.COMPLETED
+                    else self.keep_awake.grace_seconds
                 )
+                self.agent_awake_grace_until_monotonic = current + grace
             requested = current < self.agent_awake_grace_until_monotonic
         else:
             requested = (
@@ -537,8 +542,27 @@ class DaemonRuntime:
                     f"closed_lid_awake error: {self.last_closed_lid_awake_error}"
                 )
 
+        lid_closed = getattr(self, "last_lid_closed", None)
+        display_awake = getattr(self, "display_awake", None)
+        if display_awake is not None:
+            # Hold the display on whenever the Mac is held awake, except when
+            # the closed built-in panel is the only display: that one must
+            # sleep, and caffeinate -d would block displaysleepnow below.
+            display_should_hold = bool(
+                self.keep_awake.enabled
+                and self.keep_awake.holding_requested
+                and not (lid_closed is True and external_display_active is not True)
+            )
+            display_was_running = display_awake.process_running()
+            display_awake.update_requested(display_should_hold)
+            if display_was_running != display_awake.process_running():
+                log_runtime(
+                    "display_awake="
+                    f"{'active' if display_awake.process_running() else 'released'}"
+                )
+
         should_sleep_display = closed_lid_display_sleep_should_request(
-            lid_closed=getattr(self, "last_lid_closed", None),
+            lid_closed=lid_closed,
             external_display_active=external_display_active,
             system_sleep_disabled=self.closed_lid_awake.system_disable_active(),
         )

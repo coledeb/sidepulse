@@ -21,8 +21,11 @@ this Mac sleeps, so they never hold it awake.
   `pmset -a disablesleep 1` while the awake request is active, so macOS cannot
   sleep before the lid transition is observed. Once the lid is confirmed
   closed, issue `pmset displaysleepnow`. The former keeps the Mac awake; the
-  latter lets the display sleep. Do not use `caffeinate -d` or `caffeinate -u`,
-  which prevent or wake display sleep.
+  latter lets the display sleep. Release SidePulse's `caffeinate -d` display
+  hold first and never use `caffeinate -u`, which would prevent or wake display
+  sleep.
+- **Lid open (or external display), awake request active** — also hold
+  `caffeinate -d` so the display does not dim or sleep while agents work.
 - **No external display, no active agents** — release the SidePulse
   `disablesleep` override and allow macOS to sleep normally.
 

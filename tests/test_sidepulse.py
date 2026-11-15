@@ -6078,6 +6078,72 @@ class AgentMonitorTests(unittest.TestCase):
         self.assertFalse(fake.keep_awake.process_running())
         self.assertFalse(fake.closed_lid_awake.process_running())
 
+    def test_daemon_awake_hold_keeps_display_on_unless_closed_without_monitor(self) -> None:
+        fake = SimpleNamespace(
+            settings=AgentMonitorSettings(
+                sleep_prevention_policy=SLEEP_PREVENTION_AGENTS,
+            ),
+            keep_awake=KeepAwakeController(process_factory=lambda *_args, **_kwargs: FakeProcess()),
+            display_awake=KeepAwakeController(
+                command=("/usr/bin/caffeinate", "-d"),
+                process_factory=lambda *_args, **_kwargs: FakeProcess(),
+            ),
+            closed_lid_awake=ClosedLidAwakeController(
+                process_factory=lambda *_args, **_kwargs: FakeProcess()
+            ),
+            last_keep_awake_error=None,
+            last_closed_lid_awake_error=None,
+            last_lid_closed=False,
+            closed_lid_display_sleep_requested=False,
+            agent_awake_last_mode=None,
+            agent_awake_grace_until_monotonic=None,
+            agent_awake_requested=False,
+            battery_sleep_safeguard_active=False,
+            battery_sleep_safeguard_reason="",
+        )
+        fake.update_agent_awake_request = (
+            lambda mode: daemon_runtime.DaemonRuntime.update_agent_awake_request(fake, mode)
+        )
+        fake.sync_closed_lid_awake = (
+            lambda *, agents_active=None: daemon_runtime.DaemonRuntime.sync_closed_lid_awake(
+                fake,
+                agents_active=agents_active,
+            )
+        )
+
+        def sync(mode, *, external=False):
+            with patch("sidepulse.daemon_runtime.sleep_helper_installed", return_value=False), \
+                    patch("sidepulse.daemon_runtime.external_display_is_active", return_value=external), \
+                    patch("sidepulse.daemon_runtime.run_pmset_displaysleepnow"):
+                daemon_runtime.DaemonRuntime.sync_keep_awake(fake, mode)
+
+        sync(AgentMode.WORKING)
+        self.assertTrue(fake.display_awake.process_running())
+        fake.last_lid_closed = True
+        sync(AgentMode.WORKING, external=True)
+        self.assertTrue(fake.display_awake.process_running())
+        sync(AgentMode.WORKING)
+        self.assertFalse(fake.display_awake.process_running())
+        fake.last_lid_closed = False
+        sync(AgentMode.IDLE_READY)
+        self.assertFalse(fake.display_awake.process_running())
+
+    def test_done_grace_is_one_minute_and_ask_grace_five(self) -> None:
+        fake = SimpleNamespace(
+            keep_awake=KeepAwakeController(grace_seconds=300),
+            agent_awake_last_mode=None,
+            agent_awake_grace_until_monotonic=None,
+            agent_awake_requested=False,
+        )
+        with patch("sidepulse.daemon_runtime.time.monotonic", return_value=1000.0):
+            daemon_runtime.DaemonRuntime.update_agent_awake_request(fake, AgentMode.COMPLETED)
+        self.assertEqual(fake.agent_awake_grace_until_monotonic, 1060.0)
+        with patch("sidepulse.daemon_runtime.time.monotonic", return_value=1000.0):
+            daemon_runtime.DaemonRuntime.update_agent_awake_request(
+                fake, AgentMode.WAITING_FOR_INPUT
+            )
+        self.assertEqual(fake.agent_awake_grace_until_monotonic, 1300.0)
+
     def test_sleep_prevention_battery_safeguard_activates_only_on_battery(self) -> None:
         active, reason = daemon_runtime.sleep_prevention_battery_safeguard(
             BatterySnapshot(percent=19, is_plugged=False),
