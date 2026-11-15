@@ -8357,6 +8357,20 @@ class AgentMonitorTests(unittest.TestCase):
 
                 self.assertEqual(monitor.snapshot().statuses, ())
 
+    def test_opencode_t3_title_session_stop_is_ignored(self) -> None:
+        line = json.dumps(
+            {
+                "hook_event_name": "Stop",
+                "session_id": "ses_e204db732ffe",
+                "last_assistant_message": '{"title":"Thread Title","needsRefinement":false}',
+                "sidepulse_title": "T3 Code generateThreadTitle",
+                "logged_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        record = parse_log_line("opencode", line)
+        self.assertIsNotNone(record)
+        self.assertIsNone(collector_module.status_from_event(record))
+
     def test_saved_t3_title_generation_rows_are_dropped(self) -> None:
         status = AgentStatus(
             provider="codex",
@@ -8371,6 +8385,11 @@ class AgentMonitorTests(unittest.TestCase):
         self.assertTrue(collector_module.is_internal_status(status))
         regenerate = "Regenerate the title for an existing T3 Code thread so the user can... (01a1beee)"
         self.assertTrue(collector_module.is_internal_status(replace(status, display_name=regenerate)))
+        opencode = replace(status, provider="opencode", display_name="Sidepulse: T3 Code generateThreadTitle (ses_e204)")
+        self.assertTrue(collector_module.is_internal_status(opencode))
+        self.assertFalse(
+            collector_module.is_internal_status(replace(status, display_name="T3 Code generated docs"))
+        )
         self.assertFalse(
             collector_module.is_internal_status(replace(status, display_name="Sidepulse"))
         )

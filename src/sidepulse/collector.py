@@ -1506,6 +1506,8 @@ def is_internal_status(status: AgentStatus) -> bool:
     name = status.display_name.lower()
     if any(prompt in name for prompt in HOST_INTERNAL_PROMPTS):
         return True
+    if HOST_INTERNAL_TITLE.search(status.display_name):
+        return True
     # Rows saved before Codex's guardian subagents were folded into their parent.
     return (
         status.provider == "codex"
@@ -2139,6 +2141,9 @@ HOST_INTERNAL_PROMPTS = (
     "generate a title that will help the user recognize this t3 code",
     "regenerate the title for an existing t3 code thread",
 )
+# Sessions T3 Code opens through OpenCode carry their job as the session's own
+# title ("T3 Code generateThreadTitle"), which replaces the prompt as the name.
+HOST_INTERNAL_TITLE = re.compile(r"\bT3 Code generate[A-Z]\w*\b")
 CODEX_INTERNAL_PROMPTS = (
     "generate 0 to 3 hyperpersonalized suggestions",
     "you are an expert at upholding safety and compliance standards",
@@ -2151,6 +2156,9 @@ def should_ignore_record(record: HookEvent, metadata: StatusMetadata) -> bool:
         internal_prompts += CODEX_INTERNAL_PROMPTS
 
     raw = record.raw
+    titles = (metadata.title, _string_or_none(raw.get("sidepulse_title")))
+    if any(title and HOST_INTERNAL_TITLE.search(title) for title in titles):
+        return True
     text = " ".join(
         part
         for part in (
