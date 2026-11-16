@@ -266,8 +266,8 @@ class ProgramState:
                 if field not in context and field in previous_context:
                     context[field] = previous_context[field]
             if context.get('title') or context.get('cwd'):
-                from .collector import display_name_from_parts, project_name
-                short_id = (context.get('agent_id') or context.get('session_id') or '')[:8]
+                from .collector import display_name_from_parts, project_name, session_short_id
+                short_id = session_short_id(context.get('agent_id') or context.get('session_id') or '')
                 context['display_name'] = display_name_from_parts(project_name(context.get('cwd')), context.get('title'), short_id, context.get('display_name') or '')
             update = {**update, 'context': validate_context(context)}
         # Prepare and validate the complete forwarded value before changing state.

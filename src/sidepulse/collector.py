@@ -1659,11 +1659,11 @@ def status_from_event(
         return None
 
     if record.agent_id:
-        short_id = record.agent_id[:8]
+        short_id = session_short_id(record.agent_id)
         fallback = f"{provider_label(record.provider)} agent {short_id}"
         display_name = display_name_for_record(record, metadata, f"agent {short_id}", fallback)
     elif record.session_id:
-        short_id = record.session_id[:8]
+        short_id = session_short_id(record.session_id)
         fallback = f"{provider_label(record.provider)} session {short_id}"
         display_name = display_name_for_record(record, metadata, short_id, fallback)
     else:
@@ -2057,7 +2057,7 @@ def agent_status_from_dict(data: object) -> AgentStatus | None:
                 display_name = display_name_from_parts(
                     project or project_name(cwd),
                     title,
-                    session_id[:8],
+                    session_short_id(session_id),
                     display_name,
                 )
         elif provider == "junie" and session_id:
@@ -2068,7 +2068,7 @@ def agent_status_from_dict(data: object) -> AgentStatus | None:
                 display_name = display_name_from_parts(
                     project_name(cwd),
                     session.title,
-                    session_id[:8],
+                    session_short_id(session_id),
                     display_name,
                 )
 
@@ -2459,6 +2459,17 @@ def normalized_name_part(text: str) -> str:
 def status_project(status: AgentStatus) -> str | None:
     """The project a row names: its host's name for it, else its folder's."""
     return status.project or project_name(status.cwd)
+
+
+def session_short_id(session_id: str) -> str:
+    """The 8 characters that name a session in its row.
+
+    OpenCode ids start with ``ses_`` and a time-based prefix, so their first 8
+    characters are shared by sessions started close together.
+    """
+    if session_id.startswith("ses_"):
+        session_id = session_id[len("ses_"):]
+    return session_id[:8]
 
 
 def project_name(cwd: str | None) -> str | None:

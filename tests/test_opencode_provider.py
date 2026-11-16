@@ -191,6 +191,18 @@ class OpenCodeStatusTests(unittest.TestCase):
                 self.assertEqual(snapshot.statuses[0].mode, expected)
                 self.assertEqual(snapshot.statuses[0].provider, "opencode")
 
+    def test_sessions_started_together_get_distinct_short_ids(self) -> None:
+        # OpenCode ids share "ses_" and a time-based prefix, so the first 8
+        # characters were the same for sessions started close together.
+        snapshot = self.snapshot([
+            self.row("Stop", session_id="ses_e2755954fffeXm7674rt1eu05T", cwd="/tmp"),
+            self.row("Stop", session_id="ses_e2756065dffeQnZtg1XEKf18Wt", cwd="/tmp"),
+        ])
+        self.assertEqual(
+            sorted(status.display_name for status in snapshot.statuses),
+            ["OpenCode session e2755954", "OpenCode session e2756065"],
+        )
+
     def test_an_interrupted_run_goes_idle(self) -> None:
         snapshot = self.snapshot([self.row("UserPromptSubmit"), self.row("Interrupt")])
         # Idle sessions leave the menu at once.

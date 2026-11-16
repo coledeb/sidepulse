@@ -104,7 +104,7 @@ from .audit import (
     export_status_audit_html,
     read_status_history_records,
 )
-from .collector import MonitorSnapshot, status_project
+from .collector import MonitorSnapshot, session_short_id, status_project
 from .device_writer import (
     DEFAULT_FILE_NAME,
     MOUNT_ROOT,
@@ -5988,7 +5988,7 @@ def session_row_parts(status: AgentStatus, *, disambiguate: bool = False) -> tup
         # A session with no title of its own is named after its project.
         title = f"[{title}]"
     if disambiguate and status.session_id:
-        title = f"{title} ({status.session_id[:8]})"
+        title = f"{title} ({session_short_id(status.session_id)})"
     environment = session_environment(status)
     tag = " ".join(part for part in (environment and f"({environment})", project) if part)
     tags = f"[{tag}]" if tag else ""
@@ -6670,7 +6670,7 @@ def normalized_menu_part(text: str) -> str:
 def strip_session_short_id(display_name: str, session_id: str | None) -> str:
     text = display_name.strip()
     if session_id:
-        suffix = f" ({session_id[:8]})"
+        suffix = f" ({session_short_id(session_id)})"
         if text.endswith(suffix):
             return text[: -len(suffix)].strip()
     if text.endswith(")") and " (" in text:
