@@ -2454,14 +2454,16 @@ class StatusBarController(NSObject):
             return
         provider = status.provider.lower()
         terminal_lookup = {"junie": junie_session_terminal, "claude": claude_session_terminal}.get(provider)
+        running_in_unknown_terminal = False
         if terminal_lookup and action in {None, SESSION_OPEN_TERMINAL}:
             terminal = terminal_lookup(status.session_id)
-            if terminal is not None:
+            if terminal is not None and terminal.app is not None:
                 if not focus_agent_terminal(terminal, provider=provider, session_id=status.session_id):
                     self.set_settings_message(
                         f"{provider_label(provider)} is running, but its terminal tab could not be selected."
                     )
                 return
+            running_in_unknown_terminal = terminal is not None
         requested_action = action or self.settings.session_open_action(
             provider, status.origin
         )
@@ -2472,6 +2474,14 @@ class StatusBarController(NSObject):
             default = default_session_open_target(status, skip_action=requested_action)
             if default is not None:
                 requested_action, target = default
+        if running_in_unknown_terminal and requested_action == SESSION_OPEN_TERMINAL:
+            # Resuming would start a second copy of a session that is still
+            # running, in a terminal (VS Code's, Warp, tmux) we can't select.
+            # Other openers, like VS Code for its own terminal, still apply.
+            self.set_settings_message(
+                f"{provider_label(provider)} is running, but its terminal tab could not be selected."
+            )
+            return
         if target is None:
             self.set_settings_message(f"No open action available for {status.display_name}.")
             return

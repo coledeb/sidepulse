@@ -876,6 +876,39 @@ class WindowBuildTests(StatusBarTestCase):
 
         resume.assert_not_called()
 
+    def test_running_claude_in_an_unknown_terminal_still_opens_vscode(self):
+        status = make_status(provider="claude", origin="VS Code")
+        terminal = sb.AgentTerminal("/dev/ttys028", None)
+        with (
+            patch.object(self.controller, "settings", AgentMonitorSettings()),
+            patch.object(sb, "claude_session_terminal", return_value=terminal),
+            patch.object(sb, "session_open_target", return_value=("url", "vscode://x")) as resolve,
+            patch.object(sb, "default_session_open_target",
+                         return_value=(sb.SESSION_OPEN_VSCODE, ("url", "vscode://x"))) as default,
+            patch.object(sb, "open_terminal_command") as resume,
+            patch.object(sb, "NSWorkspace"),
+        ):
+            self.controller.open_session(status, sb.SESSION_OPEN_VSCODE, remember=False)
+            self.controller.open_session(status, None, remember=False)
+
+        resolve.assert_called_once_with(status, sb.SESSION_OPEN_VSCODE)
+        default.assert_called_once()
+        resume.assert_not_called()
+
+    def test_running_claude_in_an_unknown_terminal_is_not_resumed_by_default(self):
+        status = make_status(provider="claude", origin="Warp")
+        terminal = sb.AgentTerminal("/dev/ttys028", None)
+        with (
+            patch.object(self.controller, "settings", AgentMonitorSettings()),
+            patch.object(sb, "claude_session_terminal", return_value=terminal),
+            patch.object(sb, "default_session_open_target",
+                         return_value=(sb.SESSION_OPEN_TERMINAL, ("terminal", "claude --resume x"))),
+            patch.object(sb, "open_terminal_command") as resume,
+        ):
+            self.controller.open_session(status, None, remember=False)
+
+        resume.assert_not_called()
+
     def test_focus_running_junie_in_ghostty_matches_the_terminal_device(self):
         first = SimpleNamespace(tty=lambda: "/dev/ttys028")
         second = SimpleNamespace(tty=lambda: "ttys029")
