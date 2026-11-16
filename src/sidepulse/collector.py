@@ -47,7 +47,7 @@ from .settings import (
 )
 from .t3_delegates import T3DelegateLookup
 from .t3_status import T3_EVENT_NAME, LocalWaitingRow
-from .junie_index import junie_session_project_dir, junie_session_title
+from .junie_index import junie_session_info, junie_session_project_dir
 from .text_utils import read_recent_lines, truncate_text
 
 
@@ -1590,15 +1590,16 @@ def merge_metadata(
 
 
 def update_metadata(metadata: StatusMetadata, record: HookEvent) -> None:
-    if record.cwd:
-        metadata.cwd = record.cwd
+    cwd = project_dir_from_event(record)
+    if cwd:
+        metadata.cwd = cwd
     project = _string_or_none(record.raw.get("sidepulse_project"))
     if project:
         metadata.project = project
 
-    title = title_from_event(record)
-    if title and (metadata.title is None or is_provider_session_title(record, title)):
-        metadata.title = title
+    title = provider_session_title(record)
+    if title or metadata.title is None:
+        metadata.title = title or prompt_title_from_event(record)
 
     origin = record.origin or origin_label_from_payload(record.provider, record.raw)
     # Reading a transcript says nothing about the app the agent runs in, so
@@ -1607,14 +1608,27 @@ def update_metadata(metadata: StatusMetadata, record: HookEvent) -> None:
         metadata.origin = origin
 
 
-def is_provider_session_title(record: HookEvent, title: str) -> bool:
-    if isinstance(record.raw.get("sidepulse_title"), str):
-        return True  # the session's own, current title
-    if record.provider == "codex":
-        return title == codex_session_title(record.session_id)
+def project_dir_from_event(record: HookEvent) -> str | None:
     if record.provider == "junie":
-        return title == junie_session_title(record.session_id)
-    return False
+        return (
+            _string_or_none(record.raw.get("project_path"))
+            or junie_session_project_dir(record.session_id)
+            or record.cwd
+        )
+    return record.cwd
+
+
+def provider_session_title(record: HookEvent) -> str | None:
+    # A source that knows the session's own title (a T3 Code thread) says so.
+    explicit = record.raw.get("sidepulse_title")
+    if isinstance(explicit, str) and explicit.strip():
+        return summarize_prompt(explicit)
+    if record.provider == "codex":
+        return codex_session_title(record.session_id)
+    if record.provider == "junie":
+        session = junie_session_info(record.session_id)
+        return session.title if session else None
+    return None
 
 
 def status_from_event(
@@ -1640,7 +1654,7 @@ def status_from_event(
         # timestamp so recovery can also correct a previously persisted Ask.
         mode = AgentMode.IDLE_READY
 
-    metadata = metadata or StatusMetadata(cwd=record.cwd)
+    metadata = metadata or StatusMetadata(cwd=project_dir_from_event(record))
     if should_ignore_record(record, metadata):
         return None
 
@@ -1663,7 +1677,7 @@ def status_from_event(
         updated_at=record.logged_at,
         event_name=record.event_name,
         session_id=record.session_id,
-        cwd=record.cwd,
+        cwd=metadata.cwd or record.cwd,
         tool_name=record.tool_name,
         message=record.message,
         origin=record.origin or metadata.origin or origin_label_from_payload(record.provider, record.raw),
@@ -2045,12 +2059,13 @@ def agent_status_from_dict(data: object) -> AgentStatus | None:
                     display_name,
                 )
         elif provider == "junie" and session_id:
-            title = junie_session_title(session_id)
-            cwd = junie_session_project_dir(session_id) or cwd
-            if title:
+            session = junie_session_info(session_id)
+            if session:
+                cwd = session.project_dir or cwd
+            if session and session.title:
                 display_name = display_name_from_parts(
                     project_name(cwd),
-                    title,
+                    session.title,
                     session_id[:8],
                     display_name,
                 )
@@ -2299,20 +2314,10 @@ def _replace_mode(status: AgentStatus, mode: AgentMode) -> AgentStatus:
 
 
 def title_from_event(record: HookEvent) -> str | None:
-    # A source that knows the session's own title (a T3 Code thread) says so.
-    explicit = record.raw.get("sidepulse_title")
-    if isinstance(explicit, str) and explicit.strip():
-        return summarize_prompt(explicit)
+    return provider_session_title(record) or prompt_title_from_event(record)
 
-    if record.provider == "codex":
-        title = codex_session_title(record.session_id)
-        if title:
-            return title
-    elif record.provider == "junie":
-        title = junie_session_title(record.session_id)
-        if title:
-            return title
 
+def prompt_title_from_event(record: HookEvent) -> str | None:
     if record.event_name != "UserPromptSubmit":
         return None
     return summarize_prompt(record.raw.get("prompt"))

@@ -965,6 +965,15 @@ emit hooks. SidePulse intentionally does not register a Junie `PermissionRequest
 hook because a successful observer hook would automatically approve the requested
 action. Junie's normal approval prompts therefore remain unchanged.
 
+Junie sessions use the project path from the hook or the Junie session index when
+available. The index at `~/.junie/sessions/index.jsonl` also supplies task names.
+In **Settings → Agents → Session
+Opening**, **Automatic** opens the recorded project in JetBrains for IDE-origin
+sessions when a matching installed IDE is available. Other Junie sessions resume
+in Terminal. You can also set either opener as the Junie preference. If SidePulse
+cannot find a matching installed IDE in JetBrains' recent projects, it falls back
+to Terminal.
+
 OpenCode support (OpenCode 2 or later) is a small plugin at
 `${OPENCODE_CONFIG_DIR:-~/.config/opencode}/plugins/sidepulse/index.js`. OpenCode
 runs every session inside a long-lived server, and the plugin follows that

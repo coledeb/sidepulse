@@ -186,9 +186,11 @@ from .session_actions import (
     SESSION_OPEN_JETBRAINS,
     SESSION_OPEN_TERMINAL,
     SESSION_OPEN_VSCODE,
-    available_session_open_actions,
+    SessionOpenTarget,
+    available_session_open_targets,
     default_session_open_action,
     default_session_open_target,
+    preferred_session_open_actions,
     session_open_action_label,
     session_open_target,
 )
@@ -981,7 +983,9 @@ class StatusBarController(NSObject):
         if not isinstance(provider, str) or not isinstance(action, str):
             return
         try:
-            self.settings = self.settings.with_provider_session_open_action(provider, action)
+            self.settings = self.settings.with_provider_session_open_action(
+                provider, None if action == "automatic" else action
+            )
             save_settings(self.settings)
         except Exception as exc:
             self.set_settings_message(f"Could not save {provider.title()} opener: {exc}")
@@ -2453,7 +2457,7 @@ class StatusBarController(NSObject):
             session_open_target(status, requested_action) if requested_action else None
         )
         if target is None:
-            default = default_session_open_target(status)
+            default = default_session_open_target(status, skip_action=requested_action)
             if default is not None:
                 requested_action, target = default
         if target is None:
@@ -5466,7 +5470,7 @@ def add_history_timeframe_popup(parent, x: int, y: int, target):
 
 def provider_open_actions(provider: str) -> tuple[str, ...]:
     if provider == "junie":
-        return (SESSION_OPEN_TERMINAL, SESSION_OPEN_JETBRAINS)
+        return ("automatic", SESSION_OPEN_TERMINAL, SESSION_OPEN_JETBRAINS)
     if provider == "claude":
         return (SESSION_OPEN_VSCODE, SESSION_OPEN_APP, SESSION_OPEN_TERMINAL)
     if provider == "codex":
@@ -5475,16 +5479,12 @@ def provider_open_actions(provider: str) -> tuple[str, ...]:
 
 
 def default_provider_open_action(provider: str) -> str:
-    if provider == "junie":
-        return SESSION_OPEN_TERMINAL
-    if provider == "claude":
-        return SESSION_OPEN_VSCODE
-    if provider == "codex":
-        return SESSION_OPEN_APP
-    return SESSION_OPEN_TERMINAL
+    return provider_open_actions(provider)[0]
 
 
 def provider_open_action_label(provider: str, action: str, settings=None) -> str:
+    if action == "automatic":
+        return "Automatic"
     if action == SESSION_OPEN_VSCODE:
         return "VS Code"
     if action == SESSION_OPEN_TERMINAL:
@@ -5992,11 +5992,18 @@ def build_session_options_menu(
         selected = target.settings.session_open_action(status.provider, status.origin)
     else:
         selected = None
-    selected = selected or default_session_open_action(status)
-    for action in available_session_open_actions(status):
+    open_targets = available_session_open_targets(status)
+    if selected not in open_targets:
+        selected = next(
+            (action for action in preferred_session_open_actions(status) if action in open_targets),
+            None,
+        )
+    for action, open_target in open_targets.items():
         add_session_open_action_item(
             menu,
-            session_open_action_title(status, action, getattr(target, "settings", None)),
+            session_open_action_title(
+                status, action, getattr(target, "settings", None), open_target
+            ),
             status,
             action,
             target,
@@ -6031,10 +6038,12 @@ def add_session_open_action_item(
     menu.addItem_(item)
 
 
-def session_open_action_title(status: AgentStatus, action: str, settings=None) -> str:
+def session_open_action_title(
+    status: AgentStatus, action: str, settings=None, open_target: SessionOpenTarget | None = None
+) -> str:
     if action == SESSION_OPEN_TERMINAL:
         return resume_terminal_label(settings)
-    return session_open_action_label(status, action)
+    return session_open_action_label(status, action, open_target)
 
 
 def session_row_icon_for_status(status: AgentStatus, *, dark_mode: bool | None = None):
