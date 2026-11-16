@@ -173,6 +173,7 @@ class AgentMonitor:
         self._latest_status_signature: tuple[Any, ...] | None = None
         self._latest_statuses_by_key: dict[str, AgentStatus] | None = None
         self._latest_metadata: tuple[dict[str, StatusMetadata], dict[str, StatusMetadata], dict[str, str]] = ({}, {}, {})
+        self._suppressed_codex_sessions: set[str] = set()
 
     @classmethod
     def from_default_sources(
@@ -250,8 +251,15 @@ class AgentMonitor:
             self._iter_records(),
             key=lambda record: record.logged_at,
         )
+        self._suppressed_codex_sessions = {
+            record.session_id
+            for record in records
+            if record.session_id and is_codex_composer_prediction(record)
+        }
 
         for record in records:
+            if record.provider == "codex" and record.session_id in self._suppressed_codex_sessions:
+                continue
             record = resolve_record_session(record, sessions_by_t3_thread)
             if record is None:
                 continue
@@ -504,12 +512,21 @@ class LiveAgentMonitor:
         # Rows owned elsewhere (the daemon's OSC program and remote sessions),
         # shown alongside this monitor's own under the same visibility rules.
         self.extra_statuses: Callable[[], Iterable[AgentStatus]] = tuple
+        self._suppressed_codex_sessions: set[str] = set()
         self.load_latest_state()
         if recover_on_init:
             self.reconcile_recovery_sources()
 
     def ingest_record(self, record: HookEvent) -> None:
         with self.lock:
+            if record.provider == "codex" and record.session_id:
+                if record.session_id in self._suppressed_codex_sessions:
+                    return
+                if is_codex_composer_prediction(record):
+                    self._suppressed_codex_sessions.add(record.session_id)
+                    if self._discard_suppressed_statuses():
+                        self.write_latest_state()
+                    return
             record = resolve_record_session(record, self.sessions_by_t3_thread)
             if record is None:
                 return
@@ -761,7 +778,8 @@ class LiveAgentMonitor:
             merge_metadata(self.metadata_by_status, recovered_by_status)
             for thread_key, session_id in recovered_threads.items():
                 self.sessions_by_t3_thread.setdefault(thread_key, session_id)
-            changed = False
+            self._suppressed_codex_sessions.update(recovery_monitor._suppressed_codex_sessions)
+            changed = self._discard_suppressed_statuses()
             for agent_id, recovered in recovered_statuses.items():
                 previous = self.statuses_by_key.get(agent_id)
                 if previous is not None:
@@ -780,6 +798,17 @@ class LiveAgentMonitor:
 
             if changed:
                 self.write_latest_state()
+
+    def _discard_suppressed_statuses(self) -> bool:
+        suppressed_keys = [
+            key
+            for key, status in self.statuses_by_key.items()
+            if status.provider == "codex" and status.session_id in self._suppressed_codex_sessions
+        ]
+        for key in suppressed_keys:
+            self.statuses_by_key.pop(key)
+            self.pending_permissions_by_key.pop(key, None)
+        return bool(suppressed_keys)
 
     def write_latest_state(self) -> None:
         if self.latest_state_path is None:
@@ -2136,6 +2165,20 @@ def should_ignore_status_transition(
     )
 
 
+def is_codex_composer_prediction(record: HookEvent) -> bool:
+    prompt = record.raw.get("prompt")
+    return (
+        record.provider == "codex"
+        and record.event_name == "UserPromptSubmit"
+        and record.raw.get("transcript_path") is None
+        and isinstance(prompt, str)
+        and prompt.partition("\n")[0] == (
+            "This is an app-generated request for a suggested next user message. "
+            "The user did not write this message."
+        )
+    )
+
+
 # Background prompts that hosts send to an agent on their own, not on the
 # user's behalf; their sessions are not shown. T3 Code names each thread by
 # asking an agent (Claude or Codex) for a title.
@@ -2157,6 +2200,8 @@ CODEX_INTERNAL_PROMPTS = (
 def should_ignore_record(record: HookEvent, metadata: StatusMetadata) -> bool:
     internal_prompts = HOST_INTERNAL_PROMPTS
     if record.provider == "codex":
+        if is_codex_composer_prediction(record):
+            return True
         internal_prompts += CODEX_INTERNAL_PROMPTS
 
     raw = record.raw
