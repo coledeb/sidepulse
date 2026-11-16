@@ -204,7 +204,6 @@ class StatusBarTestCase(unittest.TestCase):
 class MenuBarVisibilityTests(StatusBarTestCase):
     def test_status_updates_keep_only_icon_with_accessible_state(self):
         controller = sb.StatusBarController.alloc().init()
-        self.addCleanup(controller.stop_status_icon_animation)
         controller.status_item = Mock()
         button = controller.status_item.button.return_value
         for state in (sb.STATE_IDLE, sb.STATE_WORKING, sb.STATE_DONE, sb.STATE_ASK, sb.STATE_ERROR):
@@ -1273,7 +1272,6 @@ class WindowBuildTests(StatusBarTestCase):
 class StatusIconAnimationTests(StatusBarTestCase):
     def setUp(self):
         self.target = sb.StatusBarController.alloc().init()
-        self.addCleanup(self.target.stop_status_icon_animation)
         self.target.status_item = Mock()
         self.target.status_item.isVisible.return_value = True
         self.renderer = Mock()
@@ -1307,33 +1305,33 @@ class StatusIconAnimationTests(StatusBarTestCase):
         self.target.set_status(sb.STATE_WORKING)
         self.assertNotIn('LED output failed', button.setToolTip_.call_args.args[0])
 
-    def test_timer_stops_for_idle_done_and_hidden_icon(self):
+    def test_native_motion_follows_state_and_visibility(self):
         for state in (sb.STATE_WORKING, sb.STATE_ASK):
             self.target.status_item.isVisible.return_value = True
             self.target.set_status(state)
-            self.assertIsNone(self.target.status_icon_timer)
             self.assertEqual(self.renderer.update.call_args.args[1],
                              "spin" if state == sb.STATE_WORKING else "pulse")
             self.target.status_item.isVisible.return_value = False
             self.target.update_status_icon_animation()
-            self.assertIsNone(self.target.status_icon_timer)
             self.renderer.hide.assert_called()
         self.target.status_item.isVisible.return_value = True
         for state in (sb.STATE_IDLE, sb.STATE_DONE):
             self.target.set_status(state)
-            self.assertIsNone(self.target.status_icon_timer)
+            self.assertIsNone(self.renderer.update.call_args.args[1])
 
-    def test_native_failure_retains_bitmap_animation_and_does_not_retry(self):
+    def test_native_failure_falls_back_to_static_icon_and_does_not_retry(self):
         self.renderer.update.side_effect = RuntimeError("native layer unavailable")
         self.target.set_status(sb.STATE_WORKING)
         self.assertTrue(self.target.status_icon_native_failed)
-        self.assertIsNotNone(self.target.status_icon_timer)
-        self.assertTrue(self.target.status_item.button().setImage_.called)
+        self.target.status_item.button().setImage_.assert_called_with(
+            sb.image_for_symbol(sb.STATE_WORKING.symbol, sb.STATE_WORKING.label),
+        )
+        self.assertFalse(hasattr(self.target, "status_icon_timer"))
         self.renderer.close.assert_called_once()
         self.target.update_status_icon_animation()
         self.assertEqual(self.renderer.update.call_count, 1)
 
-    def test_open_menu_keeps_rows_static_without_a_timer(self):
+    def test_open_menu_keeps_rows_static(self):
         self.target.current_state = sb.STATE_IDLE
         menu = NSMenu.alloc().init()
         for mode in (AgentMode.WORKING, AgentMode.WAITING_FOR_INPUT, AgentMode.COMPLETED):
@@ -1341,19 +1339,16 @@ class StatusIconAnimationTests(StatusBarTestCase):
             menu.addItem_(sb.build_session_menu_item(status, datetime.now(timezone.utc), self.target))
         first = [bytes(item.image().TIFFRepresentation()) for item in menu.itemArray()]
         self.target.menuWillOpen_(menu)
-        self.assertIsNone(self.target.status_icon_timer)
         with patch.object(sb.time, "monotonic", return_value=0.4):
-            self.target.animateStatusIcons_(None)
+            self.target.refreshStatusIcon_(None)
         later = [bytes(item.image().TIFFRepresentation()) for item in menu.itemArray()]
         self.assertEqual(first, later)
         self.target.menuDidClose_(menu)
-        self.assertIsNone(self.target.status_icon_timer)
 
     def test_reduce_motion_keeps_static_icons(self):
         self.target.set_status(sb.STATE_WORKING)
         self.workspace.accessibilityDisplayShouldReduceMotion.return_value = True
-        self.target.animateStatusIcons_(None)
-        self.assertIsNone(self.target.status_icon_timer)
+        self.target.refreshStatusIcon_(None)
         self.renderer.update.assert_called_with(
             sb.image_for_symbol(sb.STATE_WORKING.symbol, sb.STATE_WORKING.label),
             None,
@@ -1709,9 +1704,8 @@ class TrayDaemonOwnershipTests(unittest.TestCase):
 
     def test_tray_termination_only_cleans_up_ui_resources(self):
         target = sb.StatusBarController.alloc().init()
-        with patch.object(sb.StatusBarController, 'stop_status_icon_animation') as icons, patch.object(sb.StatusBarController, 'stop_agent_animation_preview_timer') as preview, patch.object(sb.StatusBarController, 'stop_event_server') as events, patch.object(sb, 'daemon_command') as command:
+        with patch.object(sb.StatusBarController, 'stop_agent_animation_preview_timer') as preview, patch.object(sb.StatusBarController, 'stop_event_server') as events, patch.object(sb, 'daemon_command') as command:
             target.applicationWillTerminate_(None)
-        icons.assert_called_once()
         preview.assert_called_once()
         events.assert_called_once()
         command.assert_not_called()

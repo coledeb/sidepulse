@@ -575,7 +575,6 @@ class StatusBarController(NSObject):
         # The daemon follows T3 Code; the menu only offers to connect it.
         self.t3_connecting = False
         self.status_item = None
-        self.status_icon_timer = None
         self.status_icon_renderer = None
         self.status_icon_native_failed = False
         self.tracking_status_menu = None
@@ -1374,7 +1373,6 @@ class StatusBarController(NSObject):
         NSWorkspace.sharedWorkspace().notificationCenter().removeObserver_(self)
         self.stop_agent_animation_preview_timer()
         self.visualizer.stop(own_only=True)
-        self.stop_status_icon_animation()
         if self.status_icon_renderer is not None:
             self.status_icon_renderer.close()
         self.stop_event_server()
@@ -1407,29 +1405,33 @@ class StatusBarController(NSObject):
             self.tracking_status_menu = None
         self.update_status_icon_animation()
 
-    def stop_status_icon_animation(self) -> None:
-        if self.status_icon_timer is not None:
-            self.status_icon_timer.invalidate()
-            self.status_icon_timer = None
-
     @objc.IBAction
-    def animateStatusIcons_(self, _timer):
+    def refreshStatusIcon_(self, _sender):
         self.update_status_icon_animation()
 
     @objc.IBAction
     def statusIconAccessibilityChanged_(self, _notification):
         self.performSelectorOnMainThread_withObject_waitUntilDone_(
-            "animateStatusIcons:", None, False,
+            "refreshStatusIcon:", None, False,
         )
 
     def update_status_icon_animation(self) -> None:
-        visible = self.status_item is not None and self.status_item.isVisible()
-        motion = not NSWorkspace.sharedWorkspace().accessibilityDisplayShouldReduceMotion()
-        animated_header = motion and visible and self.current_state in (STATE_WORKING, STATE_ASK, STATE_ERROR)
-        frame = int(time.monotonic() / STATUS_ICON_FRAME_SECONDS) % STATUS_ICON_FRAME_COUNT
-        renderer = getattr(self, "status_icon_renderer", None)
-        native_failed = getattr(self, "status_icon_native_failed", False)
-        if visible and not native_failed:
+        if self.status_item is None:
+            return
+        renderer = self.status_icon_renderer
+        if not self.status_item.isVisible():
+            if renderer is not None:
+                renderer.hide()
+            return
+        state = self.current_state
+        static_icon = image_for_symbol(state.symbol, state.label)
+        motion = None
+        if (
+            state in (STATE_WORKING, STATE_ASK, STATE_ERROR)
+            and not NSWorkspace.sharedWorkspace().accessibilityDisplayShouldReduceMotion()
+        ):
+            motion = status_icon_motion(state)
+        if not self.status_icon_native_failed:
             try:
                 if renderer is None:
                     renderer = NativeStatusIconRenderer(
@@ -1437,41 +1439,19 @@ class StatusBarController(NSObject):
                         duration=STATUS_ICON_FRAME_SECONDS * STATUS_ICON_FRAME_COUNT,
                     )
                     self.status_icon_renderer = renderer
-                state = self.current_state
-                renderer.update(
-                    animated_status_icon(state, 0) if animated_header
-                    else image_for_symbol(state.symbol, state.label),
-                    status_icon_motion(state) if animated_header else None,
-                )
+                renderer.update(animated_status_icon(state, 0) if motion else static_icon, motion)
+                return
             except Exception as exc:
-                # Keep the existing image-based path if native rendering is unavailable.
+                # Without Core Animation the glyph stays still rather than
+                # redrawing from a Python frame timer.
                 log_status_bar(f"native status icon unavailable: {exc}")
-                self.status_icon_native_failed = native_failed = True
+                self.status_icon_native_failed = True
                 if renderer is not None:
                     renderer.close()
                 self.status_icon_renderer = None
-        elif not visible and renderer is not None:
-            renderer.hide()
-        if visible and native_failed:
-            state = self.current_state
-            self.status_item.button().setImage_(
-                animated_status_icon(state, frame) if animated_header
-                else image_for_symbol(state.symbol, state.label)
-            )
-
-        # Header motion runs in Core Animation with no Python frame timer. Menu
-        # rows stay static, so only the image fallback needs the timer.
-        animated = animated_header and native_failed
-        if animated and self.status_icon_timer is None:
-            self.status_icon_timer = NSTimer.timerWithTimeInterval_target_selector_userInfo_repeats_(
-                STATUS_ICON_FRAME_SECONDS, self, "animateStatusIcons:", None, True,
-            )
-            self.status_icon_timer.setTolerance_(0.005)
-            run_loop = NSRunLoop.mainRunLoop()
-            run_loop.addTimer_forMode_(self.status_icon_timer, NSRunLoopCommonModes)
-            run_loop.addTimer_forMode_(self.status_icon_timer, NSEventTrackingRunLoopMode)
-        elif not animated:
-            self.stop_status_icon_animation()
+        button = self.status_item.button()
+        if button is not None and button.image() != static_icon:
+            button.setImage_(static_icon)
 
     def build_monitor(self):
         from .program_presentation import DaemonMonitor
