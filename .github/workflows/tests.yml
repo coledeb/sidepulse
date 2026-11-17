@@ -94,6 +94,14 @@ jobs:
           SIDEPULSE_REQUIRE_UI_TESTS: "1"
         run: python -m pytest tests/test_status_bar_ui.py -v
 
+      # The runner image has Reduce Motion on (since 2026-11-16), which stills
+      # the animations this step measures.
+      - name: Turn off Reduce Motion
+        run: |
+          defaults write com.apple.universalaccess reduceMotion -bool false
+          killall cfprefsd || true
+          python -c "from AppKit import NSWorkspace; print('reduce motion:', NSWorkspace.sharedWorkspace().accessibilityDisplayShouldReduceMotion())"
+
       - name: Menu-bar CPU budget
         env:
           SIDEPULSE_REQUIRE_UI_TESTS: "1"
