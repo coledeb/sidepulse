@@ -587,9 +587,10 @@ class LiveAgentMonitor:
                     updated_at=status.updated_at,
                     t3_thread_id=threads_by_session.get(status.session_id or ""),
                     waiting=is_local_t3_question_wait(status),
+                    background=is_local_t3_background_wait(status),
                 )
                 for status in self.statuses_by_key.values()
-                if is_local_t3_settle_candidate(status)
+                if (is_local_t3_settle_candidate(status) or is_local_t3_background_wait(status))
                 and (
                     status.age_seconds(now) <= self.recent_retention_seconds
                     if status.mode == AgentMode.COMPLETED
@@ -619,6 +620,31 @@ class LiveAgentMonitor:
                 mode=AgentMode.IDLE_READY,
                 event_name=T3_SETTLED_EVENT_NAME,
                 updated_at=max(settled_at, status.updated_at),
+            )
+            self.write_latest_state()
+            return True
+
+    def set_t3_background(self, row: LocalWaitingRow, on_background: bool) -> bool:
+        """Show ``row`` as Working while T3 waits on its thread's delegated
+        tasks, or back as Done once it stops; False if the row moved on."""
+        now = datetime.now(timezone.utc)
+        with self.lock:
+            status = self.statuses_by_key.get(row.agent_id)
+            if status is None or status.updated_at != row.updated_at:
+                return False
+            if on_background:
+                if not (is_local_t3_background_wait(status) or (
+                    status.mode == AgentMode.COMPLETED and is_local_t3_settle_candidate(status)
+                )):
+                    return False
+                mode, event_name = AgentMode.LONG_TASK_PROGRESS, T3_BACKGROUND_EVENT_NAME
+            else:
+                if not is_local_t3_background_wait(status):
+                    return False
+                mode, event_name = AgentMode.COMPLETED, "Stop"
+            # Newer than the hook's Stop, so a history replay cannot undo it.
+            self.statuses_by_key[row.agent_id] = replace(
+                status, mode=mode, event_name=event_name, updated_at=max(now, status.updated_at),
             )
             self.write_latest_state()
             return True
@@ -1455,6 +1481,13 @@ def _string_or_none(value: object) -> str | None:
 
 
 T3_SETTLED_EVENT_NAME = "T3ThreadSettled"
+# A Done row whose T3 thread waits on its own delegated tasks.
+T3_BACKGROUND_EVENT_NAME = "T3BackgroundWait"
+
+
+def is_local_t3_background_wait(status: AgentStatus) -> bool:
+    """A hook row on this Mac whose turn ended while T3 waits on its delegated tasks."""
+    return status.mode == AgentMode.LONG_TASK_PROGRESS and status.event_name == T3_BACKGROUND_EVENT_NAME
 
 
 def is_local_t3_question_wait(status: AgentStatus) -> bool:
@@ -2182,7 +2215,10 @@ def should_ignore_status_transition(
         and current.event_name == "Notification"
         and (
             previous.mode == AgentMode.COMPLETED
-            or (previous.mode == AgentMode.LONG_TASK_PROGRESS and previous.event_name == "Stop")
+            or (
+                previous.mode == AgentMode.LONG_TASK_PROGRESS
+                and previous.event_name in {"Stop", T3_BACKGROUND_EVENT_NAME}
+            )
         )
     ):
         return True

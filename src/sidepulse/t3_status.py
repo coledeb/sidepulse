@@ -21,7 +21,9 @@ This Mac's own T3 threads are left to the agents' hooks, which are instant and
 richer; only linked environments are polled, so no session shows twice. The one
 exception is settling: a hook row waiting on a closing question has no event
 that says the user read it, so while one is shown the poller checks whether its
-T3 thread was settled (``check_local_settled``). Claude and OpenCode hooks name
+T3 thread was settled (``check_local_settled``). A Done row is also checked
+for a thread T3 holds waiting on its own delegated tasks: the agent's turn
+ended, but T3 resumes it when they report back, so the row shows Working. Claude and OpenCode hooks name
 their T3 thread; a Codex row is matched to the thread whose latest run finished
 when its Stop hook fired, since T3 runs every Codex thread in one shared server.
 """
@@ -544,6 +546,9 @@ class LocalWaitingRow:
     t3_thread_id: str | None = None
     # False for a Done row, which polls fast only while it is recent.
     waiting: bool = True
+    # A Done row shown as Working while T3 waits on the thread's delegated
+    # tasks (``waiting`` is False).
+    background: bool = False
 
 
 # Runs read per settled thread: enough to see past the unstarted runs that
@@ -622,6 +627,7 @@ class T3StatusPoller:
         credentials_signature: Callable[[], object] | None = None,
         local_waiting: Callable[[], Sequence[LocalWaitingRow]] | None = None,
         on_local_settled: Callable[[LocalWaitingRow, datetime], None] | None = None,
+        on_local_background: Callable[[LocalWaitingRow, bool], None] | None = None,
         on_remote_settled: Callable[[Callable[[], bool]], bool] | None = None,
     ) -> None:
         self.ingest = ingest
@@ -630,6 +636,9 @@ class T3StatusPoller:
         self.on_remote_settled = on_remote_settled
         self.local_waiting = local_waiting
         self.on_local_settled = on_local_settled
+        # Given a row and whether its T3 thread waits on delegated tasks, shows
+        # it as Working or back as Done.
+        self.on_local_background = on_local_background
         # (row, thread, settle time) checks that did not match, so a thread is
         # read once per settle rather than on every poll.
         self.settle_misses: set[tuple[str, str, str, str]] = set()
@@ -841,14 +850,16 @@ class T3StatusPoller:
         self.projects[environment_id] = (now, fresh)
         return fresh
 
-    def _unsettled_threads(self, environment_id: str) -> list[dict[str, Any]]:
+    def _unsettled_threads(self, environment_id: str | None) -> list[dict[str, Any]]:
+        """A machine's unsettled threads; this Mac's for ``None``."""
         threads: list[dict[str, Any]] = []
         cursor: int | None = 0
+        scope = {"environmentId": environment_id} if environment_id else {}
         while cursor is not None and len(threads) < 500:
             page = self.client.call_tool(
                 "t3_thread_list",
                 {
-                    "environmentId": environment_id,
+                    **scope,
                     "allProjects": True,
                     "settled": False,
                     # Drops delegate_task children, including those another
@@ -877,7 +888,9 @@ class T3StatusPoller:
             self.settle_misses.clear()
             return False
         now = self.wall_clock()
-        waiting = any(row.waiting for row in rows)
+        background = self.check_local_background(rows, now)
+        rows = [row for row in rows if not row.background]
+        waiting = background or any(row.waiting for row in rows)
         done_ages = [(now - row.updated_at).total_seconds() for row in rows if not row.waiting]
         if done_ages:
             self.settle_interval = settle_done_interval(min(done_ages))
@@ -938,6 +951,46 @@ class T3StatusPoller:
         if len(self.settle_misses) > 1000:
             self.settle_misses.clear()
         return waiting
+
+    def check_local_background(self, rows: Sequence[LocalWaitingRow], now: datetime) -> bool:
+        """Show Done rows whose T3 thread waits on its delegated tasks as Working,
+        and those rows back as Done once it stops; True while one waits."""
+        if self.on_local_background is None:
+            return False
+        rows = [row for row in rows if row.t3_thread_id and not row.waiting]
+        if not rows:
+            return False
+        try:
+            threads = self._unsettled_threads(None)
+        except T3AuthError:
+            raise
+        except T3Error as exc:
+            self.last_error = f"this Mac: {exc}"
+            return any(row.background for row in rows)
+        by_id = {thread.get("threadId"): thread for thread in threads}
+        any_background = False
+        for row in rows:
+            thread = by_id.get(row.t3_thread_id)
+            status = str((thread or {}).get("status") or "").strip().lower()
+            on_background = (
+                thread is not None and status == "waiting" and t3_thread_waits_on_background_work(thread)
+            )
+            if not row.background:
+                if on_background:
+                    self.on_local_background(row, True)
+                    any_background = True
+                continue
+            if on_background:
+                any_background = True
+                # Refreshed so the Working row never ages into the stale window.
+                if (now - row.updated_at).total_seconds() >= T3_ACTIVE_HEARTBEAT_SECONDS:
+                    self.on_local_background(row, True)
+            elif status in ACTIVE_STATUSES:
+                # T3 resumed the agent; its own hooks take the row from here.
+                any_background = True
+            else:
+                self.on_local_background(row, False)
+        return any_background
 
     def _thread_detail(self, thread_id: str) -> dict[str, Any] | None:
         try:

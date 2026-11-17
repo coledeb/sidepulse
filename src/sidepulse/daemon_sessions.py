@@ -158,6 +158,7 @@ class DaemonSessions:
                 on_state_change=lambda state: log_sessions(f"t3 state={state}"),
                 local_waiting=self.monitor.t3_settle_candidates,
                 on_local_settled=self.settle,
+                on_local_background=self.set_t3_background,
                 on_remote_settled=self.settled,
             )
             if t3_installed():
@@ -205,6 +206,13 @@ class DaemonSessions:
     def settle(self, row, settled_at: datetime) -> None:
         if self.settled(lambda: self.monitor.settle_waiting_session(row, settled_at)):
             log_sessions(f"t3 settled agent={row.agent_id} thread={row.t3_thread_id or 'by-timing'}")
+            self.changed()
+
+    def set_t3_background(self, row, on_background: bool) -> None:
+        if self.monitor.set_t3_background(row, on_background):
+            if not row.background or not on_background:
+                state = "waiting" if on_background else "done"
+                log_sessions(f"t3 background {state} agent={row.agent_id} thread={row.t3_thread_id}")
             self.changed()
 
     def settled(self, apply: Callable[[], bool]) -> bool:

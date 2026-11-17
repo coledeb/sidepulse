@@ -6,7 +6,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 
 from sidepulse import t3_status
-from sidepulse.collector import T3_SETTLED_EVENT_NAME, LiveAgentMonitor
+from sidepulse.collector import T3_BACKGROUND_EVENT_NAME, T3_SETTLED_EVENT_NAME, LiveAgentMonitor
 from sidepulse.models import AgentMode, HookEvent
 from sidepulse.t3_status import LocalWaitingRow, settled_run_matches
 
@@ -359,3 +359,100 @@ class SettleTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+CLAUDE_THREAD = "7572cb1a-8d0f-471e-933f-3d0eca6f902a"
+
+
+class BackgroundClient(FakeClient):
+    """Also lists this Mac's unsettled threads, with ``self.unsettled`` as them."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.unsettled: list[dict] = []
+
+    def call_tool(self, name: str, arguments: dict) -> dict:
+        if name == "t3_thread_list" and arguments.get("settled") is False:
+            self.calls.append((name, arguments))
+            assert "environmentId" not in arguments
+            return {"threads": self.unsettled}
+        return super().call_tool(name, arguments)
+
+
+def waiting_on_delegates(thread_id: str, *, status: str = "waiting", tasks: bool = True) -> dict:
+    return {
+        "threadId": thread_id,
+        "providerInstanceId": "claudeAgent",
+        "status": status,
+        "settled": False,
+        "pendingBackgroundTasks": [{"kind": "subagent"}] if tasks else [],
+        "blockedOnThreadWait": False,
+    }
+
+
+class BackgroundWaitTests(unittest.TestCase):
+    agent_id = "claude:session:sess-1"
+
+    def setUp(self) -> None:
+        self.client = BackgroundClient()
+        self.monitor = LiveAgentMonitor()
+        self.monitor.completed_visible_seconds = 3600
+        self.poller = t3_status.T3StatusPoller(
+            lambda record: None,
+            client_factory=lambda: self.client,
+            local_waiting=self.monitor.t3_settle_candidates,
+            on_local_settled=self.monitor.settle_waiting_session,
+            on_local_background=self.monitor.set_t3_background,
+        )
+        done_turn(self.monitor, "claude", "sess-1", thread_id=CLAUDE_THREAD)
+
+    def status(self):
+        return self.monitor.statuses_by_key[self.agent_id]
+
+    def test_done_row_shows_working_while_t3_waits_on_delegates(self) -> None:
+        self.assertEqual(self.status().mode, AgentMode.COMPLETED)
+        self.client.unsettled = [waiting_on_delegates(CLAUDE_THREAD)]
+        self.poller.poll_once()
+        self.assertEqual(self.status().mode, AgentMode.LONG_TASK_PROGRESS)
+        self.assertEqual(self.status().event_name, T3_BACKGROUND_EVENT_NAME)
+        self.assertTrue(self.poller.any_active)
+        self.assertTrue(self.monitor.t3_settle_candidates()[0].background)
+
+        # Claude's idle Notification a minute later must not turn it into Ask.
+        self.monitor.ingest_record(hook("claude", "Notification", "sess-1", at=datetime.now(timezone.utc),
+                                        thread_id=CLAUDE_THREAD, message="Claude is waiting for your input"))
+        self.assertEqual(self.status().mode, AgentMode.LONG_TASK_PROGRESS)
+
+        # T3 resumes the agent: still Working until its own hooks arrive.
+        self.client.unsettled = [waiting_on_delegates(CLAUDE_THREAD, status="running", tasks=False)]
+        self.poller.poll_once()
+        self.assertEqual(self.status().mode, AgentMode.LONG_TASK_PROGRESS)
+        self.monitor.ingest_record(hook("claude", "UserPromptSubmit", "sess-1", at=datetime.now(timezone.utc)
+                                        + timedelta(seconds=1), thread_id=CLAUDE_THREAD, prompt="results"))
+        self.assertEqual(self.status().mode, AgentMode.WORKING)
+
+    def test_row_goes_back_to_done_when_the_wait_ends_without_a_resume(self) -> None:
+        self.client.unsettled = [waiting_on_delegates(CLAUDE_THREAD)]
+        self.poller.poll_once()
+        self.client.unsettled = [waiting_on_delegates(CLAUDE_THREAD, status="completed", tasks=False)]
+        self.poller.poll_once()
+        self.assertEqual(self.status().mode, AgentMode.COMPLETED)
+        self.assertFalse(self.monitor.t3_settle_candidates()[0].background)
+
+    def test_waiting_on_the_user_or_finished_leaves_done_alone(self) -> None:
+        for thread in (waiting_on_delegates(CLAUDE_THREAD, tasks=False),
+                       waiting_on_delegates(CLAUDE_THREAD, status="completed")):
+            with self.subTest(thread=thread):
+                self.client.unsettled = [thread]
+                self.poller.poll_once()
+                self.assertEqual(self.status().mode, AgentMode.COMPLETED)
+
+    def test_long_waits_are_refreshed_so_they_never_go_stale(self) -> None:
+        self.client.unsettled = [waiting_on_delegates(CLAUDE_THREAD)]
+        self.poller.poll_once()
+        first = self.status().updated_at
+        later = first + timedelta(seconds=t3_status.T3_ACTIVE_HEARTBEAT_SECONDS + 1)
+        self.poller.wall_clock = lambda: later
+        self.poller.poll_once()
+        self.assertGreater(self.status().updated_at, first)
+        self.assertEqual(self.status().mode, AgentMode.LONG_TASK_PROGRESS)
