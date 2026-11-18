@@ -805,7 +805,7 @@ class WindowBuildTests(StatusBarTestCase):
         window = sb.build_settings_window(self.controller)
         self.assertIsNotNone(window)
         self.assertTrue(window.title())
-        self.assertEqual(window.contentView().frame().size.height, 560)
+        self.assertEqual(window.contentView().frame().size.height, sb.SETTINGS_AGENTS_WINDOW_HEIGHT)
         self.assertIn("cursor_hook_status", self.controller.settings_fields)
         aligned_fields = (
             "codex_hook_status",
@@ -1108,7 +1108,7 @@ class WindowBuildTests(StatusBarTestCase):
         tab_view.selectTabViewItem_(items["agents"])
         self.assertEqual(
             window.contentView().frame().size.height,
-            sb.SETTINGS_WINDOW_HEIGHT,
+            sb.SETTINGS_AGENTS_WINDOW_HEIGHT,
         )
         self.assertEqual(
             window.contentView().frame().size.width,
@@ -1118,6 +1118,8 @@ class WindowBuildTests(StatusBarTestCase):
     def test_setup_window_builds(self):
         window = sb.build_setup_window(self.controller)
         self.assertIsNotNone(window)
+        self.assertIn("herdr", self.controller.setup_buttons)
+        self.assertIn("herdr_status", self.controller.setup_fields)
         self.assert_controls_are_wired(window)
 
     def test_custom_agent_animation_editor_builds(self):

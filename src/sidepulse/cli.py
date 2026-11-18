@@ -75,6 +75,7 @@ from .lid_sleep import (
 from .models import AgentStatus
 from .providers import (
     HOOK_PROVIDERS,
+    LOG_HOOK_PROVIDERS,
     detect_provider_configs,
     default_log_path,
 )
@@ -178,7 +179,7 @@ def build_sidepulse_parser() -> argparse.ArgumentParser:
     agent_selection = setup.add_mutually_exclusive_group()
     agent_selection.add_argument(
         "provider",
-        choices=("all", *HOOK_PROVIDERS, "herdr"),
+        choices=("all", *HOOK_PROVIDERS),
         nargs="?",
         default="all",
         help="Agent hooks or Herdr plugin to install. Default: all agent hooks.",
@@ -334,7 +335,7 @@ def add_sidepulse_delivery_arguments(parser: argparse.ArgumentParser) -> None:
 
 def add_hook_log_parser(subparsers: argparse._SubParsersAction) -> None:
     hook_log = subparsers.add_parser("hook-log", help="Internal hook logging entry point.")
-    hook_log.add_argument("--provider", choices=HOOK_PROVIDERS, required=True)
+    hook_log.add_argument("--provider", choices=LOG_HOOK_PROVIDERS, required=True)
     hook_log.add_argument("--log", type=Path, required=True)
     hook_log.add_argument("--event", help="Provider-native lifecycle event name (used by cursor and antigravity).")
     hook_log.set_defaults(func=cmd_hook_log)
@@ -1092,13 +1093,9 @@ def cmd_sidepulse_relay(args: argparse.Namespace) -> int:
 
 
 def cmd_sidepulse_setup(args: argparse.Namespace) -> int:
-    if getattr(args, "provider", None) == "herdr":
-        from . import herdr
-        try:
-            return herdr.setup(uninstall=args.uninstall, dry_run=args.dry_run)
-        except (OSError, ValueError, subprocess.SubprocessError) as exc:
-            print(f"SidePulse Herdr plugin: {exc}", file=sys.stderr)
-            return 1
+    providers = selected_hook_providers(args)
+    if args.provider == "herdr" and not args.no_agent_monitor:
+        return configure_herdr(args)
     if getattr(args, "uninstall", False):
         return cmd_uninstall(args)
     if not args.no_agent_monitor:
@@ -1120,6 +1117,9 @@ def cmd_sidepulse_setup(args: argparse.Namespace) -> int:
     print(f"background service: {service_action}")
     if str(service_result.path):
         print(f"  config: {service_result.path}")
+
+    if not args.no_agent_monitor and "herdr" in providers:
+        configure_herdr(args, optional=True)
 
     if sys.platform != "darwin":
         print("macOS integrations: skipped (CLI-only setup on this platform)")
@@ -1333,6 +1333,18 @@ def cmd_status_bar(args: argparse.Namespace) -> int:
     return 0
 
 
+def configure_herdr(args: argparse.Namespace, *, optional: bool = False) -> int:
+    from . import herdr
+    if optional and not herdr.executable_path():
+        return 0
+    try:
+        print(herdr.configure_plugin(uninstall=args.uninstall, dry_run=args.dry_run))
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        print(f"SidePulse Herdr plugin: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def selected_hook_providers(args: argparse.Namespace) -> tuple[str, ...]:
     if args.agent:
         return tuple(dict.fromkeys(args.agent))
@@ -1343,6 +1355,8 @@ def install_hook_results(args: argparse.Namespace):
     providers = selected_hook_providers(args)
     results = []
     for provider in providers:
+        if provider == "herdr":
+            continue  # A Herdr plugin, configured by configure_herdr.
         log_path = install_log_path(provider, args)
         if provider == "codex":
             results.append(install_codex_hooks(log_path=log_path, dry_run=args.dry_run))
@@ -1388,6 +1402,8 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
     providers = selected_hook_providers(args)
     results = []
     for provider in providers:
+        if provider == "herdr":
+            continue  # A Herdr plugin, configured by configure_herdr.
         log_path = uninstall_log_path(provider, args)
         if provider == "codex":
             results.append(uninstall_codex_hooks(log_path=log_path, dry_run=args.dry_run))
@@ -1413,7 +1429,7 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
         print(f"  log: {result.log_path}")
         if result.backup_path:
             print(f"  backup: {result.backup_path}")
-    return 0
+    return configure_herdr(args, optional=True) if "herdr" in providers else 0
 
 
 def cmd_hook_log(args: argparse.Namespace) -> int:

@@ -122,6 +122,11 @@ from .firmware_status import FirmwareStatus, FirmwareStatusReader, install_updat
 from .update import BuildInfo, GITHUB_MAIN_URL
 from .ipc import UICommandServer
 from .program_transport import daemon_command, write_daemon_program as write_led_program
+from .herdr import (
+    configure_plugin as configure_herdr_plugin,
+    detect_config as detect_herdr_config,
+    executable_path as herdr_executable_path,
+)
 from .install import (
     install_antigravity_hooks,
     install_claude_hooks,
@@ -434,6 +439,7 @@ SIDEPULSE_NOTCH_FEATURE_ENABLED = True
 STATUS_BAR_MAX_LINES_PER_SOURCE = 500
 SETTINGS_WINDOW_WIDTH = 680
 SETTINGS_WINDOW_HEIGHT = 560
+SETTINGS_AGENTS_WINDOW_HEIGHT = SETTINGS_WINDOW_HEIGHT + 26
 SETTINGS_ANIMATIONS_WINDOW_WIDTH = 720
 SETTINGS_ANIMATIONS_WINDOW_HEIGHT = 528
 SETTINGS_TAB_Y = 44
@@ -1170,6 +1176,20 @@ class StatusBarController(NSObject):
     @objc.IBAction
     def uninstallAntigravityHooks_(self, _sender):
         self.update_hooks("antigravity", install=False)
+    def installHerdrPlugin_(self, _sender):
+        self.update_herdr_plugin(uninstall=False)
+
+    @objc.IBAction
+    def uninstallHerdrPlugin_(self, _sender):
+        self.update_herdr_plugin(uninstall=True)
+
+    def update_herdr_plugin(self, *, uninstall: bool) -> None:
+        try:
+            message = configure_herdr_plugin(uninstall=uninstall)
+        except Exception as exc:
+            message = f"Herdr plugin setup failed: {exc}"
+        self.set_settings_message(message)
+        self.refresh_settings_window()
 
     @objc.IBAction
     def toggleCodexTranscripts_(self, sender):
@@ -1599,11 +1619,10 @@ class StatusBarController(NSObject):
         identifier = str(tab_item.identifier())
         if identifier == 'history' and self.settings_window is not None:
             self.refresh_history_chart()
-        height = (
-            SETTINGS_ANIMATIONS_WINDOW_HEIGHT
-            if identifier == "animations"
-            else SETTINGS_WINDOW_HEIGHT
-        )
+        height = {
+            "agents": SETTINGS_AGENTS_WINDOW_HEIGHT,
+            "animations": SETTINGS_ANIMATIONS_WINDOW_HEIGHT,
+        }.get(identifier, SETTINGS_WINDOW_HEIGHT)
         width = (
             SETTINGS_ANIMATIONS_WINDOW_WIDTH
             if identifier == "animations"
@@ -1715,6 +1734,10 @@ class StatusBarController(NSObject):
         self.set_setup_checkbox("launch", True, enabled=not launch_installed)
         self.set_setup_checkbox("eject_guard", True, enabled=not eject_installed)
         self.set_setup_checkbox("sleep_helper", True, enabled=not sleep_installed)
+        herdr_available = bool(herdr_executable_path())
+        herdr = detect_herdr_config()
+        set_field_value(self.setup_fields.get("herdr_status"), hook_status_text(herdr))
+        self.set_setup_checkbox("herdr", herdr_available, enabled=herdr_available and not herdr.hooks_enabled)
         eject_uninstall = self.setup_buttons.get("eject_guard_uninstall")
         if eject_uninstall is not None:
             eject_uninstall.setEnabled_(eject_installed)
@@ -1753,6 +1776,12 @@ class StatusBarController(NSObject):
                 opened_sleep_installer = True
             except Exception as exc:
                 errors.append(f"Sleep prevention installer failed: {exc}")
+
+        if checkbox_is_on(self.setup_buttons.get("herdr")) and not detect_herdr_config().hooks_enabled:
+            try:
+                messages.append(configure_herdr_plugin())
+            except Exception as exc:
+                errors.append(f"Herdr plugin setup failed: {exc}")
 
         if errors:
             set_field_value(self.setup_fields.get("message"), "  ".join(errors))
@@ -1851,6 +1880,10 @@ class StatusBarController(NSObject):
         set_field_value(
             self.settings_fields.get("antigravity_hook_status"),
             hook_status_text(antigravity),
+        )
+        set_field_value(
+            self.settings_fields.get("herdr_hook_status"),
+            hook_status_text(detect_herdr_config()),
         )
         set_field_value(
             self.settings_fields.get("settings_path"),
@@ -3853,7 +3886,7 @@ def update_brightness_label(slider, value: int | float | None) -> None:
 
 def build_setup_window(target: StatusBarController) -> NSWindow:
     width = 620
-    height = 330
+    height = 382
     style = (
         NSWindowStyleMaskTitled
         | NSWindowStyleMaskClosable
@@ -3870,48 +3903,52 @@ def build_setup_window(target: StatusBarController) -> NSWindow:
     window.center()
     content = window.contentView()
 
-    add_label(content, "SidePulse", 24, 282, 180, 28)
-    add_label(content, "Finish setup for this Mac.", 24, 254, 340, 22)
+    add_label(content, "SidePulse", 24, 334, 180, 28)
+    add_label(content, "Finish setup for this Mac.", 24, 306, 340, 22)
 
     launch = add_checkbox(
         content,
         "Run at Login",
         32,
-        206,
+        258,
         190,
         24,
         target,
         "",
     )
-    add_label(content, "Start the menu-bar app automatically.", 56, 184, 300, 20)
-    launch_status = add_label(content, "", 380, 206, 140, 22)
+    add_label(content, "Start the menu-bar app automatically.", 56, 236, 300, 20)
+    launch_status = add_label(content, "", 380, 258, 140, 22)
 
     eject_guard = add_checkbox(
         content,
         SD_EJECT_GUARD_DISPLAY_NAME,
         32,
-        146,
+        198,
         300,
         24,
         target,
         "",
     )
-    add_label(content, "Keep SidePulse Pro/SidePulse Dot available after sleep.", 56, 124, 390, 20)
-    eject_status = add_label(content, "", 398, 146, 88, 22)
-    eject_uninstall = add_button(content, "Uninstall", 498, 142, 92, 28, target, "uninstallSdEjectGuard:")
+    add_label(content, "Keep SidePulse Pro/SidePulse Dot available after sleep.", 56, 176, 390, 20)
+    eject_status = add_label(content, "", 398, 198, 88, 22)
+    eject_uninstall = add_button(content, "Uninstall", 498, 194, 92, 28, target, "uninstallSdEjectGuard:")
 
     sleep_helper = add_checkbox(
         content,
         "Closed-Lid Sleep Prevention",
         32,
-        86,
+        138,
         260,
         24,
         target,
         "",
     )
-    add_label(content, "Open a one-time administrator setup in Terminal.", 56, 64, 360, 20)
-    sleep_status = add_label(content, "", 398, 86, 190, 22)
+    add_label(content, "Open a one-time administrator setup in Terminal.", 56, 116, 360, 20)
+    sleep_status = add_label(content, "", 398, 138, 190, 22)
+
+    herdr = add_checkbox(content, "Herdr", 32, 82, 260, 24, target, "")
+    add_label(content, "Show Herdr agent activity in SidePulse.", 56, 60, 320, 20)
+    herdr_status = add_label(content, "", 398, 82, 190, 22)
 
     message = add_label(content, "", 24, 36, width - 48, 20)
 
@@ -3922,6 +3959,7 @@ def build_setup_window(target: StatusBarController) -> NSWindow:
         "launch_status": launch_status,
         "eject_status": eject_status,
         "sleep_status": sleep_status,
+        "herdr_status": herdr_status,
         "message": message,
     }
     target.setup_buttons = {
@@ -3929,6 +3967,7 @@ def build_setup_window(target: StatusBarController) -> NSWindow:
         "eject_guard": eject_guard,
         "eject_guard_uninstall": eject_uninstall,
         "sleep_helper": sleep_helper,
+        "herdr": herdr,
     }
     return window
 
@@ -4670,7 +4709,7 @@ def rect_parts(rect) -> tuple[float, float, float, float]:
 
 def build_settings_window(target: StatusBarController) -> NSWindow:
     width = SETTINGS_WINDOW_WIDTH
-    height = SETTINGS_WINDOW_HEIGHT
+    height = SETTINGS_AGENTS_WINDOW_HEIGHT
     style = (
         NSWindowStyleMaskTitled
         | NSWindowStyleMaskClosable
@@ -4734,7 +4773,7 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
     secondary_action_x = 500
     value_width = primary_action_x - value_x - 5
 
-    add_label(agents_tab, "Agent Hooks", section_x, 398, 200, 24)
+    add_label(agents_tab, "Agent Hooks", section_x, 422, 200, 24)
 
     def add_hook_row(
         title: str,
@@ -4767,25 +4806,28 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
         return status
 
     codex_status = add_hook_row(
-        "Codex", 372, "installCodexHooks:", "uninstallCodexHooks:"
+        "Codex", 396, "installCodexHooks:", "uninstallCodexHooks:"
     )
     claude_status = add_hook_row(
-        "Claude", 348, "installClaudeHooks:", "uninstallClaudeHooks:"
+        "Claude", 372, "installClaudeHooks:", "uninstallClaudeHooks:"
     )
     grok_status = add_hook_row(
-        "Grok", 324, "installGrokHooks:", "uninstallGrokHooks:"
+        "Grok", 348, "installGrokHooks:", "uninstallGrokHooks:"
     )
     cursor_status = add_hook_row(
-        "Cursor", 300, "installCursorHooks:", "uninstallCursorHooks:"
+        "Cursor", 324, "installCursorHooks:", "uninstallCursorHooks:"
     )
     junie_status = add_hook_row(
-        "Junie", 276, "installJunieHooks:", "uninstallJunieHooks:"
+        "Junie", 300, "installJunieHooks:", "uninstallJunieHooks:"
     )
     opencode_status = add_hook_row(
-        "OpenCode", 252, "installOpenCodeHooks:", "uninstallOpenCodeHooks:"
+        "OpenCode", 276, "installOpenCodeHooks:", "uninstallOpenCodeHooks:"
     )
     antigravity_status = add_hook_row(
-        "Antigravity", 228, "installAntigravityHooks:", "uninstallAntigravityHooks:"
+        "Antigravity", 252, "installAntigravityHooks:", "uninstallAntigravityHooks:"
+    )
+    herdr_status = add_hook_row(
+        "Herdr", 228, "installHerdrPlugin:", "uninstallHerdrPlugin:"
     )
 
     add_separator(agents_tab, section_x, 218, tab_width - 48)
@@ -5089,6 +5131,7 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
         "junie_hook_status": junie_status,
         "opencode_hook_status": opencode_status,
         "antigravity_hook_status": antigravity_status,
+        "herdr_hook_status": herdr_status,
         "debug_log_status": debug_log_status,
         "codex_session_opener": codex_opener,
         "claude_session_opener": claude_opener,
@@ -5890,6 +5933,12 @@ def program_for_lid_animation(
 
 
 def hook_status_text(config: ProviderConfig) -> str:
+    if config.provider == "herdr":
+        if config.hooks_enabled:
+            return "Plugin installed"
+        if config.exists:
+            return "Plugin disabled"
+        return "Plugin not installed" if herdr_executable_path() else "Herdr not found"
     if not config.exists:
         return "Not installed — config created on install"
     if config.hook_events:
