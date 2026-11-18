@@ -1129,8 +1129,6 @@ class WindowBuildTests(StatusBarTestCase):
         program.setString_("off 2s\ncopy me")
         program.setSelectedRange_((0, 6))
         window.makeFirstResponder_(program)
-        pasteboard = NSPasteboard.generalPasteboard()
-        pasteboard.clearContents()
         event = NSEvent.keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode_(
             NSEventTypeKeyDown,
             (0, 0),
@@ -1144,11 +1142,26 @@ class WindowBuildTests(StatusBarTestCase):
             8,
         )
 
-        self.assertTrue(program.performKeyEquivalent_(event))
-        self.assertEqual(
-            pasteboard.stringForType_(NSPasteboardTypeString),
-            "off 2s",
-        )
+        # Swap copy: so Cmd-C never touches the user's real clipboard.
+        with patch.object(program, "copy_") as copy:
+            self.assertTrue(program.performKeyEquivalent_(event))
+        copy.assert_called_once_with(None)
+
+        # Check what copy: would write using a private pasteboard. The text
+        # view advertises the legacy string type, so write its own types.
+        pasteboard = NSPasteboard.pasteboardWithUniqueName()
+        try:
+            self.assertTrue(
+                program.writeSelectionToPasteboard_types_(
+                    pasteboard, program.writablePasteboardTypes()
+                )
+            )
+            self.assertEqual(
+                pasteboard.stringForType_(NSPasteboardTypeString),
+                "off 2s",
+            )
+        finally:
+            pasteboard.releaseGlobally()
 
     def test_custom_agent_animation_editor_preview_updates_and_reports_errors(self):
         sb.build_agent_animation_editor_window(self.controller)
