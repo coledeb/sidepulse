@@ -8098,6 +8098,49 @@ class AgentMonitorTests(unittest.TestCase):
             self.assertEqual(snapshot.statuses[0].event_name, "PostToolUse")
             self.assertEqual(snapshot.statuses[0].mode, AgentMode.WORKING)
 
+    def test_a_still_running_approved_command_does_not_pin_later_requests(self) -> None:
+        """An approved long command reports its result only when it ends.
+
+        Codex in auto-review mode approved a test run that kept running; its
+        signature stayed pending, so each later request's own tool result was
+        ignored and the row sat on Ask for the rest of the turn.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "codex.jsonl"
+            now = datetime.now(timezone.utc)
+
+            def event(offset: int, hook_event_name: str, command: str) -> dict:
+                return {
+                    "logged_at": (now + timedelta(seconds=offset)).isoformat(),
+                    "event": {
+                        "hook_event_name": hook_event_name,
+                        "session_id": "codex-long-approved-command",
+                        "cwd": "/tmp/project",
+                        "tool_name": "Bash",
+                        "tool_input": {"command": command},
+                    },
+                }
+
+            tests = "python3 Tools/build-local.py --test"
+            probe = "ps -axo pid,command"
+            events = [
+                event(0, "PreToolUse", tests),
+                event(1, "PermissionRequest", tests),
+                event(10, "PreToolUse", probe),
+                event(11, "PermissionRequest", probe),
+                event(13, "PostToolUse", probe),
+            ]
+            log.write_text("\n".join(json.dumps(e) for e in events) + "\n")
+
+            snapshot = AgentMonitor(
+                sources=(SourceSpec("codex", log),),
+                stale_after_seconds=3600,
+            ).snapshot()
+
+            self.assertEqual(len(snapshot.statuses), 1)
+            self.assertEqual(snapshot.statuses[0].event_name, "PostToolUse")
+            self.assertEqual(snapshot.statuses[0].mode, AgentMode.WORKING)
+
 
     def test_live_subagent_stop_clears_only_its_pending_permissions(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

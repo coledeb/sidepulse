@@ -9,7 +9,7 @@ import time
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path, PureWindowsPath
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Collection, Iterable
 
 from .claude_session_state import confirmed_idle_at
 from .models import (
@@ -246,7 +246,7 @@ class AgentMonitor:
         statuses_by_key: dict[str, AgentStatus] = {}
         metadata_by_session: dict[str, StatusMetadata] = {}
         metadata_by_status: dict[str, StatusMetadata] = {}
-        pending_permissions_by_key: dict[str, set[str]] = {}
+        pending_permissions_by_key: dict[str, dict[str, None]] = {}
         sessions_by_t3_thread: dict[str, str] = {}
 
         records = sorted(
@@ -283,7 +283,7 @@ class AgentMonitor:
                 if should_ignore_status_transition(
                     previous,
                     status,
-                    pending_permissions_by_key.get(status.agent_id, set()),
+                    pending_permissions_by_key.get(status.agent_id, {}),
                     record=record,
                 ):
                     continue
@@ -503,7 +503,7 @@ class LiveAgentMonitor:
         self.statuses_by_key: dict[str, AgentStatus] = {}
         self.metadata_by_session: dict[str, StatusMetadata] = {}
         self.metadata_by_status: dict[str, StatusMetadata] = {}
-        self.pending_permissions_by_key: dict[str, set[str]] = {}
+        self.pending_permissions_by_key: dict[str, dict[str, None]] = {}
         self.sessions_by_t3_thread: dict[str, str] = {}
         # T3 subagents on this Mac are the parent's work, not rows of their own.
         self.t3_delegates = T3DelegateLookup()
@@ -554,7 +554,7 @@ class LiveAgentMonitor:
             if should_ignore_status_transition(
                 previous,
                 status,
-                self.pending_permissions_by_key.get(status.agent_id, set()),
+                self.pending_permissions_by_key.get(status.agent_id, {}),
                 record=record,
             ):
                 return
@@ -2146,17 +2146,29 @@ def status_counts_active(status: AgentStatus) -> bool:
 
 def track_pending_permissions(
     record: HookEvent,
-    pending_permissions_by_key: dict[str, set[str]],
+    pending_permissions_by_key: dict[str, dict[str, None]],
 ) -> None:
+    """Track a session's unanswered permission requests, oldest first.
+
+    A request's own tool result answers it. Answering the newest request also
+    drops older ones: the agent could only ask again once those let it go on,
+    and an approved long-running command (a Codex test run, say) reports its
+    result only when it ends, which must not hold every later request's row.
+    """
     signature = permission_signature(record)
     if record.event_name == "PermissionRequest" and signature:
-        pending_permissions_by_key.setdefault(record.status_key, set()).add(signature)
+        pending = pending_permissions_by_key.setdefault(record.status_key, {})
+        pending.pop(signature, None)
+        pending[signature] = None
         return
 
     if record.event_name in {"PostToolUse", "PostToolUseFailure", "PermissionDenied"} and signature:
         pending = pending_permissions_by_key.get(record.status_key)
-        if pending is not None:
-            pending.discard(signature)
+        if pending is not None and signature in pending:
+            if signature == next(reversed(pending)):
+                pending.clear()
+            else:
+                pending.pop(signature)
             if not pending:
                 pending_permissions_by_key.pop(record.status_key, None)
         return
@@ -2190,7 +2202,7 @@ def has_running_background_task(raw: dict[str, Any]) -> bool:
 def should_ignore_status_transition(
     previous: AgentStatus | None,
     current: AgentStatus,
-    pending_permission_signatures: set[str],
+    pending_permission_signatures: Collection[str],
     *,
     record: HookEvent | None = None,
 ) -> bool:
