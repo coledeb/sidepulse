@@ -1,3 +1,4 @@
+include src/sidepulse/resources/SidePulse.icns
 include LEDS_FORMAT.md
 include LICENSE
 include README.md
