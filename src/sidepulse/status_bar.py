@@ -8,10 +8,10 @@ import shlex
 import signal
 import socket
 import subprocess
-import sys
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -158,6 +158,7 @@ from .lid_sleep import (
     sleep_helper_install_command,
     sleep_helper_installed,
 )
+from .antigravity_opener import run_antigravity_helper
 from .agent_terminal import AgentTerminal, claude_session_terminal, junie_session_terminal
 from .junie_index import junie_session_info
 from .models import AgentMode, AgentStatus, MODE_LABELS, provider_label
@@ -583,6 +584,7 @@ class StatusBarController(NSObject):
             return None
 
         self.settings = load_settings()
+        self.antigravity_open_queue = ThreadPoolExecutor(max_workers=1, thread_name_prefix="chat-opener")
         self.app_build = BuildInfo.current()
         self.open_settings_on_launch = False
         self.monitor = self.build_monitor()
@@ -975,6 +977,14 @@ class StatusBarController(NSObject):
             except Exception:
                 height = 0
         menu.popUpMenuPositioningItem_atLocation_inView_(None, (0, height), sender)
+
+    @objc.IBAction
+    def reviewAntigravityAccess_(self, sender):
+        status = sender.representedObject()
+        if not isinstance(status, AgentStatus):
+            return
+        if confirm_antigravity_access():
+            self.antigravity_open_queue.submit(self.open_antigravity_conversation, status.session_id, True)
 
     @objc.IBAction
     def openSessionWithAction_(self, sender):
@@ -2539,9 +2549,7 @@ class StatusBarController(NSObject):
                     save_settings(self.settings)
                 except OSError as exc:
                     log_status_bar(f"Could not remember the Antigravity permission choice: {exc}")
-            threading.Thread(
-                target=self.open_antigravity_conversation, args=(value, request_access), daemon=True,
-            ).start()
+            self.antigravity_open_queue.submit(self.open_antigravity_conversation, value, request_access)
         elif kind == "ide":
             if value.app_path:
                 subprocess.Popen(["open", "-a", value.app_path, value.project_path])
@@ -3925,15 +3933,6 @@ def build_setup_window(target: StatusBarController) -> NSWindow:
     return window
 
 
-def run_antigravity_helper(action: str, *args: str) -> str:
-    script = Path(__file__).with_name("resources") / "open_antigravity.js"
-    result = subprocess.run(
-        ["/usr/bin/osascript", "-l", "JavaScript", str(script), action, *args],
-        check=True, capture_output=True, text=True, timeout=2 if action == "check" else 12,
-    )
-    return result.stdout.strip()
-
-
 def antigravity_access_missing() -> bool:
     try:
         return run_antigravity_helper("check") == "missing"
@@ -3943,14 +3942,11 @@ def antigravity_access_missing() -> bool:
 
 
 def confirm_antigravity_access() -> bool:
-    launcher = Path(sys.executable).resolve().name
     alert = NSAlert.alloc().init()
     alert.setMessageText_("Open the selected chat in Antigravity?")
     alert.setInformativeText_(
         "SidePulse can use Accessibility access to click the matching chat in Antigravity’s sidebar. "
-        f"macOS may list the SidePulse launcher as “{launcher}”. Other scripts using that "
-        "Python installation would also be able to control apps. After granting access, "
-        "click the session again.\n\n"
+        "In macOS settings, enable SidePulse Chat Opener, then click the session again.\n\n"
         "Choose Open App Only to bring Antigravity forward. You can then press ⌘K to choose a chat. "
         "You can change access later in System Settings → Privacy & Security → Accessibility."
     )
@@ -6138,6 +6134,13 @@ def build_session_options_menu(
             target,
             selected=action == selected,
         )
+    if status.provider == "antigravity" and status.origin == "Antigravity App" and status.session_id:
+        item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Review Chat Access…", "reviewAntigravityAccess:", "",
+        )
+        item.setRepresentedObject_(status)
+        item.setTarget_(target)
+        menu.addItem_(item)
     if status.session_link:
         item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Copy mobile session link", "copySessionLink:", "")
         item.setTarget_(target)
