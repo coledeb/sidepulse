@@ -1090,7 +1090,11 @@ def cmd_sidepulse_setup(args: argparse.Namespace) -> int:
     if getattr(args, "uninstall", False):
         return cmd_uninstall(args)
     if not args.no_agent_monitor:
-        results = install_hook_results(args)
+        try:
+            results = install_hook_results(args)
+        except ValueError as exc:
+            print(f"sidepulse: {exc}", file=sys.stderr)
+            return 1
         print_install_results(results, dry_run=args.dry_run)
 
     from .service_launch import install_service
