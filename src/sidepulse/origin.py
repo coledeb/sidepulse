@@ -141,6 +141,10 @@ def origin_from_environment(provider: str, env: Mapping[str, str]) -> AgentOrigi
     if is_t3code_bundle_id(env.get("__CFBundleIdentifier")):
         return surface_origin(provider, T3CODE_SURFACE, "env:__CFBundleIdentifier")
 
+    # Devin Desktop is a Windsurf build: same bundle id, and VS Code's variables.
+    if provider == "devin" and is_windsurf_bundle_id(env.get("__CFBundleIdentifier")):
+        return surface_origin(provider, "app", "env:__CFBundleIdentifier")
+
     term_program = str(env.get("TERM_PROGRAM") or "").strip().lower()
     if term_program == "vscode" or any(key.startswith("VSCODE_") for key in env):
         return surface_origin(provider, "vscode", "env:VSCODE")
@@ -168,6 +172,9 @@ def origin_from_processes(
     # "T3 Code.app" and "T3 Code (Nightly).app" both run as ".../T3 Code...app/".
     if re.search(r"/t3 code[^/]*\.app/", haystack):
         return surface_origin(provider, T3CODE_SURFACE, "process:T3 Code")
+
+    if provider == "devin" and "/devin.app/" in haystack:
+        return surface_origin(provider, "app", "process:Devin.app")
 
     if any(token in haystack for token in ("visual studio code.app", "code helper", "vscode")):
         return surface_origin(provider, "vscode", "process:Visual Studio Code")
@@ -216,6 +223,8 @@ def origin_from_processes(
             return surface_origin(provider, "cli", "process:junie")
         if provider == "antigravity" and basename == "agy":
             return surface_origin(provider, "cli", "process:agy")
+        if provider == "devin" and basename == "devin":
+            return surface_origin(provider, "cli", "process:devin")
 
     return None
 
@@ -246,6 +255,8 @@ def surface_origin(provider: str, surface: str, source: str) -> AgentOrigin:
         ("opencode", "app"): "OpenCode Desktop",
         ("antigravity", "app"): "Antigravity App",
         ("antigravity", "cli"): "Antigravity CLI",
+        ("devin", "app"): "Devin Desktop",
+        ("devin", "cli"): "Devin CLI",
     }
     if surface == T3CODE_SURFACE:
         label = f"{provider_label(provider)} in T3 Code"
@@ -419,6 +430,14 @@ def annotate_payload_with_origin(
             result[AGENT_PID_KEY] = agent.pid
             result[AGENT_PID_STARTED_KEY] = agent.started
     return result
+
+
+# Devin Desktop keeps the bundle id of the Windsurf build it is made from.
+WINDSURF_BUNDLE_ID = "com.exafunction.windsurf"
+
+
+def is_windsurf_bundle_id(value: object) -> bool:
+    return isinstance(value, str) and value.strip().lower() == WINDSURF_BUNDLE_ID
 
 
 def is_t3code_bundle_id(value: object) -> bool:

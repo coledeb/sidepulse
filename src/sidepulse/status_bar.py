@@ -132,6 +132,7 @@ from .install import (
     install_claude_hooks,
     install_codex_hooks,
     install_cursor_hooks,
+    install_devin_hooks,
     install_grok_hooks,
     install_junie_hooks,
     install_opencode_hooks,
@@ -139,6 +140,7 @@ from .install import (
     uninstall_claude_hooks,
     uninstall_codex_hooks,
     uninstall_cursor_hooks,
+    uninstall_devin_hooks,
     uninstall_grok_hooks,
     uninstall_junie_hooks,
     uninstall_opencode_hooks,
@@ -173,6 +175,7 @@ from .providers import (
     detect_claude_config,
     detect_codex_config,
     detect_cursor_config,
+    detect_devin_config,
     detect_grok_config,
     detect_junie_config,
     detect_opencode_config,
@@ -439,7 +442,7 @@ SIDEPULSE_NOTCH_FEATURE_ENABLED = True
 STATUS_BAR_MAX_LINES_PER_SOURCE = 500
 SETTINGS_WINDOW_WIDTH = 680
 SETTINGS_WINDOW_HEIGHT = 560
-SETTINGS_AGENTS_WINDOW_HEIGHT = SETTINGS_WINDOW_HEIGHT + 26
+SETTINGS_AGENTS_WINDOW_HEIGHT = SETTINGS_WINDOW_HEIGHT + 50
 SETTINGS_ANIMATIONS_WINDOW_WIDTH = 720
 SETTINGS_ANIMATIONS_WINDOW_HEIGHT = 528
 SETTINGS_TAB_Y = 44
@@ -1176,6 +1179,16 @@ class StatusBarController(NSObject):
     @objc.IBAction
     def uninstallAntigravityHooks_(self, _sender):
         self.update_hooks("antigravity", install=False)
+
+    @objc.IBAction
+    def installDevinHooks_(self, _sender):
+        self.update_hooks("devin", install=True)
+
+    @objc.IBAction
+    def uninstallDevinHooks_(self, _sender):
+        self.update_hooks("devin", install=False)
+
+    @objc.IBAction
     def installHerdrPlugin_(self, _sender):
         self.update_herdr_plugin(uninstall=False)
 
@@ -1853,6 +1866,7 @@ class StatusBarController(NSObject):
         junie = detect_junie_config()
         opencode = detect_opencode_config()
         antigravity = detect_antigravity_config()
+        devin = detect_devin_config()
         set_field_value(
             self.settings_fields.get("codex_hook_status"),
             hook_status_text(codex),
@@ -1880,6 +1894,10 @@ class StatusBarController(NSObject):
         set_field_value(
             self.settings_fields.get("antigravity_hook_status"),
             hook_status_text(antigravity),
+        )
+        set_field_value(
+            self.settings_fields.get("devin_hook_status"),
+            hook_status_text(devin),
         )
         set_field_value(
             self.settings_fields.get("herdr_hook_status"),
@@ -2122,6 +2140,10 @@ class StatusBarController(NSObject):
                 result = install_antigravity_hooks()
             elif provider == "antigravity":
                 result = uninstall_antigravity_hooks()
+            elif provider == "devin" and install:
+                result = install_devin_hooks()
+            elif provider == "devin":
+                result = uninstall_devin_hooks()
             else:
                 raise ValueError(f"Unsupported hook provider: {provider}")
         except Exception as exc:
@@ -4773,7 +4795,7 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
     secondary_action_x = 500
     value_width = primary_action_x - value_x - 5
 
-    add_label(agents_tab, "Agent Hooks", section_x, 422, 200, 24)
+    add_label(agents_tab, "Agent Hooks", section_x, 446, 200, 24)
 
     def add_hook_row(
         title: str,
@@ -4806,25 +4828,28 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
         return status
 
     codex_status = add_hook_row(
-        "Codex", 396, "installCodexHooks:", "uninstallCodexHooks:"
+        "Codex", 420, "installCodexHooks:", "uninstallCodexHooks:"
     )
     claude_status = add_hook_row(
-        "Claude", 372, "installClaudeHooks:", "uninstallClaudeHooks:"
+        "Claude", 396, "installClaudeHooks:", "uninstallClaudeHooks:"
     )
     grok_status = add_hook_row(
-        "Grok", 348, "installGrokHooks:", "uninstallGrokHooks:"
+        "Grok", 372, "installGrokHooks:", "uninstallGrokHooks:"
     )
     cursor_status = add_hook_row(
-        "Cursor", 324, "installCursorHooks:", "uninstallCursorHooks:"
+        "Cursor", 348, "installCursorHooks:", "uninstallCursorHooks:"
     )
     junie_status = add_hook_row(
-        "Junie", 300, "installJunieHooks:", "uninstallJunieHooks:"
+        "Junie", 324, "installJunieHooks:", "uninstallJunieHooks:"
     )
     opencode_status = add_hook_row(
-        "OpenCode", 276, "installOpenCodeHooks:", "uninstallOpenCodeHooks:"
+        "OpenCode", 300, "installOpenCodeHooks:", "uninstallOpenCodeHooks:"
     )
     antigravity_status = add_hook_row(
-        "Antigravity", 252, "installAntigravityHooks:", "uninstallAntigravityHooks:"
+        "Antigravity", 276, "installAntigravityHooks:", "uninstallAntigravityHooks:"
+    )
+    devin_status = add_hook_row(
+        "Devin", 252, "installDevinHooks:", "uninstallDevinHooks:"
     )
     herdr_status = add_hook_row(
         "Herdr", 228, "installHerdrPlugin:", "uninstallHerdrPlugin:"
@@ -5131,6 +5156,7 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
         "junie_hook_status": junie_status,
         "opencode_hook_status": opencode_status,
         "antigravity_hook_status": antigravity_status,
+        "devin_hook_status": devin_status,
         "herdr_hook_status": herdr_status,
         "debug_log_status": debug_log_status,
         "codex_session_opener": codex_opener,
@@ -6533,7 +6559,7 @@ _symbol_icon_cache = {}
 # its desktop app is installed. Single-color marks are templates, filled with
 # the menu's text color like an SF Symbol; a fainter part keeps its opacity.
 PROVIDER_MARKS_DIR = Path(__file__).parent / "resources" / "provider_icons"
-MONOCHROME_PROVIDER_MARKS = frozenset({"codex", "cursor", "grok", "opencode"})
+MONOCHROME_PROVIDER_MARKS = frozenset({"codex", "cursor", "grok", "opencode", "devin"})
 PROVIDER_MARK_CANVAS = 32.0
 PROVIDER_MARK_INSET = 3.5  # matches the margin around a macOS app icon's artwork
 
@@ -6587,6 +6613,7 @@ _BUILTIN_PROVIDER_BADGES = {
     "cursor": ("CU", (0.23, 0.27, 0.34)),
     "junie": ("J", (0.36, 0.24, 0.70)),
     "opencode": ("OC", (0.18, 0.36, 0.58)),
+    "devin": ("DV", (0.20, 0.42, 0.40)),
 }
 
 

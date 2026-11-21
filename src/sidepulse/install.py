@@ -30,11 +30,13 @@ from .providers import (
     CLAUDE_EVENTS,
     CODEX_EVENTS,
     CURSOR_EVENTS,
+    DEVIN_EVENTS,
     GROK_EVENTS,
     JUNIE_EVENTS,
     JUNIE_MONITOR_EVENTS,
     antigravity_hook_config_paths,
     default_cursor_hook_config_path,
+    default_devin_config_path,
     default_grok_hook_config_path,
     default_junie_hook_config_path,
     default_opencode_plugin_path,
@@ -159,6 +161,90 @@ def install_claude_hooks(
         target_log.touch(exist_ok=True)
 
     return InstallResult("claude", config, target_log, changed, backup, dry_run)
+
+
+# Devin waits on each hook before it continues the turn.
+DEVIN_HOOK_TIMEOUT_SECONDS = 10
+
+
+def install_devin_hooks(
+    log_path: Path | None = None,
+    config_path: Path | None = None,
+    dry_run: bool = False,
+    python_executable: str | None = None,
+) -> InstallResult:
+    """Add SidePulse's hooks to the ``hooks`` key of Devin's user config.
+
+    Devin also runs Claude Code's hooks, so without these a Devin session is
+    still reported (see hook.is_devin_claude_compat_payload). Once these are
+    installed, the Claude copy of each event is dropped.
+    """
+    config = config_path or default_devin_config_path()
+    target_log = (log_path or detect_log_path("devin")).expanduser()
+    data = read_json_config(config)
+    original = json.dumps(data, sort_keys=True)
+    hooks = data.get("hooks")
+    if not isinstance(hooks, dict):
+        hooks = {}
+        data["hooks"] = hooks
+    command = hook_command("devin", target_log, python_executable)
+
+    for event_name in DEVIN_EVENTS:
+        entries = hooks.get(event_name, [])
+        if not isinstance(entries, list):
+            entries = []
+        cleaned = remove_json_command_hooks_for_log(entries, target_log)
+        # Devin's matcher is a regex; an empty one matches every tool.
+        cleaned.append(
+            {
+                "matcher": "",
+                "hooks": [
+                    {"type": "command", "command": command, "timeout": DEVIN_HOOK_TIMEOUT_SECONDS}
+                ],
+            }
+        )
+        hooks[event_name] = cleaned
+
+    changed = json.dumps(data, sort_keys=True) != original
+    backup = None
+    if changed and not dry_run:
+        config.parent.mkdir(parents=True, exist_ok=True)
+        backup = backup_file(config) if config.exists() else None
+        config.write_text(json.dumps(data, indent=2, sort_keys=False) + "\n")
+        target_log.parent.mkdir(parents=True, exist_ok=True)
+        target_log.touch(exist_ok=True)
+    return InstallResult("devin", config, target_log, changed, backup, dry_run)
+
+
+def uninstall_devin_hooks(
+    log_path: Path | None = None,
+    config_path: Path | None = None,
+    dry_run: bool = False,
+) -> InstallResult:
+    config = config_path or default_devin_config_path()
+    target_log = (log_path or detect_log_path("devin")).expanduser()
+    data = read_json_config(config) if config.exists() else {}
+    original = json.dumps(data, sort_keys=True)
+    hooks = data.get("hooks")
+    if isinstance(hooks, dict):
+        for event_name in list(hooks):
+            entries = hooks.get(event_name)
+            if event_name not in DEVIN_EVENTS or not isinstance(entries, list):
+                continue
+            cleaned = remove_json_command_hooks_for_log(entries, target_log)
+            if cleaned:
+                hooks[event_name] = cleaned
+            else:
+                hooks.pop(event_name, None)
+        if not hooks:
+            data.pop("hooks", None)
+
+    changed = json.dumps(data, sort_keys=True) != original
+    backup = None
+    if changed and not dry_run:
+        backup = backup_file(config)
+        config.write_text(json.dumps(data, indent=2, sort_keys=False) + "\n")
+    return InstallResult("devin", config, target_log, changed, backup, dry_run)
 
 
 def install_grok_hooks(

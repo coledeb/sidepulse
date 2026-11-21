@@ -4751,6 +4751,13 @@ class AgentMonitorTests(unittest.TestCase):
             changed=True,
             backup_path=None,
         )
+        devin_result = SimpleNamespace(
+            provider="devin",
+            config_path=Path("/tmp/devin/config.json"),
+            log_path=Path("/tmp/devin.jsonl"),
+            changed=True,
+            backup_path=None,
+        )
         launch_result = SimpleNamespace(
             plist_path=Path("/tmp/io.sidepulse.agentstatus.plist"),
             changed=True,
@@ -4795,6 +4802,7 @@ class AgentMonitorTests(unittest.TestCase):
                 "install_antigravity_hooks",
                 return_value=antigravity_result,
             ) as antigravity,
+            patch.object(cli_module, "install_devin_hooks", return_value=devin_result) as devin,
             patch(
                 "sidepulse.sd_eject_guard_launch.install_sd_eject_guard",
                 return_value=guard_result,
@@ -4814,6 +4822,7 @@ class AgentMonitorTests(unittest.TestCase):
         junie.assert_called_once()
         opencode.assert_called_once()
         antigravity.assert_called_once()
+        devin.assert_called_once()
         herdr.assert_called_once_with(uninstall=False, dry_run=False)
         guard.assert_called_once_with(scope="auto", dry_run=False)
         launch.assert_called_once_with(start=True)

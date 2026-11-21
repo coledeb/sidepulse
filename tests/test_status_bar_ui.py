@@ -813,6 +813,7 @@ class WindowBuildTests(StatusBarTestCase):
             "grok_hook_status",
             "cursor_hook_status",
             "junie_hook_status",
+            "devin_hook_status",
             "codex_session_opener",
             "claude_session_opener",
             "grok_session_opener",

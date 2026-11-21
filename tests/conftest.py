@@ -70,6 +70,22 @@ def no_real_startup_writes(request, monkeypatch):
     monkeypatch.setattr(service, "write_startup_program", refuse)
 
 
+@pytest.fixture(autouse=True)
+def isolated_devin_config(tmp_path, monkeypatch):
+    """Never touch the developer's ~/.config/devin/config.json.
+
+    Its path comes from Path.home(), which the state-dir isolation above does
+    not cover, so a test running setup for every agent would write it.
+    """
+    from sidepulse import install, providers
+
+    def isolated(home=None):
+        return (home / ".config" / "devin" / "config.json") if home else tmp_path / "devin" / "config.json"
+
+    monkeypatch.setattr(providers, "default_devin_config_path", isolated)
+    monkeypatch.setattr(install, "default_devin_config_path", isolated)
+
+
 def pytest_configure(config):
     config.addinivalue_line("markers", "startup_io: may read/write INIT.LED in a temp dir")
 
