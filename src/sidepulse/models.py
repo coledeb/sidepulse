@@ -89,6 +89,8 @@ class AgentStatus:
     project: str | None = None
     seq: int | None = None
     session_link: str | None = None
+    # T3 Code's deep link to the row's thread (t3code://threads/<env>/<thread>).
+    t3_link: str | None = None
 
     @property
     def priority(self) -> int:
@@ -127,6 +129,7 @@ class AgentStatus:
             "project": self.project,
             **({"seq": self.seq} if self.seq is not None else {}),
             **({"session_link": self.session_link} if self.session_link else {}),
+            **({"t3_link": self.t3_link} if self.t3_link else {}),
         }
 
 

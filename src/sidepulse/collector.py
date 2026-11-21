@@ -34,6 +34,8 @@ from .origin import (
     PROCESS_GONE,
     origin_label_from_payload,
     process_state,
+    t3_link_for_payload,
+    valid_t3_link,
     surface_origin,
 )
 from .ipc import ensure_private_dir
@@ -1702,6 +1704,7 @@ def status_from_event(
     else:
         display_name = provider_label(record.provider)
 
+    origin = record.origin or metadata.origin or origin_label_from_payload(record.provider, record.raw)
     return AgentStatus(
         provider=record.provider,
         agent_id=record.status_key,
@@ -1713,8 +1716,10 @@ def status_from_event(
         cwd=metadata.cwd or record.cwd,
         tool_name=record.tool_name,
         message=record.message,
-        origin=record.origin or metadata.origin or origin_label_from_payload(record.provider, record.raw),
+        origin=origin,
         project=metadata.project,
+        # Later hooks of a thread may not name it (a bare Stop), so keep its link.
+        t3_link=t3_link_for_payload(record.raw, origin) or (previous.t3_link if previous else None),
     )
 
 
@@ -2121,6 +2126,7 @@ def agent_status_from_dict(data: object) -> AgentStatus | None:
             origin=_string_or_none(data.get("origin")),
             stale=bool(data.get("stale", False)),
             project=project,
+            t3_link=valid_t3_link(data.get("t3_link")),
         )
     except Exception:
         return None
