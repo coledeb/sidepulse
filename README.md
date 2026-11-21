@@ -998,6 +998,17 @@ Antigravity has no hook for approval prompts, so a tool waiting for approval
 shows as Tool Running. A turn that ends on a question shows as Waiting for
 Input; SidePulse reads the reply from the session transcript.
 
+On macOS, clicking an Antigravity App session opens Antigravity and uses **⌘K**,
+the chat title, and **Return** to select the conversation. SidePulse checks the
+opened chat ID. If multiple chats share the title, it leaves search open. If the
+launcher needs Accessibility access, SidePulse offers a one-time choice.
+**Review Permission…** opens Accessibility settings and shows **SidePulse Chat
+Opener** in Finder. Enable it in Settings, or drag it into the list if it is
+missing. After granting access, click the session again. **Open App Only**
+remembers your choice and brings the app forward on each click. Choose **Review
+Chat Access…** in a desktop session's options to revisit the choice. CLI sessions
+resume in Terminal.
+
 Settings can export the hook decision log as CSV or HTML. This log lives at
 `${XDG_STATE_HOME:-~/.local/state}/sidepulse/agent-monitor/event-status.jsonl`
 and shows the path from provider hook event to interpreted SidePulse status.
