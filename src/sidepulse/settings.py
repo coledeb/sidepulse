@@ -358,6 +358,8 @@ def builtin_agent_animation_profiles() -> dict[str, AgentAnimationProfile]:
         AgentMode.UNKNOWN.value: AGENT_ANIMATION_NEON_IDLE,
         ANIMATION_STATE_LID_OPEN: AGENT_ANIMATION_NEON_LID_OPEN,
         ANIMATION_STATE_LID_CLOSED: AGENT_ANIMATION_LID_CLOSED,
+        ANIMATION_STATE_SETTLED: AGENT_ANIMATION_SETTLED,
+        ANIMATION_STATE_STARTUP: AGENT_ANIMATION_STARTUP_FILL,
     }
     return {
         AGENT_ANIMATION_PROFILE_CYAN: AgentAnimationProfile("Cyan", cyan),

@@ -6,6 +6,8 @@
     "lid_closed": "lid-closed",
     "lid_open": "neon-lid-open",
     "long_task_progress": "neon-roll",
+    "settled": "settled",
+    "startup": "startup-fill",
     "tool_running": "neon-roll",
     "unknown": "neon-idle",
     "waiting_for_input": "neon-attention",
