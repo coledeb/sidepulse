@@ -527,7 +527,8 @@ The hook adapter, CLI decoder, or terminal wrapper translates input into JSON; t
 ### Herdr
 
 The bundled plugin supports macOS and Linux with Herdr 0.9.3 or newer.
-With the SidePulse service running, install the plugin from your shell.
+Install it from Settings → Agents, or with the SidePulse service running,
+install it from your shell.
 
 ```sh
 sidepulse setup herdr
@@ -538,6 +539,11 @@ server if it is running. The plugin also syncs on Herdr startup and agent state
 changes. Launch agents normally from their Herdr panes. Herdr, SidePulse
 agent hooks, and `sidepulse wrap` share one SidePulse session per pane. Direct
 agent hooks take precedence when both report the same agent.
+
+SidePulse also reads agent status from enabled saved machines in Herdr's
+sidebar. Their rows name the machine in the tag, as in `[(Mac Mini) Project]`.
+If a machine becomes unreachable, its last known sessions show **Disconnected**
+until it reconnects. Use Herdr to open those sessions.
 
 Use `herdr plugin log list --plugin sidepulse.status` to check plugin errors.
 Use `sidepulse setup herdr --uninstall` to remove it.
