@@ -123,7 +123,9 @@ ANTIGRAVITY_EVENTS = (
 # The named hook SidePulse owns in Antigravity's hooks.json.
 ANTIGRAVITY_HOOK_NAME = "sidepulse"
 
-HOOK_PROVIDERS = ("codex", "claude", "grok", "cursor", "junie", "opencode", "antigravity")
+# Agents whose hooks log through `sidepulse hook-log`.
+LOG_HOOK_PROVIDERS = ("codex", "claude", "grok", "cursor", "junie", "opencode", "antigravity")
+HOOK_PROVIDERS = (*LOG_HOOK_PROVIDERS, "herdr")
 KNOWN_EVENTS = tuple(
     dict.fromkeys(
         CODEX_EVENTS + CLAUDE_EVENTS + GROK_EVENTS + JUNIE_EVENTS + OPENCODE_EVENTS
@@ -182,6 +184,8 @@ def default_log_path(provider: str, home: Path | None = None) -> Path:
 
 
 def detect_provider_configs(home: Path | None = None) -> list[ProviderConfig]:
+    from .herdr import detect_config as detect_herdr_config
+
     return [
         detect_codex_config(home),
         detect_claude_config(home),
@@ -190,6 +194,7 @@ def detect_provider_configs(home: Path | None = None) -> list[ProviderConfig]:
         detect_junie_config(home),
         detect_opencode_config(home),
         detect_antigravity_config(home),
+        detect_herdr_config(home),
     ]
 
 

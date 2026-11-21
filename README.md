@@ -26,7 +26,7 @@ Firmware downloads and release notes are available in
 >
 > This fork of [SidePulse](https://github.com/inteliwear/sidepulse) widens agent monitoring for my personal setup, where most agents run inside [T3 Code](https://github.com/pingdotgg/t3code), alongside LED, menu bar and power refinements.
 >
-> - **T3 Code awareness.** Claude, Codex, Cursor, OpenCode and Antigravity sessions hosted by T3 Code show T3 as their host, with the agent icon beside it. `sidepulse t3 connect` (or **Connect T3 Code...** in the menu) signs in read-only, so threads running on T3's linked environments (other machines) are followed too. Settling a thread in T3 clears its question wait or Done row and plays a one-shot Settled animation, and the setting holds across a restart. T3's delegate subagents, title helper sessions and Codex's background memory jobs are hidden.
+> - **T3 Code awareness.** Claude, Codex, Cursor, OpenCode and Antigravity sessions hosted by T3 Code show T3 as their host, with the agent icon beside it. `sidepulse t3 connect` (or **Connect T3 Code...** in the menu) signs in read-only, so threads running on T3's linked environments (other machines) are followed too. Clicking a T3 row opens its thread in T3 Code. Settling a thread in T3 clears its question wait or Done row and plays a one-shot Settled animation, and the setting holds across a restart. T3's delegate subagents, title helper sessions and Codex's background memory jobs are hidden.
 > - **OpenCode support (OpenCode 2).** `sidepulse setup opencode` installs a plugin that follows the OpenCode server's event stream, including permission and question prompts; one-shot `opencode run` sessions no longer stay stuck on Working.
 > - **Antigravity support.** `sidepulse setup antigravity` adds an observe-only hook for the `agy` CLI, the IDE and the app, including T3 Code's private Antigravity homes.
 > - **Clearer menu rows.** Rows show the provider's own logo (Claude, Codex, Cursor, Antigravity, Grok, OpenCode) and the project name in brackets, using T3's project name for T3 threads ("No project" for threads started outside one). Rows for another machine (T3 linked environments or a relay) name it in the tag, as in `[(Mac Mini) Project]`, and tags line up at the right edge. Titles survive a daemon restart, Codex guardian reviews fold into their thread, and probe sessions that never ran a prompt are dropped.
@@ -58,7 +58,7 @@ Choose the level that fits how you want to use SidePulse.
 ### 1. One-command setup
 
 ```sh
-curl -fsSL https://sidepulse.io/setup.sh | bash
+curl -fsSL https://raw.githubusercontent.com/coledeb/sidepulse/main/scripts/setup.sh | bash
 ```
 
 The command works on macOS and Linux. It uses an existing Python 3.10 or newer
@@ -93,7 +93,7 @@ Agents and automation can install all available components without prompting.
 This command also reports a failed download to the caller.
 
 ```sh
-bash -o pipefail -c 'curl -fsSL https://sidepulse.io/setup.sh | env SIDEPULSE_SETUP_NONINTERACTIVE=1 sh'
+bash -o pipefail -c 'curl -fsSL https://raw.githubusercontent.com/coledeb/sidepulse/main/scripts/setup.sh | env SIDEPULSE_SETUP_NONINTERACTIVE=1 sh'
 ```
 
 From a checkout, run `sh scripts/setup.sh --headless`. For an existing install,
@@ -119,10 +119,10 @@ The [native Windows test harness guide](docs/testing/windows-vm.md) tracks the
 Windows installation probes and the coverage still in progress.
 
 On macOS, the daemon also owns sleep prevention, low-battery safeguards, lid
-animations, battery-change previews, and status-history recording. These keep
-running when the tray is closed. The tray displays daemon observations and sends
-explicit user controls; quitting the tray does not release the daemon's sleep
-controls. Stopping the daemon releases them.
+animations, battery-change previews, and status-history recording. When you
+choose **Quit** in the status bar, **Quit Status Bar Only** keeps those features
+running. **Stop Service and Quit** also stops the daemon and releases its sleep
+controls.
 
 History samples every 15 seconds and includes CPU and case temperatures in °C
 on Macs with readable SMC sensors. CPU uses a die/package sensor; case uses the
@@ -135,7 +135,7 @@ If you already manage your own Python 3.10+ environment:
 
 ```sh
 python3 -m pip install --upgrade \
-  "git+https://github.com/inteliwear/sidepulse.git"
+  "git+https://github.com/coledeb/sidepulse.git"
 sidepulse setup
 ```
 
@@ -144,7 +144,7 @@ sidepulse setup
 Use an editable installation when you want to modify or hack on SidePulse:
 
 ```sh
-git clone https://github.com/inteliwear/sidepulse.git
+git clone https://github.com/coledeb/sidepulse.git
 cd sidepulse
 python3 -m pip install -e .
 sidepulse setup
@@ -244,7 +244,7 @@ sidepulse update --headless
 sidepulse update --dry-run
 ```
 
-`update` runs the same installer as `curl -fsSL https://sidepulse.io/setup.sh | bash`.
+`update` runs the same installer as `curl -fsSL https://raw.githubusercontent.com/coledeb/sidepulse/main/scripts/setup.sh | bash`.
 It downloads the script completely before executing it, so curl failures do not
 run a partial installer. The website script forwards to `scripts/setup.sh` on
 GitHub, keeping both entry points on one implementation.
@@ -520,10 +520,33 @@ sp wrap claude
 and its arguments; `--` is optional. The wrapper preserves keyboard interaction,
 terminal resizing, and the command's exit code. It captures emitted OSC 7501
 reports and answers capability queries. The program must emit OSC 7501 to produce
-status updates; the wrapper does not infer status from screen text. In Herdr,
-run the wrapper inside each agent pane so reports retain separate identities.
+status updates; the wrapper does not infer status from screen text.
 
 The hook adapter, CLI decoder, or terminal wrapper translates input into JSON; the daemon holds the state, drives physical LEDs, and handles remote delivery. Individual status updates travel through the existing bridge queues to remote computers and updated iOS/Android apps, which account and render locally. Each session has one current state. The updated bridge keeps the latest queued value per source/session, up to 10 items per key for at most 300 seconds, with a 2048-byte request/recovery limit. Senders cap `msg` at 1,024 UTF-8 bytes and shorten it further if needed to fit. See the [protocol and quickstart](docs/protocol/program-status.md), [design plan](docs/design/osc7501-integration-plan.md), and [test strategy](docs/testing/osc7501-testing.md).
+
+### Herdr
+
+The bundled plugin supports macOS and Linux with Herdr 0.9.3 or newer.
+Install it from Settings → Agents, or with the SidePulse service running,
+install it from your shell.
+
+```sh
+sidepulse setup herdr
+```
+
+Setup registers the plugin and requests an initial sync for the current Herdr
+server if it is running. The plugin also syncs on Herdr startup and agent state
+changes. Launch agents normally from their Herdr panes. Herdr, SidePulse
+agent hooks, and `sidepulse wrap` share one SidePulse session per pane. Direct
+agent hooks take precedence when both report the same agent.
+
+SidePulse also reads agent status from enabled saved machines in Herdr's
+sidebar. Their rows name the machine in the tag, as in `[(Mac Mini) Project]`.
+If a machine becomes unreachable, its last known sessions show **Disconnected**
+until it reconnects. Use Herdr to open those sessions.
+
+Use `herdr plugin log list --plugin sidepulse.status` to check plugin errors.
+Use `sidepulse setup herdr --uninstall` to remove it.
 
 ## Battery LEDs
 
@@ -559,10 +582,10 @@ Agent status modes:
 Each mode can be configured independently in **Settings... → Animations**.
 Every state uses the same animation library: **Idle Pulse**, **Cyan Roll**,
 **Amber Pulse**, **Solid Green**, **KITT Scanner**, **KITT Scanner Red**, and
-the **Ember** and **Purple** animation families, plus any named custom animation.
+the **Ember**, **Neon**, and **Purple** animation families, plus any named custom animation.
 **Add Custom…** adds a reusable `LEDS.LED` program to that shared
 library, and animation profiles save or apply all state selections together.
-The built-in profiles are **Cyan** (the default), **Ember**, and **Purple**.
+The built-in profiles are **Cyan** (the default), **Ember**, **Neon**, and **Purple**.
 Built-ins live in `src/sidepulse/resources/animations/` as `.LED` files; patterns
 that depend on the hardware layout have only `-2.LED` and `-8.LED` variants.
 Custom programs are stored in the `animations/` folder beside `settings.json`.
@@ -997,6 +1020,17 @@ decision, so SidePulse's hook prints nothing and approvals are unchanged.
 Antigravity has no hook for approval prompts, so a tool waiting for approval
 shows as Tool Running. A turn that ends on a question shows as Waiting for
 Input; SidePulse reads the reply from the session transcript.
+
+On macOS, clicking an Antigravity App session opens Antigravity and uses **⌘K**,
+the chat title, and **Return** to select the conversation. SidePulse checks the
+opened chat ID. If multiple chats share the title, it leaves search open. If the
+launcher needs Accessibility access, SidePulse offers a one-time choice.
+**Review Permission…** opens Accessibility settings and shows **SidePulse Chat
+Opener** in Finder. Enable it in Settings, or drag it into the list if it is
+missing. After granting access, click the session again. **Open App Only**
+remembers your choice and brings the app forward on each click. Choose **Review
+Chat Access…** in a desktop session's options to revisit the choice. CLI sessions
+resume in Terminal.
 
 Settings can export the hook decision log as CSV or HTML. This log lives at
 `${XDG_STATE_HOME:-~/.local/state}/sidepulse/agent-monitor/event-status.jsonl`

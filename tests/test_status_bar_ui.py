@@ -22,6 +22,7 @@ import re
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -85,7 +86,7 @@ from sidepulse.collector import MonitorSnapshot, SourceSpec  # noqa: E402
 from sidepulse.models import AgentMode, AgentStatus, AggregateStatus  # noqa: E402
 from sidepulse.providers import HOOK_PROVIDERS  # noqa: E402
 from sidepulse.session_actions import IdeOpenTarget  # noqa: E402
-from sidepulse.settings import AgentMonitorSettings  # noqa: E402
+from sidepulse.settings import AgentMonitorSettings, save_settings  # noqa: E402
 
 
 # A selector literal: camelCase identifier ending in a single colon.
@@ -123,6 +124,51 @@ def make_status(
         origin=origin,
         stale=stale,
     )
+
+
+def test_antigravity_desktop_primary_action_opens_the_clicked_conversation():
+    status = make_status(provider="antigravity", origin="Antigravity App")
+    controller = sb.StatusBarController.alloc().init()
+    controller.settings = AgentMonitorSettings()
+    sender = sb.build_session_menu_item(status, datetime.now(timezone.utc), controller)
+    assert sender.action() == "openSessionPrimary:"
+    with patch.object(sb, "antigravity_access_missing", return_value=False), \
+         patch.object(sb, "confirm_antigravity_access") as offer, \
+         patch.object(controller.antigravity_open_queue, "submit") as submit:
+        controller.openSessionPrimary_(sender)
+    offer.assert_not_called()
+    submit.assert_called_once_with(controller.open_antigravity_conversation, status.session_id, False)
+    assert sb.default_session_open_target(replace(status, origin="Antigravity CLI"))[0] == "terminal"
+    assert sb.default_session_open_target(replace(status, session_id=None)) is None
+
+
+def test_antigravity_permission_choice_is_remembered_for_both_answers(tmp_path):
+    status = make_status(provider="antigravity", origin="Antigravity App")
+    for review in (False, True):
+        path = tmp_path / str(review) / "settings.json"
+        controller = sb.StatusBarController.alloc().init()
+        controller.settings = sb.load_settings(path)
+        with patch.object(sb, "antigravity_access_missing", return_value=True) as check, \
+             patch.object(sb, "confirm_antigravity_access", return_value=review) as offer, \
+             patch.object(sb, "save_settings", side_effect=lambda s: save_settings(s, path)), \
+             patch.object(controller.antigravity_open_queue, "submit") as submit:
+            controller.open_session(status, None, remember=False)
+            assert submit.call_args.args[1:] == (status.session_id, review)
+            controller.settings = sb.load_settings(path)
+            controller.open_session(status, None, remember=False)
+            assert submit.call_args.args[1:] == (status.session_id, False)
+        check.assert_called_once()
+        offer.assert_called_once()
+
+
+def test_antigravity_opens_the_app_for_both_choices():
+    controller = sb.StatusBarController.alloc().init()
+    for review, action in ((False, "select"), (True, "request-and-select")):
+        with patch.object(sb.subprocess, "run") as run, \
+             patch.object(sb, "run_antigravity_helper", return_value="") as helper:
+            controller.open_antigravity_conversation("example-chat", review)
+        assert run.call_args.args[0] == ["/usr/bin/open", "-b", "com.google.antigravity"]
+        helper.assert_called_once_with(action, "example-chat")
 
 
 def make_snapshot(statuses=(), stale_statuses=()) -> MonitorSnapshot:
@@ -759,7 +805,7 @@ class WindowBuildTests(StatusBarTestCase):
         window = sb.build_settings_window(self.controller)
         self.assertIsNotNone(window)
         self.assertTrue(window.title())
-        self.assertEqual(window.contentView().frame().size.height, 560)
+        self.assertEqual(window.contentView().frame().size.height, sb.SETTINGS_AGENTS_WINDOW_HEIGHT)
         self.assertIn("cursor_hook_status", self.controller.settings_fields)
         aligned_fields = (
             "codex_hook_status",
@@ -1062,7 +1108,7 @@ class WindowBuildTests(StatusBarTestCase):
         tab_view.selectTabViewItem_(items["agents"])
         self.assertEqual(
             window.contentView().frame().size.height,
-            sb.SETTINGS_WINDOW_HEIGHT,
+            sb.SETTINGS_AGENTS_WINDOW_HEIGHT,
         )
         self.assertEqual(
             window.contentView().frame().size.width,
@@ -1072,6 +1118,8 @@ class WindowBuildTests(StatusBarTestCase):
     def test_setup_window_builds(self):
         window = sb.build_setup_window(self.controller)
         self.assertIsNotNone(window)
+        self.assertIn("herdr", self.controller.setup_buttons)
+        self.assertIn("herdr_status", self.controller.setup_fields)
         self.assert_controls_are_wired(window)
 
     def test_custom_agent_animation_editor_builds(self):
@@ -1295,7 +1343,7 @@ class WindowBuildTests(StatusBarTestCase):
                 str(profile_popup.itemAtIndex_(index).title())
                 for index in range(profile_popup.numberOfItems())
             ],
-            ["Current", "Cyan", "Ember", "Purple"],
+            ["Current", "Cyan", "Ember", "Neon", "Purple"],
         )
         self.assertFalse(
             self.controller.settings_buttons[
@@ -1423,6 +1471,11 @@ class WindowBuildTests(StatusBarTestCase):
                     "Purple Attention",
                     "Purple Complete",
                     "Purple Lid Open",
+                    "Neon Idle",
+                    "Neon Roll",
+                    "Neon Attention",
+                    "Neon Complete",
+                    "Neon Lid Open",
                     "Night Rider",
                     "Lid Open Sweep",
                     "Lid Closed Sweep",
@@ -1689,9 +1742,13 @@ class NativeStatusIconRendererTests(StatusBarTestCase):
         self.assertFalse(self.renderer.view.glyph_layer.animationKeys())
         self.assertTrue(self.renderer.view.isHidden())
         self.assertEqual(self.button.image(), static)
+        view = self.renderer.view
+        self.assertEqual(view.superview(), self.button)
+        other_subviews = [child for child in self.button.subviews() if child != view]
         self.renderer.close()
         self.assertIsNone(self.renderer.view)
-        self.assertFalse(self.button.subviews())
+        self.assertIsNone(view.superview())
+        self.assertEqual(list(self.button.subviews()), other_subviews)
 
 
 class IconTests(StatusBarTestCase):
@@ -1933,14 +1990,49 @@ class TrayDaemonOwnershipTests(unittest.TestCase):
             thread.call_args.kwargs['target']()
         restart.assert_called_once_with()
         install.assert_not_called()
-        self.assertFalse(target.daemon_recovery_running)
+        thread.return_value.start.assert_called_once_with()
 
-    def test_quitting_tray_does_not_stop_daemon_behavior(self):
+    def test_quit_prompt_choices(self):
         target = sb.StatusBarController.alloc().init()
-        with patch.object(sb, 'NSApp') as app, patch.object(sb, 'daemon_command') as command:
-            sb.StatusBarController.quit_(target, None)
-        app.terminate_.assert_called_once_with(target)
-        command.assert_not_called()
+        from AppKit import NSAlertThirdButtonReturn
+
+        for choice, should_quit, should_stop in (
+            (sb.NSAlertFirstButtonReturn, True, False),
+            (sb.NSAlertSecondButtonReturn, True, True),
+            (NSAlertThirdButtonReturn, False, False),
+        ):
+            with self.subTest(choice=choice), patch.object(sb, 'NSApp') as app, \
+                 patch.object(sb, 'NSAlert') as alerts, patch.object(sb, 'stop_service') as stop:
+                alert = alerts.alloc.return_value.init.return_value
+                alert.runModal.return_value = choice
+                target.quit_(None)
+                self.assertEqual(
+                    [call.args[0] for call in alert.addButtonWithTitle_.call_args_list],
+                    ['Quit Status Bar Only', 'Stop Service and Quit', 'Cancel'],
+                )
+                self.assertEqual(stop.call_count, int(should_stop))
+                self.assertEqual(app.terminate_.call_count, int(should_quit))
+
+    def test_quit_waits_for_recovery_and_handles_service_stop_failure(self):
+        target = sb.StatusBarController.alloc().init()
+        target.daemon_recovery_thread = Mock()
+        def stop():
+            target.daemon_recovery_thread.join.assert_called_once_with()
+            return False
+
+        for running in (True, False):
+            with self.subTest(running=running), patch.object(sb, 'NSApp') as app, \
+                 patch.object(sb, 'NSAlert') as alerts, patch.object(sb, 'stop_service', side_effect=stop), \
+                 patch.object(sb, 'service_is_running', return_value=running):
+                target.daemon_recovery_thread.reset_mock()
+                alert = alerts.alloc.return_value.init.return_value
+                alert.runModal.return_value = sb.NSAlertSecondButtonReturn
+                target.quit_(None)
+                if running:
+                    app.terminate_.assert_not_called()
+                    self.assertEqual(alert.runModal.call_count, 2)
+                else:
+                    app.terminate_.assert_called_once_with(target)
 
     def test_tray_termination_only_cleans_up_ui_resources(self):
         target = sb.StatusBarController.alloc().init()

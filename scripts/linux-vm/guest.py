@@ -231,9 +231,11 @@ def install(stage):
     env.pop('PYTHONHOME', None)
     env['PATH'] = f'{HOME_DIR}/.local/bin:/usr/local/bin:/usr/bin:/bin'
     if stage == 'main':
+        # This fork's main, not sidepulse.io's upstream installer.
         installer = output / 'official-setup.sh'
-        subprocess.run(['curl', '-fsSL', 'https://sidepulse.io/setup.sh', '-o', str(installer)], check=True)
-        env.pop('SIDEPULSE_INSTALL_SPEC', None)
+        subprocess.run(['curl', '-fsSL', 'https://raw.githubusercontent.com/coledeb/sidepulse/main/scripts/setup.sh',
+                        '-o', str(installer)], check=True)
+        env['SIDEPULSE_INSTALL_SPEC'] = 'git+https://github.com/coledeb/sidepulse.git@main'
     else:
         installer = SOURCE / 'scripts/setup.sh'
         env['SIDEPULSE_INSTALL_SPEC'] = str(SOURCE)

@@ -56,6 +56,11 @@ AGENT_ANIMATION_PURPLE_TIDE = "purple-tide"
 AGENT_ANIMATION_PURPLE_ATTENTION = "purple-attention"
 AGENT_ANIMATION_PURPLE_COMPLETE = "purple-complete"
 AGENT_ANIMATION_PURPLE_LID_OPEN = "purple-lid-open"
+AGENT_ANIMATION_NEON_IDLE = "neon-idle"
+AGENT_ANIMATION_NEON_ROLL = "neon-roll"
+AGENT_ANIMATION_NEON_ATTENTION = "neon-attention"
+AGENT_ANIMATION_NEON_COMPLETE = "neon-complete"
+AGENT_ANIMATION_NEON_LID_OPEN = "neon-lid-open"
 AGENT_ANIMATION_NIGHT_RIDER = "night-rider"
 AGENT_ANIMATION_LID_OPEN = "lid-open"
 AGENT_ANIMATION_LID_CLOSED = "lid-closed"
@@ -76,11 +81,13 @@ AGENT_ANIMATION_PROFILE_FORMAT = "sidepulse-animation-profile"
 AGENT_ANIMATION_PROFILE_VERSION = 1
 AGENT_ANIMATION_PROFILE_CYAN = "profile:cyan"
 AGENT_ANIMATION_PROFILE_EMBER = "profile:ember"
+AGENT_ANIMATION_PROFILE_NEON = "profile:neon"
 AGENT_ANIMATION_PROFILE_PURPLE = "profile:purple"
 AGENT_ANIMATION_BUILT_IN_PROFILE_IDS = frozenset(
     {
         AGENT_ANIMATION_PROFILE_CYAN,
         AGENT_ANIMATION_PROFILE_EMBER,
+        AGENT_ANIMATION_PROFILE_NEON,
         AGENT_ANIMATION_PROFILE_PURPLE,
     }
 )
@@ -109,6 +116,11 @@ AGENT_ANIMATION_BUILT_INS = (
     AGENT_ANIMATION_PURPLE_ATTENTION,
     AGENT_ANIMATION_PURPLE_COMPLETE,
     AGENT_ANIMATION_PURPLE_LID_OPEN,
+    AGENT_ANIMATION_NEON_IDLE,
+    AGENT_ANIMATION_NEON_ROLL,
+    AGENT_ANIMATION_NEON_ATTENTION,
+    AGENT_ANIMATION_NEON_COMPLETE,
+    AGENT_ANIMATION_NEON_LID_OPEN,
     AGENT_ANIMATION_NIGHT_RIDER,
     AGENT_ANIMATION_LID_OPEN,
     AGENT_ANIMATION_LID_CLOSED,
@@ -335,9 +347,24 @@ def builtin_agent_animation_profiles() -> dict[str, AgentAnimationProfile]:
         ANIMATION_STATE_SETTLED: AGENT_ANIMATION_PURPLE_SETTLED,
         ANIMATION_STATE_STARTUP: AGENT_ANIMATION_STARTUP_FILL,
     }
+    neon = {
+        AgentMode.IDLE_READY.value: AGENT_ANIMATION_NEON_IDLE,
+        AgentMode.WORKING.value: AGENT_ANIMATION_NEON_ROLL,
+        AgentMode.TOOL_RUNNING.value: AGENT_ANIMATION_NEON_ROLL,
+        AgentMode.WAITING_FOR_INPUT.value: AGENT_ANIMATION_NEON_ATTENTION,
+        AgentMode.LONG_TASK_PROGRESS.value: AGENT_ANIMATION_NEON_ROLL,
+        AgentMode.BLOCKED_ERROR.value: AGENT_ANIMATION_NEON_ATTENTION,
+        AgentMode.COMPLETED.value: AGENT_ANIMATION_NEON_COMPLETE,
+        AgentMode.UNKNOWN.value: AGENT_ANIMATION_NEON_IDLE,
+        ANIMATION_STATE_LID_OPEN: AGENT_ANIMATION_NEON_LID_OPEN,
+        ANIMATION_STATE_LID_CLOSED: AGENT_ANIMATION_LID_CLOSED,
+        ANIMATION_STATE_SETTLED: AGENT_ANIMATION_SETTLED,
+        ANIMATION_STATE_STARTUP: AGENT_ANIMATION_STARTUP_FILL,
+    }
     return {
         AGENT_ANIMATION_PROFILE_CYAN: AgentAnimationProfile("Cyan", cyan),
         AGENT_ANIMATION_PROFILE_EMBER: AgentAnimationProfile("Ember", ember),
+        AGENT_ANIMATION_PROFILE_NEON: AgentAnimationProfile("Neon", neon),
         AGENT_ANIMATION_PROFILE_PURPLE: AgentAnimationProfile("Purple", purple),
     }
 
@@ -400,6 +427,7 @@ class AgentMonitorSettings:
     completed_visible_seconds: float = DEFAULT_COMPLETED_VISIBLE_SECONDS
     idle_pulse_seconds: float = DEFAULT_IDLE_PULSE_SECONDS
     phone_session_sync: dict[str, bool] = field(default_factory=dict)
+    antigravity_access_explained: bool = False
 
     def transcript_enabled(self, provider: str) -> bool:
         if provider == "codex":
@@ -907,6 +935,7 @@ class AgentMonitorSettings:
         return {
             "led_display": self.led_display,
             "show_menu_bar_icon": self.show_menu_bar_icon,
+            "antigravity_access_explained": self.antigravity_access_explained,
             "phone_session_sync": dict(sorted(self.phone_session_sync.items())),
             "devices": [device.to_dict() for device in self.devices],
             "sleep_prevention_policy": self.sleep_prevention_policy,
@@ -1065,6 +1094,7 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
     if not isinstance(phone_session_sync, dict):
         phone_session_sync = {}
     return AgentMonitorSettings(
+        antigravity_access_explained=_bool_setting(data.get("antigravity_access_explained"), False),
         show_menu_bar_icon=_bool_setting(data.get("show_menu_bar_icon"), True),
         phone_session_sync={
             key: value for key, value in phone_session_sync.items()

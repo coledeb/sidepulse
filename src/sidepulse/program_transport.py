@@ -265,7 +265,7 @@ class ProgramServer:
                         else:
                             from .program_presentation import ProgramMonitor
                             snapshot = ProgramMonitor(self.state).snapshot()
-                        ack = {'ok': True, 'snapshot': snapshot.to_dict()}
+                        ack = {'ok': True, 'publisher': self.state.publisher, 'snapshot': snapshot.to_dict()}
                         if self.on_command:
                             ack.update(self.on_command({'v': 1, 'type': 'output_info'}))
                     elif report.get('type') == 'hook_event':

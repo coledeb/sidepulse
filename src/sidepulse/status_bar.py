@@ -11,7 +11,8 @@ import subprocess
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
@@ -26,6 +27,7 @@ try:
         NSAppearanceNameDarkAqua,
         NSAlert,
         NSAlertFirstButtonReturn,
+        NSAlertSecondButtonReturn,
         NSAffineTransform,
         NSBackingStoreBuffered,
         NSBezierPath,
@@ -120,6 +122,11 @@ from .firmware_status import FirmwareStatus, FirmwareStatusReader, install_updat
 from .update import BuildInfo, GITHUB_MAIN_URL
 from .ipc import UICommandServer
 from .program_transport import daemon_command, write_daemon_program as write_led_program
+from .herdr import (
+    configure_plugin as configure_herdr_plugin,
+    detect_config as detect_herdr_config,
+    executable_path as herdr_executable_path,
+)
 from .install import (
     install_antigravity_hooks,
     install_claude_hooks,
@@ -156,6 +163,7 @@ from .lid_sleep import (
     sleep_helper_install_command,
     sleep_helper_installed,
 )
+from .antigravity_opener import run_antigravity_helper
 from .agent_terminal import AgentTerminal, claude_session_terminal, junie_session_terminal
 from .junie_index import junie_session_info
 from .models import AgentMode, AgentStatus, MODE_LABELS, provider_label
@@ -184,6 +192,7 @@ from .t3_status import (
     connect_t3,
     t3_installed,
 )
+from .service_launch import service_is_running, stop_service
 from .session_actions import (
     SESSION_OPEN_APP,
     SESSION_OPEN_JETBRAINS,
@@ -222,6 +231,11 @@ from .settings import (
     AGENT_ANIMATION_LID_CLOSED,
     AGENT_ANIMATION_LID_OPEN,
     AGENT_ANIMATION_MODES,
+    AGENT_ANIMATION_NEON_ATTENTION,
+    AGENT_ANIMATION_NEON_COMPLETE,
+    AGENT_ANIMATION_NEON_IDLE,
+    AGENT_ANIMATION_NEON_LID_OPEN,
+    AGENT_ANIMATION_NEON_ROLL,
     AGENT_ANIMATION_NIGHT_RIDER,
     AGENT_ANIMATION_IMMEDIATE_OFF,
     AGENT_ANIMATION_SLOW_OFF,
@@ -425,6 +439,7 @@ SIDEPULSE_NOTCH_FEATURE_ENABLED = True
 STATUS_BAR_MAX_LINES_PER_SOURCE = 500
 SETTINGS_WINDOW_WIDTH = 680
 SETTINGS_WINDOW_HEIGHT = 560
+SETTINGS_AGENTS_WINDOW_HEIGHT = SETTINGS_WINDOW_HEIGHT + 26
 SETTINGS_ANIMATIONS_WINDOW_WIDTH = 720
 SETTINGS_ANIMATIONS_WINDOW_HEIGHT = 528
 SETTINGS_TAB_Y = 44
@@ -575,12 +590,14 @@ class StatusBarController(NSObject):
             return None
 
         self.settings = load_settings()
+        self.antigravity_open_queue = ThreadPoolExecutor(max_workers=1, thread_name_prefix="chat-opener")
         self.app_build = BuildInfo.current()
         self.open_settings_on_launch = False
         self.monitor = self.build_monitor()
         self.event_server = None
         # The daemon follows T3 Code; the menu only offers to connect it.
         self.t3_connecting = False
+        self.daemon_recovery_thread = None
         self.status_item = None
         self.status_icon_renderer = None
         self.status_icon_native_failed = False
@@ -968,6 +985,14 @@ class StatusBarController(NSObject):
         menu.popUpMenuPositioningItem_atLocation_inView_(None, (0, height), sender)
 
     @objc.IBAction
+    def reviewAntigravityAccess_(self, sender):
+        status = sender.representedObject()
+        if not isinstance(status, AgentStatus):
+            return
+        if confirm_antigravity_access():
+            self.antigravity_open_queue.submit(self.open_antigravity_conversation, status.session_id, True)
+
+    @objc.IBAction
     def openSessionWithAction_(self, sender):
         payload = sender.representedObject()
         if not isinstance(payload, dict):
@@ -1151,6 +1176,20 @@ class StatusBarController(NSObject):
     @objc.IBAction
     def uninstallAntigravityHooks_(self, _sender):
         self.update_hooks("antigravity", install=False)
+    def installHerdrPlugin_(self, _sender):
+        self.update_herdr_plugin(uninstall=False)
+
+    @objc.IBAction
+    def uninstallHerdrPlugin_(self, _sender):
+        self.update_herdr_plugin(uninstall=True)
+
+    def update_herdr_plugin(self, *, uninstall: bool) -> None:
+        try:
+            message = configure_herdr_plugin(uninstall=uninstall)
+        except Exception as exc:
+            message = f"Herdr plugin setup failed: {exc}"
+        self.set_settings_message(message)
+        self.refresh_settings_window()
 
     @objc.IBAction
     def toggleCodexTranscripts_(self, sender):
@@ -1375,6 +1414,29 @@ class StatusBarController(NSObject):
 
     @objc.IBAction
     def quit_(self, _sender):
+        NSApp.activateIgnoringOtherApps_(True)
+        alert = NSAlert.alloc().init()
+        alert.setMessageText_("Also stop the SidePulse background service?")
+        alert.setInformativeText_("Keeping the service running lets SidePulse continue monitoring sessions and updating devices.")
+        alert.addButtonWithTitle_("Quit Status Bar Only")
+        alert.addButtonWithTitle_("Stop Service and Quit")
+        alert.addButtonWithTitle_("Cancel").setKeyEquivalent_("\x1b")
+        choice = alert.runModal()
+        if choice == NSAlertSecondButtonReturn:
+            # Finish any pending recovery before unloading the service.
+            if self.daemon_recovery_thread is not None:
+                self.daemon_recovery_thread.join()
+            try:
+                if not stop_service() and service_is_running():
+                    raise RuntimeError("The background service is still running.")
+            except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
+                error = NSAlert.alloc().init()
+                error.setMessageText_("Couldn’t stop the SidePulse background service")
+                error.setInformativeText_(str(exc))
+                error.runModal()
+                return
+        elif choice != NSAlertFirstButtonReturn:
+            return
         NSApp.terminate_(self)
 
     def applicationWillTerminate_(self, _notification):
@@ -1557,11 +1619,10 @@ class StatusBarController(NSObject):
         identifier = str(tab_item.identifier())
         if identifier == 'history' and self.settings_window is not None:
             self.refresh_history_chart()
-        height = (
-            SETTINGS_ANIMATIONS_WINDOW_HEIGHT
-            if identifier == "animations"
-            else SETTINGS_WINDOW_HEIGHT
-        )
+        height = {
+            "agents": SETTINGS_AGENTS_WINDOW_HEIGHT,
+            "animations": SETTINGS_ANIMATIONS_WINDOW_HEIGHT,
+        }.get(identifier, SETTINGS_WINDOW_HEIGHT)
         width = (
             SETTINGS_ANIMATIONS_WINDOW_WIDTH
             if identifier == "animations"
@@ -1673,6 +1734,10 @@ class StatusBarController(NSObject):
         self.set_setup_checkbox("launch", True, enabled=not launch_installed)
         self.set_setup_checkbox("eject_guard", True, enabled=not eject_installed)
         self.set_setup_checkbox("sleep_helper", True, enabled=not sleep_installed)
+        herdr_available = bool(herdr_executable_path())
+        herdr = detect_herdr_config()
+        set_field_value(self.setup_fields.get("herdr_status"), hook_status_text(herdr))
+        self.set_setup_checkbox("herdr", herdr_available, enabled=herdr_available and not herdr.hooks_enabled)
         eject_uninstall = self.setup_buttons.get("eject_guard_uninstall")
         if eject_uninstall is not None:
             eject_uninstall.setEnabled_(eject_installed)
@@ -1711,6 +1776,12 @@ class StatusBarController(NSObject):
                 opened_sleep_installer = True
             except Exception as exc:
                 errors.append(f"Sleep prevention installer failed: {exc}")
+
+        if checkbox_is_on(self.setup_buttons.get("herdr")) and not detect_herdr_config().hooks_enabled:
+            try:
+                messages.append(configure_herdr_plugin())
+            except Exception as exc:
+                errors.append(f"Herdr plugin setup failed: {exc}")
 
         if errors:
             set_field_value(self.setup_fields.get("message"), "  ".join(errors))
@@ -1809,6 +1880,10 @@ class StatusBarController(NSObject):
         set_field_value(
             self.settings_fields.get("antigravity_hook_status"),
             hook_status_text(antigravity),
+        )
+        set_field_value(
+            self.settings_fields.get("herdr_hook_status"),
+            hook_status_text(detect_herdr_config()),
         )
         set_field_value(
             self.settings_fields.get("settings_path"),
@@ -2498,6 +2573,16 @@ class StatusBarController(NSObject):
                 custom_terminal_path=self.settings.custom_terminal_path,
                 session_hints=terminal_session_hints(status),
             )
+        elif kind == "antigravity":
+            request_access = False
+            if not self.settings.antigravity_access_explained and antigravity_access_missing():
+                request_access = confirm_antigravity_access()
+                self.settings = replace(self.settings, antigravity_access_explained=True)
+                try:
+                    save_settings(self.settings)
+                except OSError as exc:
+                    log_status_bar(f"Could not remember the Antigravity permission choice: {exc}")
+            self.antigravity_open_queue.submit(self.open_antigravity_conversation, value, request_access)
         elif kind == "ide":
             if value.app_path:
                 subprocess.Popen(["open", "-a", value.app_path, value.project_path])
@@ -2518,6 +2603,31 @@ class StatusBarController(NSObject):
             except Exception as exc:
                 self.set_settings_message(f"Could not save open preference: {exc}")
                 self.settings = load_settings()
+
+    @objc.python_method
+    def open_antigravity_conversation(self, session_id: str, request_access: bool) -> None:
+        try:
+            subprocess.run(
+                ["/usr/bin/open", "-b", "com.google.antigravity"], check=True,
+                capture_output=True, timeout=8,
+            )
+            message = run_antigravity_helper(
+                "request-and-select" if request_access else "select", session_id,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            log_status_bar(f"Antigravity session opening failed: {exc}")
+            message = "Could not open the conversation in the Antigravity app."
+        if message:
+            self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                "showAntigravityOpenError:", message, False,
+            )
+
+    def showAntigravityOpenError_(self, message):
+        self.set_settings_message(message)
+        alert = NSAlert.alloc().init()
+        alert.setMessageText_("Open in Antigravity")
+        alert.setInformativeText_(message)
+        alert.runModal()
 
     def close_status_menu(self) -> None:
         try:
@@ -3039,9 +3149,8 @@ class StatusBarController(NSObject):
 
     @objc.IBAction
     def restartDaemon_(self, _sender):
-        if getattr(self, 'daemon_recovery_running', False):
+        if self.daemon_recovery_thread is not None and self.daemon_recovery_thread.is_alive():
             return
-        self.daemon_recovery_running = True
         self.next_daemon_recovery = time.monotonic() + 60
         def recover():
             try:
@@ -3051,9 +3160,8 @@ class StatusBarController(NSObject):
                     log_status_bar('Daemon could not be restarted: ' + result.detail)
             except Exception as exc:
                 log_status_bar(f'Daemon restart failed: {exc}')
-            finally:
-                self.daemon_recovery_running = False
-        threading.Thread(target=recover, daemon=True).start()
+        self.daemon_recovery_thread = threading.Thread(target=recover, daemon=True)
+        self.daemon_recovery_thread.start()
 
     def status_bar_devices(self, *, remember: bool = True) -> list[StatusBarDevice]:
         entries_by_id: dict[str, StatusBarDevice] = {}
@@ -3778,7 +3886,7 @@ def update_brightness_label(slider, value: int | float | None) -> None:
 
 def build_setup_window(target: StatusBarController) -> NSWindow:
     width = 620
-    height = 330
+    height = 382
     style = (
         NSWindowStyleMaskTitled
         | NSWindowStyleMaskClosable
@@ -3795,48 +3903,52 @@ def build_setup_window(target: StatusBarController) -> NSWindow:
     window.center()
     content = window.contentView()
 
-    add_label(content, "SidePulse", 24, 282, 180, 28)
-    add_label(content, "Finish setup for this Mac.", 24, 254, 340, 22)
+    add_label(content, "SidePulse", 24, 334, 180, 28)
+    add_label(content, "Finish setup for this Mac.", 24, 306, 340, 22)
 
     launch = add_checkbox(
         content,
         "Run at Login",
         32,
-        206,
+        258,
         190,
         24,
         target,
         "",
     )
-    add_label(content, "Start the menu-bar app automatically.", 56, 184, 300, 20)
-    launch_status = add_label(content, "", 380, 206, 140, 22)
+    add_label(content, "Start the menu-bar app automatically.", 56, 236, 300, 20)
+    launch_status = add_label(content, "", 380, 258, 140, 22)
 
     eject_guard = add_checkbox(
         content,
         SD_EJECT_GUARD_DISPLAY_NAME,
         32,
-        146,
+        198,
         300,
         24,
         target,
         "",
     )
-    add_label(content, "Keep SidePulse Pro/SidePulse Dot available after sleep.", 56, 124, 390, 20)
-    eject_status = add_label(content, "", 398, 146, 88, 22)
-    eject_uninstall = add_button(content, "Uninstall", 498, 142, 92, 28, target, "uninstallSdEjectGuard:")
+    add_label(content, "Keep SidePulse Pro/SidePulse Dot available after sleep.", 56, 176, 390, 20)
+    eject_status = add_label(content, "", 398, 198, 88, 22)
+    eject_uninstall = add_button(content, "Uninstall", 498, 194, 92, 28, target, "uninstallSdEjectGuard:")
 
     sleep_helper = add_checkbox(
         content,
         "Closed-Lid Sleep Prevention",
         32,
-        86,
+        138,
         260,
         24,
         target,
         "",
     )
-    add_label(content, "Open a one-time administrator setup in Terminal.", 56, 64, 360, 20)
-    sleep_status = add_label(content, "", 398, 86, 190, 22)
+    add_label(content, "Open a one-time administrator setup in Terminal.", 56, 116, 360, 20)
+    sleep_status = add_label(content, "", 398, 138, 190, 22)
+
+    herdr = add_checkbox(content, "Herdr", 32, 82, 260, 24, target, "")
+    add_label(content, "Show Herdr agent activity in SidePulse.", 56, 60, 320, 20)
+    herdr_status = add_label(content, "", 398, 82, 190, 22)
 
     message = add_label(content, "", 24, 36, width - 48, 20)
 
@@ -3847,6 +3959,7 @@ def build_setup_window(target: StatusBarController) -> NSWindow:
         "launch_status": launch_status,
         "eject_status": eject_status,
         "sleep_status": sleep_status,
+        "herdr_status": herdr_status,
         "message": message,
     }
     target.setup_buttons = {
@@ -3854,8 +3967,33 @@ def build_setup_window(target: StatusBarController) -> NSWindow:
         "eject_guard": eject_guard,
         "eject_guard_uninstall": eject_uninstall,
         "sleep_helper": sleep_helper,
+        "herdr": herdr,
     }
     return window
+
+
+def antigravity_access_missing() -> bool:
+    try:
+        return run_antigravity_helper("check") == "missing"
+    except (OSError, subprocess.SubprocessError) as exc:
+        log_status_bar(f"Could not check Antigravity accessibility access: {exc}")
+        return False
+
+
+def confirm_antigravity_access() -> bool:
+    alert = NSAlert.alloc().init()
+    alert.setMessageText_("Open the selected chat in Antigravity?")
+    alert.setInformativeText_(
+        "SidePulse can use Accessibility access to open ⌘K in Antigravity, type the chat title, and press Return. "
+        "In System Settings, enable SidePulse Chat Opener. If it’s missing, drag the selected "
+        "app from Finder into the list. Then click the session again.\n\n"
+        "Choose Open App Only to bring Antigravity forward. You can then press ⌘K to choose a chat. "
+        "You can change access later in System Settings → Privacy & Security → Accessibility."
+    )
+    alert.addButtonWithTitle_("Review Permission…")
+    decline = alert.addButtonWithTitle_("Open App Only")
+    decline.setKeyEquivalent_("\x1b")
+    return alert.runModal() == NSAlertFirstButtonReturn
 
 
 def confirm_linked_phone_removal(name: str) -> bool:
@@ -4571,7 +4709,7 @@ def rect_parts(rect) -> tuple[float, float, float, float]:
 
 def build_settings_window(target: StatusBarController) -> NSWindow:
     width = SETTINGS_WINDOW_WIDTH
-    height = SETTINGS_WINDOW_HEIGHT
+    height = SETTINGS_AGENTS_WINDOW_HEIGHT
     style = (
         NSWindowStyleMaskTitled
         | NSWindowStyleMaskClosable
@@ -4635,7 +4773,7 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
     secondary_action_x = 500
     value_width = primary_action_x - value_x - 5
 
-    add_label(agents_tab, "Agent Hooks", section_x, 398, 200, 24)
+    add_label(agents_tab, "Agent Hooks", section_x, 422, 200, 24)
 
     def add_hook_row(
         title: str,
@@ -4668,25 +4806,28 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
         return status
 
     codex_status = add_hook_row(
-        "Codex", 372, "installCodexHooks:", "uninstallCodexHooks:"
+        "Codex", 396, "installCodexHooks:", "uninstallCodexHooks:"
     )
     claude_status = add_hook_row(
-        "Claude", 348, "installClaudeHooks:", "uninstallClaudeHooks:"
+        "Claude", 372, "installClaudeHooks:", "uninstallClaudeHooks:"
     )
     grok_status = add_hook_row(
-        "Grok", 324, "installGrokHooks:", "uninstallGrokHooks:"
+        "Grok", 348, "installGrokHooks:", "uninstallGrokHooks:"
     )
     cursor_status = add_hook_row(
-        "Cursor", 300, "installCursorHooks:", "uninstallCursorHooks:"
+        "Cursor", 324, "installCursorHooks:", "uninstallCursorHooks:"
     )
     junie_status = add_hook_row(
-        "Junie", 276, "installJunieHooks:", "uninstallJunieHooks:"
+        "Junie", 300, "installJunieHooks:", "uninstallJunieHooks:"
     )
     opencode_status = add_hook_row(
-        "OpenCode", 252, "installOpenCodeHooks:", "uninstallOpenCodeHooks:"
+        "OpenCode", 276, "installOpenCodeHooks:", "uninstallOpenCodeHooks:"
     )
     antigravity_status = add_hook_row(
-        "Antigravity", 228, "installAntigravityHooks:", "uninstallAntigravityHooks:"
+        "Antigravity", 252, "installAntigravityHooks:", "uninstallAntigravityHooks:"
+    )
+    herdr_status = add_hook_row(
+        "Herdr", 228, "installHerdrPlugin:", "uninstallHerdrPlugin:"
     )
 
     add_separator(agents_tab, section_x, 218, tab_width - 48)
@@ -4990,6 +5131,7 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
         "junie_hook_status": junie_status,
         "opencode_hook_status": opencode_status,
         "antigravity_hook_status": antigravity_status,
+        "herdr_hook_status": herdr_status,
         "debug_log_status": debug_log_status,
         "codex_session_opener": codex_opener,
         "claude_session_opener": claude_opener,
@@ -5306,6 +5448,11 @@ def agent_animation_label(settings: AgentMonitorSettings, animation_id: str) -> 
         AGENT_ANIMATION_PURPLE_ATTENTION: "Purple Attention",
         AGENT_ANIMATION_PURPLE_COMPLETE: "Purple Complete",
         AGENT_ANIMATION_PURPLE_LID_OPEN: "Purple Lid Open",
+        AGENT_ANIMATION_NEON_IDLE: "Neon Idle",
+        AGENT_ANIMATION_NEON_ROLL: "Neon Roll",
+        AGENT_ANIMATION_NEON_ATTENTION: "Neon Attention",
+        AGENT_ANIMATION_NEON_COMPLETE: "Neon Complete",
+        AGENT_ANIMATION_NEON_LID_OPEN: "Neon Lid Open",
         AGENT_ANIMATION_NIGHT_RIDER: "Night Rider",
         AGENT_ANIMATION_LID_OPEN: "Lid Open Sweep",
         AGENT_ANIMATION_LID_CLOSED: "Lid Closed Sweep",
@@ -5786,6 +5933,12 @@ def program_for_lid_animation(
 
 
 def hook_status_text(config: ProviderConfig) -> str:
+    if config.provider == "herdr":
+        if config.hooks_enabled:
+            return "Plugin installed"
+        if config.exists:
+            return "Plugin disabled"
+        return "Plugin not installed" if herdr_executable_path() else "Herdr not found"
     if not config.exists:
         return "Not installed — config created on install"
     if config.hook_events:
@@ -6031,6 +6184,13 @@ def build_session_options_menu(
             target,
             selected=action == selected,
         )
+    if status.provider == "antigravity" and status.origin == "Antigravity App" and status.session_id:
+        item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Review Chat Access…", "reviewAntigravityAccess:", "",
+        )
+        item.setRepresentedObject_(status)
+        item.setTarget_(target)
+        menu.addItem_(item)
     if status.session_link:
         item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Copy mobile session link", "copySessionLink:", "")
         item.setTarget_(target)

@@ -21,7 +21,7 @@ import traceback
 import uuid
 
 SOURCE = Path(__file__).resolve().parents[2]
-MAIN_SPEC = 'git+https://github.com/inteliwear/sidepulse.git@main'
+MAIN_SPEC = 'git+https://github.com/coledeb/sidepulse.git@main'
 
 
 def digest(path):

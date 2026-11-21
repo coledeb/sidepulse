@@ -28,6 +28,8 @@ from unittest.mock import patch
 
 from packaging.requirements import Requirement
 
+from import_contract import importable_module_names
+
 try:  # Python 3.11+
     import tomllib
 except ModuleNotFoundError:  # pragma: no cover - Python 3.10
@@ -195,6 +197,8 @@ def third_party(records: list[ImportRecord]) -> list[ImportRecord]:
         if record.top not in sys.stdlib_module_names
         and record.top not in FIRST_PARTY
         and record.top not in CONDITIONAL_STDLIB
+        # The tomli backport is required only when the stdlib parser is absent.
+        and not (record.top == "tomli" and "tomllib" in sys.stdlib_module_names)
     ]
 
 
@@ -242,6 +246,14 @@ class ImportContractTests(unittest.TestCase):
             if record.optional:
                 continue
             providers = module_to_dists.get(record.top)
+            if providers is None and normalize_dist_name(record.top) in closure:
+                # Python 3.10's mapping omits wheels without top_level.txt.
+                try:
+                    files = distribution(record.top).files or []
+                except PackageNotFoundError:
+                    files = []
+                if any(str(path) in {f"{record.top}/__init__.py", f"{record.top}.py"} for path in files):
+                    providers = [record.top]
             if providers is None:
                 missing.append(
                     f"{record.where}: imports {record.top!r}, which is not "
@@ -304,30 +316,8 @@ class ImportContractTests(unittest.TestCase):
 class ModuleImportSmokeTests(unittest.TestCase):
     """Every shipped module must import. Nothing here is clever; that is the point."""
 
-    def module_names(self) -> list[str]:
-        names = []
-        for path in sorted(SRC_ROOT.rglob("*.py")):
-            rel = path.relative_to(SRC_ROOT)
-            if rel.name == "__main__.py":
-                continue  # executes on import by design
-            parts = list(rel.parts)
-            parts[-1] = rel.stem
-            if parts[-1] == "__init__":
-                parts.pop()
-            if parts:
-                names.append(".".join(parts))
-        return names
-
     def test_every_module_imports(self):
-        darwin_only = {
-            "sidepulse.status_bar",
-            "sidepulse.status_icon",
-            "sidepulse.virtual_device",
-            "sidepulse.led_wasm",
-        }
-        for name in self.module_names():
-            if name in darwin_only and sys.platform != "darwin":
-                continue
+        for name in importable_module_names(SRC_ROOT):
             with self.subTest(module=name):
                 try:
                     importlib.import_module(name)

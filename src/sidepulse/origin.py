@@ -7,12 +7,19 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
+from urllib.parse import quote
 
 from .models import provider_label
 
 T3CODE_BUNDLE_ID = "com.t3tools.t3code"
 T3CODE_THREAD_ENV = "T3CODE_THREAD_ID"
 T3CODE_THREAD_KEY = "t3code_thread_id"
+T3CODE_ENVIRONMENT_KEY = "t3code_environment_id"
+T3CODE_HOME_ENV = "T3CODE_HOME"
+# The Herdr pane a hook's agent runs in (herdr.terminal_scope), so the daemon
+# shows one row for the pane instead of the hook's row and Herdr's.
+HERDR_PANE_KEY = "herdr_pane_scope"
+HERDR_PANE_SCOPE = re.compile(r"herdr-[0-9a-f]{32}-[0-9a-f]{32}")
 T3CODE_SURFACE = "t3code"
 # These agents run every session inside one long-lived server, and SidePulse's
 # hook runs as that server's child. The server's environment belongs to
@@ -394,9 +401,10 @@ def annotate_payload_with_origin(
     *,
     env: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
+    active_env = os.environ if env is None else env
+    payload = annotate_payload_with_herdr_pane(payload, active_env)
     if "agent_origin" in payload or "agentOrigin" in payload:
         return payload
-    active_env = os.environ if env is None else env
     result = dict(payload)
     result.update(detect_agent_origin(provider, env=active_env).to_payload())
     thread_id = clean_label(active_env.get(T3CODE_THREAD_ENV))
@@ -429,6 +437,73 @@ def is_t3code_origin(origin: str | None) -> bool:
     host = str(origin or "").split(RELAY_ORIGIN_SEPARATOR, 1)[0]
     normalized = " ".join(host.strip().lower().replace("-", " ").split())
     return normalized.endswith(" in t3 code") or normalized in {"t3 code", "t3code"}
+
+
+def annotate_payload_with_herdr_pane(payload: dict[str, Any], env: Mapping[str, str]) -> dict[str, Any]:
+    if HERDR_PANE_KEY in payload or not env.get("HERDR_PANE_ID") or not env.get("HERDR_SOCKET_PATH"):
+        return payload
+    try:
+        from .herdr import current_pane_scope
+
+        scope = current_pane_scope(env)
+    except Exception:
+        # Herdr is busy or gone; the hook row still shows on its own.
+        return payload
+    return {**payload, HERDR_PANE_KEY: scope} if scope else payload
+
+
+def valid_herdr_pane_scope(value: object) -> str | None:
+    return value if isinstance(value, str) and HERDR_PANE_SCOPE.fullmatch(value) else None
+
+
+def t3_link_for_thread(environment_id: str | None, thread_id: str | None) -> str | None:
+    """T3 Code's deep link to a thread, which opens it in the T3 app."""
+    if not environment_id or not thread_id:
+        return None
+    try:
+        link = f"t3code://threads/{quote(environment_id, safe='')}/{quote(thread_id, safe='')}"
+    except UnicodeError:
+        return None
+    return valid_t3_link(link)
+
+
+def valid_t3_link(value: object) -> str | None:
+    if not isinstance(value, str) or len(value) > 1024:
+        return None
+    segment = r"(?:[A-Za-z0-9_.~+-]|%[0-9A-Fa-f]{2})+"
+    match = re.fullmatch(rf"t3code://threads/({segment})/({segment})", value)
+    return value if match and all(part not in {".", ".."} for part in match.groups()) else None
+
+
+def t3_environment_id(env: Mapping[str, str] | None = None, *, home: Path | None = None) -> str | None:
+    """This Mac's T3 environment id, which T3's thread links name."""
+    active_env = os.environ if env is None else env
+    configured = str(active_env.get(T3CODE_HOME_ENV) or "").strip()
+    data_dir = Path(configured).expanduser() if configured else (home or Path.home()) / ".t3"
+    try:
+        with (data_dir / "userdata" / "environment-id").open(encoding="utf-8") as handle:
+            value = handle.read(257)
+    except (OSError, UnicodeError):
+        return None
+    return clean_label(value) if len(value) <= 256 else None
+
+
+def t3_link_for_payload(payload: Mapping[str, Any], origin: str | None) -> str | None:
+    """The T3 thread link for a hook or T3 record, if it names its thread.
+
+    Rows read from a linked environment carry that environment's id. A hook
+    from this Mac names only the thread, so this Mac's environment id is used;
+    a relayed hook ran on another computer, whose environment id is unknown.
+    """
+    thread_id = clean_label(payload.get(T3CODE_THREAD_KEY))
+    if not thread_id:
+        return None
+    environment_id = clean_label(payload.get(T3CODE_ENVIRONMENT_KEY))
+    if environment_id is None:
+        if is_relayed_origin(origin) or not is_t3code_origin(origin):
+            return None
+        environment_id = t3_environment_id()
+    return t3_link_for_thread(environment_id, thread_id)
 
 
 def is_relayed_origin(origin: str | None) -> bool:

@@ -8,7 +8,7 @@ from urllib.parse import quote, urlencode
 from .jetbrains import jetbrains_launch_for_project
 from .junie_index import junie_session_project_dir
 from .models import AgentStatus
-from .origin import T3CODE_BUNDLE_ID, is_relayed_origin, is_t3code_origin
+from .origin import T3CODE_BUNDLE_ID, is_relayed_origin, is_t3code_origin, valid_t3_link
 
 SESSION_OPEN_APP = "app"
 SESSION_OPEN_TERMINAL = "terminal"
@@ -148,11 +148,16 @@ def session_open_target(
     status: AgentStatus,
     action: str,
 ) -> SessionOpenTarget | None:
+    if status.is_remote_herdr:
+        # Herdr runs it on another machine; there is nothing to open here.
+        return None
     if is_t3code_origin(status.origin):
-        # T3 Code owns the session: "App" brings T3 Code forward, and the VS Code
+        # T3 Code owns the session: "App" opens its thread in T3 Code (or just
+        # brings T3 forward when the thread is unknown), and the VS Code
         # extension would open a different client on the same session.
         if action == SESSION_OPEN_APP:
-            return ("app", T3CODE_BUNDLE_ID)
+            link = valid_t3_link(status.t3_link)
+            return ("url", link) if link else ("app", T3CODE_BUNDLE_ID)
         if action == SESSION_OPEN_VSCODE:
             return None
         # A relayed T3 session runs on another computer: resuming it here would
@@ -160,6 +165,8 @@ def session_open_target(
         if action == SESSION_OPEN_TERMINAL and is_relayed_origin(status.origin):
             return None
     if action == SESSION_OPEN_APP:
+        if status.provider.lower() == "antigravity" and status.origin == "Antigravity App" and status.session_id:
+            return "antigravity", status.session_id
         url = session_deep_link(status)
         return ("url", url) if url else None
     if action == SESSION_OPEN_VSCODE:
@@ -198,6 +205,8 @@ def session_open_action_label(
             return "Open in Codex"
         if provider == "claude":
             return "Open Claude App"
+        if provider == "antigravity":
+            return "Open in Antigravity"
         return "Open App"
     if action == SESSION_OPEN_VSCODE:
         return "Open in VS Code"

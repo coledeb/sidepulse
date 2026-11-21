@@ -72,8 +72,11 @@ def is_mirror_scope(scope: str) -> bool:
     return scope.startswith(MIRROR_SCOPE_PREFIX)
 
 
-def mirrored_update(status: AgentStatus, source_name: str) -> dict | None:
-    """The OSC-style update other machines and phones see for one agent row."""
+def mirrored_update(status: AgentStatus, source_name: str, scope: str | None = None) -> dict | None:
+    """The OSC-style update other machines and phones see for one agent row.
+
+    ``scope`` is the Herdr pane the row stands for, if any; see ``mirror``.
+    """
     state = MIRROR_STATES.get(status.mode)
     if state is None:
         return None
@@ -92,7 +95,7 @@ def mirrored_update(status: AgentStatus, source_name: str) -> dict | None:
     return {
         "v": 1,
         "type": "program_status",
-        "scope": mirror_scope(status.agent_id),
+        "scope": scope or mirror_scope(status.agent_id),
         "status": body,
         "context": {
             key: str(value)[:MIRROR_CONTEXT_LIMIT]
@@ -142,6 +145,8 @@ class DaemonSessions:
         self.monitor.extra_statuses = self.program_statuses
         self.mirror_lock = threading.Lock()
         self.mirrored: dict[str, str] = {}
+        # The ProgramState scope each mirrored row was published under.
+        self.mirror_scopes: dict[str, str] = {}
         self.t3_poller = None
         self.start_t3 = start_t3
         self.recovery_lock = threading.Lock()
@@ -246,13 +251,20 @@ class DaemonSessions:
     # output
 
     def program_statuses(self) -> tuple[AgentStatus, ...]:
-        """ProgramState rows that are not mirrors of this monitor's own rows."""
+        """ProgramState rows that are not mirrors of this monitor's own rows.
+
+        A Herdr pane whose agent's hooks report is mirrored into the pane's own
+        scope, so it is skipped here too: the hook row already shows it.
+        """
+        mirrored = set(self.mirrored)
         return tuple(
-            status for status in self.program_state.statuses(skip_scope=is_mirror_scope)
+            status for status in self.program_state.statuses(
+                skip_scope=lambda scope: is_mirror_scope(scope) or scope in mirrored,
+            )
         )
 
     def session_link(self, status: AgentStatus) -> str | None:
-        scope = mirror_scope(status.agent_id)
+        scope = self.mirror_scopes.get(status.agent_id, mirror_scope(status.agent_id))
         if scope not in self.mirrored:
             return None
         return "sidepulse://sessions?" + urllib.parse.urlencode(
@@ -297,11 +309,20 @@ class DaemonSessions:
         with self.mirror_lock:
             snapshot = self.monitor.snapshot(include_stale=False, with_extra=False)
             wanted: dict[str, tuple[dict, str]] = {}
-            for status in snapshot.statuses:
+            scopes: dict[str, str] = {}
+            # A Herdr pane shows its newest session's hook row in place of
+            # Herdr's own report for it (ProgramState then ignores the pane's
+            # reports); older sessions from the same pane keep their own scope.
+            panes: set[str] = set()
+            for status in sorted(snapshot.statuses, key=lambda row: row.updated_at, reverse=True):
                 if not should_mirror(status):
                     continue
-                update = mirrored_update(status, source_name)
+                pane = status.herdr_scope if status.herdr_scope not in panes else None
+                update = mirrored_update(status, source_name, pane)
                 if update is not None:
+                    if pane:
+                        panes.add(pane)
+                    scopes[status.agent_id] = update["scope"]
                     # A newer event with the same state still refreshes the mirror.
                     freshness = status.updated_at.isoformat()
                     wanted[update["scope"]] = (update, freshness)
@@ -316,4 +337,5 @@ class DaemonSessions:
                     {"v": 1, "type": "program_status", "scope": scope, "status": {"state": "clear"}}
                 )
                 del self.mirrored[scope]
+            self.mirror_scopes = scopes
 

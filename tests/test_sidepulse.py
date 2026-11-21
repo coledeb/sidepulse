@@ -159,11 +159,17 @@ from sidepulse.settings import (
     AGENT_ANIMATION_KITT_RED,
     AGENT_ANIMATION_LID_CLOSED,
     AGENT_ANIMATION_LID_OPEN,
+    AGENT_ANIMATION_NEON_ATTENTION,
+    AGENT_ANIMATION_NEON_COMPLETE,
+    AGENT_ANIMATION_NEON_IDLE,
+    AGENT_ANIMATION_NEON_LID_OPEN,
+    AGENT_ANIMATION_NEON_ROLL,
     AGENT_ANIMATION_NIGHT_RIDER,
     AGENT_ANIMATION_IMMEDIATE_OFF,
     AGENT_ANIMATION_SLOW_OFF,
     AGENT_ANIMATION_PROFILE_CYAN,
     AGENT_ANIMATION_PROFILE_EMBER,
+    AGENT_ANIMATION_PROFILE_NEON,
     AGENT_ANIMATION_PROFILE_PURPLE,
     AGENT_ANIMATION_PURPLE_ATTENTION,
     AGENT_ANIMATION_PURPLE_COMPLETE,
@@ -4066,6 +4072,88 @@ class AgentMonitorTests(unittest.TestCase):
             self.assertEqual(tomllib.loads(text)["hooks"]["state"][key]["trusted_hash"], "sha256:new-current-hash")
             self.assertIn('trusted_hash = "sha256:new-current-hash"', text)
 
+    def test_codex_reinstall_preserves_quoted_trust_keys_and_other_hooks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config.toml"
+            log = Path(tmp) / "codex.jsonl"
+            key = f"{config}:session_start:1:0"
+            other = f"{config}:session_start:0:0"
+            original = (
+                "[[hooks.SessionStart]]\nmatcher = 'startup'\n"
+                "[[hooks.SessionStart.hooks]]\ntype = 'command'\ncommand = 'echo hello'\n"
+                "[hooks.state]\n"
+                f"[hooks.state.'{other}']\ntrusted_hash = 'keep'\n"
+                f"[hooks.state.'{key}'] # SidePulse\ntrusted_hash = 'old' # keep comment\n"
+            )
+            config.write_text(original)
+            with (
+                patch("sidepulse.install.should_refresh_codex_hook_trust", return_value=True),
+                patch("sidepulse.install.resolve_codex_hook_hashes", return_value={key: "sha256:new"}),
+            ):
+                first = install_codex_hooks(log, config)
+                installed = config.read_text()
+                second = install_codex_hooks(log, config)
+
+            hooks = tomllib.loads(installed)["hooks"]
+            self.assertEqual(hooks["state"], {other: {"trusted_hash": "keep"}, key: {"trusted_hash": "sha256:new"}})
+            self.assertEqual(len(hooks["SessionStart"]), 2)
+            self.assertEqual(hooks["SessionStart"][0]["hooks"][0]["command"], "echo hello")
+            self.assertIn(f"[hooks.state.'{key}'] # SidePulse", installed)
+            self.assertIn("# keep comment", installed)
+            self.assertEqual(first.backup_path.read_text(), original)
+            self.assertFalse(second.changed)
+            self.assertEqual(config.read_text(), installed)
+
+    def test_codex_setup_recovers_legacy_duplicate_trust_suffix(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config.toml"
+            log = Path(tmp) / "codex.jsonl"
+            key = f"{config}:stop:0:0"
+            config.write_text(f"[hooks.state.'{key}']\ntrusted_hash = 'old'\n")
+            install_codex_hooks(log, config)
+            distinct = f"{config}:interrupt:0:0"
+            digest = "sha256:" + "a" * 64
+            damaged = config.read_text() + (
+                f"\n[hooks.state.{json.dumps(key)}]\ntrusted_hash = '{digest}'\n"
+                f'\n[hooks.state.{json.dumps(distinct)}]\ntrusted_hash = "{digest}"\n\n'
+            )
+            config.write_text(damaged)
+            with self.assertRaises(tomllib.TOMLDecodeError):
+                tomllib.loads(damaged)
+            with (
+                patch("sidepulse.install.should_refresh_codex_hook_trust", return_value=True),
+                patch("sidepulse.install.resolve_codex_hook_hashes", return_value={key: "sha256:verified"}),
+            ):
+                result = install_codex_hooks(log, config)
+            self.assertEqual(result.backup_path.read_text(), damaged)
+            state = tomllib.loads(config.read_text())["hooks"]["state"]
+            self.assertEqual(state[key]["trusted_hash"], "sha256:verified")
+            self.assertEqual(state[distinct]["trusted_hash"], digest)
+
+    def test_codex_setup_leaves_unrelated_invalid_config_intact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config.toml"
+            invalid = "[features]\nhooks = true\n[features]\nhooks = false\n"
+            config.write_text(invalid)
+            with self.assertRaisesRegex(ValueError, "config.toml"):
+                install_codex_hooks(Path(tmp) / "codex.jsonl", config)
+            self.assertEqual(config.read_text(), invalid)
+
+    def test_codex_setup_validates_trust_changes_before_writing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config.toml"
+            log = Path(tmp) / "codex.jsonl"
+            install_codex_hooks(log, config)
+            original = config.read_bytes()
+            with (
+                patch("sidepulse.install.should_refresh_codex_hook_trust", return_value=True),
+                patch("sidepulse.install.resolve_codex_hook_hashes", return_value={"key": "sha256:new"}),
+                patch("sidepulse.install.update_codex_trusted_hashes", return_value="[invalid"),
+                self.assertRaises(ValueError),
+            ):
+                install_codex_hooks(log, config)
+            self.assertEqual(config.read_bytes(), original)
+
     def test_update_codex_trusted_hashes_preserves_other_state(self) -> None:
         text = "\n".join(
             [
@@ -4687,6 +4775,8 @@ class AgentMonitorTests(unittest.TestCase):
 
         with (
             patch.object(cli_module.sys, "platform", "darwin"),
+            patch("sidepulse.herdr.executable_path", return_value="/test/herdr"),
+            patch("sidepulse.herdr.configure_plugin", return_value="Herdr plugin installed") as herdr,
             patch.object(cli_module, "ensure_receiver_config") as configure_receiver,
             patch.object(cli_module, "relay_link_command") as link_command,
             patch("sidepulse.service_launch.install_service", return_value=service_result) as service,
@@ -4724,6 +4814,7 @@ class AgentMonitorTests(unittest.TestCase):
         junie.assert_called_once()
         opencode.assert_called_once()
         antigravity.assert_called_once()
+        herdr.assert_called_once_with(uninstall=False, dry_run=False)
         guard.assert_called_once_with(scope="auto", dry_run=False)
         launch.assert_called_once_with(start=True)
         service.assert_called_once_with(start=True, dry_run=False)
@@ -4780,6 +4871,7 @@ class AgentMonitorTests(unittest.TestCase):
 
         with (
             patch.object(cli_module.sys, "platform", "darwin"),
+            patch("sidepulse.herdr.executable_path", return_value=None),
             patch("sidepulse.service_launch.install_service", return_value=service_result),
             patch.object(cli_module, "install_hook_results", return_value=[hook_result]),
             patch(
@@ -4835,6 +4927,7 @@ class AgentMonitorTests(unittest.TestCase):
 
         with (
             patch.object(cli_module.sys, "platform", "linux"),
+            patch("sidepulse.herdr.executable_path", return_value=None),
             patch.object(cli_module, "install_hook_results", return_value=[hook_result]),
             patch("sidepulse.service_launch.install_service", return_value=service_result) as service,
             patch("sidepulse.sd_eject_guard_launch.install_sd_eject_guard") as guard,
@@ -5181,6 +5274,42 @@ class AgentMonitorTests(unittest.TestCase):
             "#FF00FF 220ms ease",
             builtin_animation_program(AGENT_ANIMATION_PURPLE_LID_OPEN, 8),
         )
+        self.assertEqual(
+            builtin_animation_file_name(AGENT_ANIMATION_NEON_IDLE, 2),
+            "neon-idle-2.LED",
+        )
+        self.assertIn(
+            "1:#280066 2:#0E3CC0 3:#00E5FF 4:#00E5FF 5:#0E3CC0 6:#280066 4.6s pulse",
+            builtin_animation_program(AGENT_ANIMATION_NEON_IDLE, 8),
+        )
+        self.assertIn(
+            "0:#00F5FF 760ms pulse 0ms; 1:#FF00CC 760ms pulse 260ms",
+            builtin_animation_program(AGENT_ANIMATION_NEON_ROLL, 2),
+        )
+        self.assertIn(
+            "7:#FF1A8C 760ms pulse 665ms",
+            builtin_animation_program(AGENT_ANIMATION_NEON_ROLL, 8),
+        )
+        self.assertIn(
+            "#FF006E 1.6s pulse",
+            builtin_animation_program(AGENT_ANIMATION_NEON_ATTENTION, 8),
+        )
+        self.assertEqual(
+            builtin_animation_file_name(AGENT_ANIMATION_NEON_COMPLETE, 2),
+            "neon-complete-2.LED",
+        )
+        self.assertEqual(
+            builtin_animation_file_name(AGENT_ANIMATION_NEON_COMPLETE, 8),
+            "neon-complete-8.LED",
+        )
+        self.assertIn(
+            "0:#2680FF 1:#00C8FF 2:#00F0D4 3:#00FF9D 4:#00FF9D 5:#00F0D4 6:#00C8FF 7:#2680FF 480ms cosine",
+            builtin_animation_program(AGENT_ANIMATION_NEON_COMPLETE, 8),
+        )
+        self.assertIn(
+            "#00FF9D 220ms ease",
+            builtin_animation_program(AGENT_ANIMATION_NEON_LID_OPEN, 8),
+        )
 
     def test_color_profiles_use_the_exact_cyan_animation_shapes(self) -> None:
         def without_colors(program: str) -> str:
@@ -5211,25 +5340,29 @@ class AgentMonitorTests(unittest.TestCase):
                 AGENT_ANIMATION_CYAN_ROLL,
                 AGENT_ANIMATION_EMBER_TIDE,
                 AGENT_ANIMATION_PURPLE_TIDE,
+                AGENT_ANIMATION_NEON_ROLL,
             ),
             (
                 AGENT_ANIMATION_AMBER_PULSE,
                 AGENT_ANIMATION_EMBER_ATTENTION,
                 AGENT_ANIMATION_PURPLE_ATTENTION,
+                AGENT_ANIMATION_NEON_ATTENTION,
             ),
             (
                 AGENT_ANIMATION_CYAN_COMPLETE,
                 AGENT_ANIMATION_EMBER_COMPLETE,
                 AGENT_ANIMATION_PURPLE_COMPLETE,
+                None,
             ),
             (
                 AGENT_ANIMATION_LID_OPEN,
                 AGENT_ANIMATION_EMBER_LID_OPEN,
                 AGENT_ANIMATION_PURPLE_LID_OPEN,
+                AGENT_ANIMATION_NEON_LID_OPEN,
             ),
         )
         for led_count in (2, 8):
-            for cyan_id, ember_id, purple_id in corresponding_animations:
+            for cyan_id, ember_id, purple_id, neon_id in corresponding_animations:
                 cyan_shape = without_colors(
                     builtin_animation_program(cyan_id, led_count)
                 )
@@ -5247,6 +5380,14 @@ class AgentMonitorTests(unittest.TestCase):
                         ),
                         cyan_shape,
                     )
+                if neon_id is not None:
+                    with self.subTest(profile="Neon", animation=cyan_id, leds=led_count):
+                        self.assertEqual(
+                            without_colors(
+                                builtin_animation_program(neon_id, led_count)
+                            ),
+                            cyan_shape,
+                        )
 
     def test_idle_profiles_use_a_symmetric_center_bright_gradient(self) -> None:
         for animation_id in (
@@ -5265,6 +5406,25 @@ class AgentMonitorTests(unittest.TestCase):
                 outer_peak = max(bytes.fromhex(colors[0][1:]))
                 center_peak = max(bytes.fromhex(colors[1][1:]))
                 self.assertLess(outer_peak, center_peak)
+
+        neon_idle_lines = [
+            line
+            for line in builtin_animation_program(AGENT_ANIMATION_NEON_IDLE, 8).splitlines()
+            if "#" in line
+        ]
+        self.assertEqual(len(neon_idle_lines), 2)
+        for phase, line in enumerate(neon_idle_lines, start=1):
+            with self.subTest(animation=AGENT_ANIMATION_NEON_IDLE, phase=phase):
+                colors = re.findall(r"#[0-9A-Fa-f]{6}", line)
+                self.assertEqual(len(colors), 6)
+                self.assertEqual(colors[0], colors[5])
+                self.assertEqual(colors[1], colors[4])
+                self.assertEqual(colors[2], colors[3])
+                outer_peak = max(bytes.fromhex(colors[0][1:]))
+                mid_peak = max(bytes.fromhex(colors[1][1:]))
+                center_peak = max(bytes.fromhex(colors[2][1:]))
+                self.assertLess(outer_peak, mid_peak)
+                self.assertLess(mid_peak, center_peak)
 
     def test_purple_profile_uses_ff00ff_for_every_colored_animation(self) -> None:
         purple_animations = (
@@ -5324,6 +5484,90 @@ class AgentMonitorTests(unittest.TestCase):
             "off 2s\n"
             "2:#972310 3:#F23819 4:#F23819 5:#972310 2s ease\n"
             "repeat",
+        )
+
+    def test_neon_profile_uses_electric_neon_palette_and_valid_programs(self) -> None:
+        neon_animations = (
+            AGENT_ANIMATION_NEON_IDLE,
+            AGENT_ANIMATION_NEON_ROLL,
+            AGENT_ANIMATION_NEON_ATTENTION,
+            AGENT_ANIMATION_NEON_COMPLETE,
+            AGENT_ANIMATION_NEON_LID_OPEN,
+        )
+        for led_count in (2, 8):
+            for animation_id in neon_animations:
+                with self.subTest(animation=animation_id, leds=led_count):
+                    program = program_for_agent_mode(
+                        AgentMode.WORKING,
+                        led_count=led_count,
+                        animation_style=animation_id,
+                    )
+                    validate_led_text(program)
+                    self.assertLessEqual(len(program.encode("utf-8")), 512)
+        self.assertEqual(
+            re.findall(
+                r"#[0-9A-Fa-f]{6}",
+                builtin_animation_program(AGENT_ANIMATION_NEON_ROLL, 8),
+            ),
+            [
+                "#00F5FF",
+                "#00C2FF",
+                "#2680FF",
+                "#5B42FF",
+                "#9B1CFF",
+                "#D400FF",
+                "#FF00CC",
+                "#FF1A8C",
+            ],
+        )
+        self.assertEqual(
+            builtin_animation_program(AGENT_ANIMATION_NEON_IDLE, 2),
+            "brightness 80\n"
+            "off 700ms cosine\n"
+            "0:#00E5FF 1:#0E3CC0 4.6s pulse\n"
+            "off 700ms cosine\n"
+            "0:#4818C0 1:#E000FF 4.6s pulse\n"
+            "repeat",
+        )
+        self.assertEqual(
+            builtin_animation_program(AGENT_ANIMATION_NEON_IDLE, 8),
+            "brightness 80\n"
+            "off 700ms cosine\n"
+            "1:#280066 2:#0E3CC0 3:#00E5FF 4:#00E5FF 5:#0E3CC0 6:#280066 4.6s pulse\n"
+            "off 700ms cosine\n"
+            "1:#003472 2:#4818C0 3:#E000FF 4:#E000FF 5:#4818C0 6:#003472 4.6s pulse\n"
+            "repeat",
+        )
+        self.assertEqual(
+            builtin_animation_program(AGENT_ANIMATION_NEON_COMPLETE, 2),
+            "brightness 160\n"
+            "#00FF9D 220ms cosine\n"
+            "0:#00FF9D 1:#00C8FF 480ms cosine\n"
+            "0:#00FF9D 1.2s none",
+        )
+        self.assertEqual(
+            builtin_animation_program(AGENT_ANIMATION_NEON_COMPLETE, 8),
+            "brightness 160\n"
+            "3:#00FF9D 4:#00FF9D 160ms cosine; 2:#00FF9D 5:#00FF9D 160ms cosine 70ms\n"
+            "1:#00FF9D 6:#00FF9D 160ms cosine; 0:#00FF9D 7:#00FF9D 160ms cosine 70ms\n"
+            "0:#2680FF 1:#00C8FF 2:#00F0D4 3:#00FF9D 4:#00FF9D 5:#00F0D4 6:#00C8FF 7:#2680FF 480ms cosine\n"
+            "0:#2680FF 1.2s none",
+        )
+        self.assertTrue(
+            program_for_agent_mode(
+                AgentMode.IDLE_READY,
+                led_count=8,
+                brightness=128,
+                animation_style=AGENT_ANIMATION_NEON_IDLE,
+            ).startswith("brightness 40\n")
+        )
+        self.assertTrue(
+            program_for_agent_mode(
+                AgentMode.COMPLETED,
+                led_count=8,
+                brightness=128,
+                animation_style=AGENT_ANIMATION_NEON_COMPLETE,
+            ).startswith("brightness 80\n")
         )
 
     def test_core_state_transitions_and_lid_close_outside_in_program(self) -> None:
@@ -6716,6 +6960,11 @@ class AgentMonitorTests(unittest.TestCase):
             AGENT_ANIMATION_PURPLE_ATTENTION,
             AGENT_ANIMATION_PURPLE_COMPLETE,
             AGENT_ANIMATION_PURPLE_LID_OPEN,
+            AGENT_ANIMATION_NEON_IDLE,
+            AGENT_ANIMATION_NEON_ROLL,
+            AGENT_ANIMATION_NEON_ATTENTION,
+            AGENT_ANIMATION_NEON_COMPLETE,
+            AGENT_ANIMATION_NEON_LID_OPEN,
             AGENT_ANIMATION_NIGHT_RIDER,
             AGENT_ANIMATION_LID_OPEN,
             AGENT_ANIMATION_LID_CLOSED,
@@ -6819,11 +7068,36 @@ class AgentMonitorTests(unittest.TestCase):
             AGENT_ANIMATION_LID_CLOSED,
         )
 
+        neon = settings.with_applied_agent_animation_profile(
+            AGENT_ANIMATION_PROFILE_NEON
+        )
+        self.assertEqual(
+            neon.matching_agent_animation_profile_id(),
+            AGENT_ANIMATION_PROFILE_NEON,
+        )
+        self.assertEqual(
+            neon.agent_animation_id(AgentMode.WORKING),
+            AGENT_ANIMATION_NEON_ROLL,
+        )
+        self.assertEqual(
+            neon.agent_animation_id(AgentMode.COMPLETED),
+            AGENT_ANIMATION_NEON_COMPLETE,
+        )
+        self.assertEqual(
+            neon.agent_animation_id(ANIMATION_STATE_LID_OPEN),
+            AGENT_ANIMATION_NEON_LID_OPEN,
+        )
+        self.assertEqual(
+            neon.agent_animation_id(ANIMATION_STATE_LID_CLOSED),
+            AGENT_ANIMATION_LID_CLOSED,
+        )
+
     def test_shipped_profile_json_matches_builtin_profiles(self) -> None:
         profiles = builtin_agent_animation_profiles()
         expected = {
             "cyan": AGENT_ANIMATION_PROFILE_CYAN,
             "ember": AGENT_ANIMATION_PROFILE_EMBER,
+            "neon": AGENT_ANIMATION_PROFILE_NEON,
             "purple": AGENT_ANIMATION_PROFILE_PURPLE,
         }
         for file_stem, profile_id in expected.items():
@@ -6876,6 +7150,7 @@ class AgentMonitorTests(unittest.TestCase):
             {
                 AGENT_ANIMATION_PROFILE_CYAN,
                 AGENT_ANIMATION_PROFILE_EMBER,
+                AGENT_ANIMATION_PROFILE_NEON,
                 AGENT_ANIMATION_PROFILE_PURPLE,
             },
         )

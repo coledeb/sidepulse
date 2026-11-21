@@ -75,6 +75,7 @@ from .lid_sleep import (
 from .models import AgentStatus
 from .providers import (
     HOOK_PROVIDERS,
+    LOG_HOOK_PROVIDERS,
     detect_provider_configs,
     default_log_path,
 )
@@ -134,6 +135,11 @@ def build_sidepulse_parser() -> argparse.ArgumentParser:
                       help="Command and its arguments; -- is optional.")
     wrap.set_defaults(func=cmd_wrap)
 
+    herdr = subparsers.add_parser("herdr", help="Use the SidePulse plugin for the Herdr terminal multiplexer.")
+    herdr_commands = herdr.add_subparsers(dest="herdr_command", required=True)
+    herdr_commands.add_parser("sync", help="Reconcile agent status when invoked by Herdr.")
+    herdr.set_defaults(func=cmd_herdr)
+
     version = subparsers.add_parser("version", help="Print the installed SidePulse version.")
     version.set_defaults(func=cmd_version)
     update = subparsers.add_parser("update", help="Update using the one-command setup installer.")
@@ -176,7 +182,7 @@ def build_sidepulse_parser() -> argparse.ArgumentParser:
         choices=("all", *HOOK_PROVIDERS),
         nargs="?",
         default="all",
-        help="Agent hooks to install. Default: all.",
+        help="Agent hooks or Herdr plugin to install. Default: all agent hooks.",
     )
     agent_selection.add_argument(
         "--agent",
@@ -329,7 +335,7 @@ def add_sidepulse_delivery_arguments(parser: argparse.ArgumentParser) -> None:
 
 def add_hook_log_parser(subparsers: argparse._SubParsersAction) -> None:
     hook_log = subparsers.add_parser("hook-log", help="Internal hook logging entry point.")
-    hook_log.add_argument("--provider", choices=HOOK_PROVIDERS, required=True)
+    hook_log.add_argument("--provider", choices=LOG_HOOK_PROVIDERS, required=True)
     hook_log.add_argument("--log", type=Path, required=True)
     hook_log.add_argument("--event", help="Provider-native lifecycle event name (used by cursor and antigravity).")
     hook_log.set_defaults(func=cmd_hook_log)
@@ -1089,8 +1095,13 @@ def cmd_sidepulse_relay(args: argparse.Namespace) -> int:
 def cmd_sidepulse_setup(args: argparse.Namespace) -> int:
     if getattr(args, "uninstall", False):
         return cmd_uninstall(args)
+    providers = selected_hook_providers(args)
     if not args.no_agent_monitor:
-        results = install_hook_results(args)
+        try:
+            results = install_hook_results(args)
+        except ValueError as exc:
+            print(f"sidepulse: {exc}", file=sys.stderr)
+            return 1
         print_install_results(results, dry_run=args.dry_run)
 
     from .service_launch import install_service
@@ -1105,10 +1116,15 @@ def cmd_sidepulse_setup(args: argparse.Namespace) -> int:
     if str(service_result.path):
         print(f"  config: {service_result.path}")
 
+    herdr_result = 0
+    if not args.no_agent_monitor and "herdr" in providers:
+        herdr_result = configure_herdr(args)
+
     if sys.platform != "darwin":
         print("macOS integrations: skipped (CLI-only setup on this platform)")
-        print("sidepulse: ready for linked phones and mounted SidePulse devices")
-        return 0
+        if not herdr_result:
+            print("sidepulse: ready for linked phones and mounted SidePulse devices")
+        return herdr_result
 
     if not args.no_sd_eject_guard:
         from .sd_eject_guard_launch import (
@@ -1128,11 +1144,11 @@ def cmd_sidepulse_setup(args: argparse.Namespace) -> int:
         print_sd_eject_guard_result(guard_result)
 
     if args.no_status_bar:
-        return 0
+        return herdr_result
 
     if args.dry_run:
         print("status-bar: would install and start")
-        return 0
+        return herdr_result
 
     from .status_bar_launch import install_launch_agent
 
@@ -1142,7 +1158,7 @@ def cmd_sidepulse_setup(args: argparse.Namespace) -> int:
         action += " and started"
     print(f"status-bar: {action}")
     print(f"  plist: {result.plist_path}")
-    return 0
+    return herdr_result
 
 
 def cmd_sidepulse_service(args: argparse.Namespace) -> int:
@@ -1317,6 +1333,18 @@ def cmd_status_bar(args: argparse.Namespace) -> int:
     return 0
 
 
+def configure_herdr(args: argparse.Namespace) -> int:
+    from . import herdr
+    if args.provider == "all" and not args.agent and not herdr.executable_path():
+        return 0
+    try:
+        print(herdr.configure_plugin(uninstall=args.uninstall, dry_run=args.dry_run))
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        print(f"SidePulse Herdr plugin: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def selected_hook_providers(args: argparse.Namespace) -> tuple[str, ...]:
     if args.agent:
         return tuple(dict.fromkeys(args.agent))
@@ -1327,6 +1355,8 @@ def install_hook_results(args: argparse.Namespace):
     providers = selected_hook_providers(args)
     results = []
     for provider in providers:
+        if provider == "herdr":
+            continue  # A Herdr plugin, configured by configure_herdr.
         log_path = install_log_path(provider, args)
         if provider == "codex":
             results.append(install_codex_hooks(log_path=log_path, dry_run=args.dry_run))
@@ -1372,6 +1402,8 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
     providers = selected_hook_providers(args)
     results = []
     for provider in providers:
+        if provider == "herdr":
+            continue  # A Herdr plugin, configured by configure_herdr.
         log_path = uninstall_log_path(provider, args)
         if provider == "codex":
             results.append(uninstall_codex_hooks(log_path=log_path, dry_run=args.dry_run))
@@ -1397,7 +1429,7 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
         print(f"  log: {result.log_path}")
         if result.backup_path:
             print(f"  backup: {result.backup_path}")
-    return 0
+    return configure_herdr(args) if "herdr" in providers else 0
 
 
 def cmd_hook_log(args: argparse.Namespace) -> int:
@@ -1574,6 +1606,19 @@ def cmd_wrap(args: argparse.Namespace) -> int:
     except (OSError, ValueError) as exc:
         print(f"Could not wrap command: {exc}", file=sys.stderr)
         return 1
+
+
+def cmd_herdr(args: argparse.Namespace) -> int:
+    if os.name != 'posix':
+        print("The SidePulse Herdr plugin requires macOS or Linux.", file=sys.stderr)
+        return 2
+    from . import herdr
+    try:
+        herdr.sync()
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        print(f"SidePulse Herdr plugin: {exc}", file=sys.stderr)
+        return 1
+    return 0
 
 
 def cmd_report(args: argparse.Namespace) -> int:

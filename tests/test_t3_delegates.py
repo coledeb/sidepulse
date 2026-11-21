@@ -57,6 +57,19 @@ class T3DelegateLookupTests(unittest.TestCase):
         self.assertTrue(self.lookup.is_delegate(event("ses_remote")))
         self.assertTrue(self.lookup.is_delegate(event("ses_local")))
 
+    def test_codex_transcript_records_of_a_delegate_are_hidden_too(self) -> None:
+        """Rollout records leave origin empty; the hook's annotation is in the payload."""
+        self.add_thread("mcp:launch:codex", "codex-session",
+                        delegatedFrom={"environmentId": "mini", "threadId": "p", "title": "Parent"})
+        transcript = HookEvent(provider="codex", logged_at=NOW, event_name="Stop",
+                               raw={"hook_event_name": "Stop", "agent_origin": "Codex in T3 Code"},
+                               session_id="codex-session", origin=None)
+        self.assertTrue(self.lookup.is_delegate(transcript))
+        bare = HookEvent(provider="codex", logged_at=NOW, event_name="Stop", raw={},
+                         session_id="codex-session", origin=None)
+        # Once known, a record that names no host at all is hidden as well.
+        self.assertTrue(self.lookup.is_delegate(bare))
+
     def test_requested_launches_forks_and_user_threads_show(self) -> None:
         self.add_thread("mcp:launch:asked", "ses_asked", delegatedFrom=None)
         self.add_thread("fork", "ses_fork", lineage={"parentThreadId": "p", "relationshipToParent": "fork"})
