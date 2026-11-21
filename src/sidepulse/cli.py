@@ -31,6 +31,7 @@ from .install import (
     install_claude_hooks,
     install_codex_hooks,
     install_antigravity_hooks,
+    install_devin_hooks,
     install_cursor_hooks,
     install_grok_hooks,
     install_junie_hooks,
@@ -38,6 +39,7 @@ from .install import (
     uninstall_claude_hooks,
     uninstall_codex_hooks,
     uninstall_antigravity_hooks,
+    uninstall_devin_hooks,
     uninstall_cursor_hooks,
     uninstall_grok_hooks,
     uninstall_junie_hooks,
@@ -198,6 +200,7 @@ def build_sidepulse_parser() -> argparse.ArgumentParser:
     setup.add_argument("--junie-log", type=Path, help="Junie JSONL log path.")
     setup.add_argument("--opencode-log", type=Path, help="OpenCode JSONL log path.")
     setup.add_argument("--antigravity-log", type=Path, help="Antigravity JSONL log path.")
+    setup.add_argument("--devin-log", type=Path, help="Devin JSONL log path.")
     setup.add_argument("--dry-run", action="store_true", help="Show what would change.")
     setup.add_argument(
         "--no-agent-monitor",
@@ -1370,6 +1373,8 @@ def install_hook_results(args: argparse.Namespace):
             results.append(install_opencode_hooks(log_path=log_path, dry_run=args.dry_run))
         elif provider == "antigravity":
             results.append(install_antigravity_hooks(log_path=log_path, dry_run=args.dry_run))
+        elif provider == "devin":
+            results.append(install_devin_hooks(log_path=log_path, dry_run=args.dry_run))
         else:
             results.append(install_junie_hooks(log_path=log_path, dry_run=args.dry_run))
     return results
@@ -1390,6 +1395,8 @@ def print_install_results(results, *, dry_run: bool) -> None:
             print(f"  backup: {result.backup_path}")
         if result.provider == "antigravity" and result.changed and not dry_run:
             print("  Start a new Antigravity session (or T3 thread) to load the hooks.")
+        if result.provider == "devin" and result.changed and not dry_run:
+            print("  New Devin sessions (and T3 threads) load the hooks.")
         if result.provider == "codex" and result.changed and not dry_run:
             print("  Restart Codex to activate these hooks in new sessions.")
         if result.provider == "opencode" and result.changed and not dry_run:
@@ -1417,6 +1424,8 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
             results.append(uninstall_opencode_hooks(log_path=log_path, dry_run=args.dry_run))
         elif provider == "antigravity":
             results.append(uninstall_antigravity_hooks(log_path=log_path, dry_run=args.dry_run))
+        elif provider == "devin":
+            results.append(uninstall_devin_hooks(log_path=log_path, dry_run=args.dry_run))
         else:
             results.append(uninstall_junie_hooks(log_path=log_path, dry_run=args.dry_run))
 

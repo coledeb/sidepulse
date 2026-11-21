@@ -6533,7 +6533,7 @@ _symbol_icon_cache = {}
 # its desktop app is installed. Single-color marks are templates, filled with
 # the menu's text color like an SF Symbol; a fainter part keeps its opacity.
 PROVIDER_MARKS_DIR = Path(__file__).parent / "resources" / "provider_icons"
-MONOCHROME_PROVIDER_MARKS = frozenset({"codex", "cursor", "grok", "opencode"})
+MONOCHROME_PROVIDER_MARKS = frozenset({"codex", "cursor", "grok", "opencode", "devin"})
 PROVIDER_MARK_CANVAS = 32.0
 PROVIDER_MARK_INSET = 3.5  # matches the margin around a macOS app icon's artwork
 
@@ -6587,6 +6587,7 @@ _BUILTIN_PROVIDER_BADGES = {
     "cursor": ("CU", (0.23, 0.27, 0.34)),
     "junie": ("J", (0.36, 0.24, 0.70)),
     "opencode": ("OC", (0.18, 0.36, 0.58)),
+    "devin": ("DV", (0.20, 0.42, 0.40)),
 }
 
 

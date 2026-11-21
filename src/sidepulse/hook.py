@@ -210,11 +210,67 @@ def is_cursor_claude_compat_payload(payload_text: str) -> bool:
     return isinstance(raw, dict) and "cursor_version" in raw
 
 
+DEVIN_PROJECT_DIR_ENV = "DEVIN_PROJECT_DIR"
+
+
+def is_devin_claude_compat_payload(payload_text: str, env: Any = None) -> bool:
+    """Whether a Claude hook was fired by Devin running Claude-compatible hooks.
+
+    Devin (CLI, Desktop and the `devin acp` server T3 Code runs) also runs the
+    hooks in ~/.claude/settings.json, with the same payload its own hooks get.
+    Devin sets DEVIN_PROJECT_DIR for every hook it runs; Claude Code always
+    sends a transcript_path, which Devin's payload lacks.
+    """
+    active_env = os.environ if env is None else env
+    if not active_env.get(DEVIN_PROJECT_DIR_ENV):
+        return False
+    try:
+        raw = json.loads(payload_text or "{}")
+    except json.JSONDecodeError:
+        return False
+    return isinstance(raw, dict) and not raw.get("transcript_path")
+
+
+def normalize_devin_payload(payload: dict[str, Any], env: Any = None) -> dict[str, Any]:
+    """Devin's payload names no folder; its hooks get the project in the env."""
+    active_env = os.environ if env is None else env
+    normalized = dict(payload)
+    project_dir = active_env.get(DEVIN_PROJECT_DIR_ENV)
+    if project_dir and not normalized.get("cwd"):
+        normalized["cwd"] = project_dir
+    return normalized
+
+
+def devin_native_hooks_installed() -> bool:
+    try:
+        from .providers import detect_devin_config
+
+        return detect_devin_config().hooks_enabled
+    except Exception:
+        return False
+
+
 def hook_log_main(provider: str, log_path: Path, event: str | None = None) -> int:
     try:
         payload_text = sys.stdin.read()
         if provider == "claude" and is_cursor_claude_compat_payload(payload_text):
             return 0
+        if provider == "claude" and is_devin_claude_compat_payload(payload_text):
+            if devin_native_hooks_installed():
+                # SidePulse's own Devin hooks report this event already.
+                return 0
+            provider = "devin"
+            log_path = detect_log_path("devin")
+        if provider == "devin":
+            try:
+                raw = json.loads(payload_text or "{}")
+            except json.JSONDecodeError:
+                raw = {}
+            normalized = normalize_devin_payload(raw if isinstance(raw, dict) else {})
+            if normalized.get("hook_event_name") == "SessionEnd":
+                # The Claude-compatible copy still sends it; see DEVIN_EVENTS.
+                return 0
+            payload_text = json.dumps(normalized, separators=(",", ":"), ensure_ascii=False)
         if provider == "cursor" and event:
             from .cursor_hook import detect_cursor_host, normalize_payload
 

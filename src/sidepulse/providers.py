@@ -123,8 +123,23 @@ ANTIGRAVITY_EVENTS = (
 # The named hook SidePulse owns in Antigravity's hooks.json.
 ANTIGRAVITY_HOOK_NAME = "sidepulse"
 
+# Devin (the Devin CLI, Devin Desktop and the `devin acp` server T3 Code runs)
+# sends Claude-shaped hook payloads. Devin has no failure or notification
+# events. SessionEnd is left out: T3 Code's Devin ends its session right after
+# every turn's Stop, which already said how the turn ended (a question, say).
+DEVIN_EVENTS = (
+    "SessionStart",
+    "UserPromptSubmit",
+    "PreToolUse",
+    "PostToolUse",
+    "PermissionRequest",
+    "Stop",
+)
+
 # Agents whose hooks log through `sidepulse hook-log`.
-LOG_HOOK_PROVIDERS = ("codex", "claude", "grok", "cursor", "junie", "opencode", "antigravity")
+LOG_HOOK_PROVIDERS = (
+    "codex", "claude", "grok", "cursor", "junie", "opencode", "antigravity", "devin",
+)
 HOOK_PROVIDERS = (*LOG_HOOK_PROVIDERS, "herdr")
 KNOWN_EVENTS = tuple(
     dict.fromkeys(
@@ -194,6 +209,7 @@ def detect_provider_configs(home: Path | None = None) -> list[ProviderConfig]:
         detect_junie_config(home),
         detect_opencode_config(home),
         detect_antigravity_config(home),
+        detect_devin_config(home),
         detect_herdr_config(home),
     ]
 
@@ -578,6 +594,43 @@ def detect_antigravity_config(home: Path | None = None) -> ProviderConfig:
     )
 
 
+def default_devin_config_path(home: Path | None = None) -> Path:
+    """Devin's user config, whose ``hooks`` key holds its global hooks."""
+    if home is None and os.name == "nt" and os.environ.get("APPDATA"):
+        return Path(os.environ["APPDATA"]) / "devin" / "config.json"
+    return (home or Path.home()) / ".config" / "devin" / "config.json"
+
+
+def detect_devin_config(home: Path | None = None) -> ProviderConfig:
+    config_path = default_devin_config_path(home)
+    if not config_path.exists():
+        return ProviderConfig("devin", config_path, False, False, (), ())
+    try:
+        data = json.loads(config_path.read_text())
+    except Exception:
+        return ProviderConfig("devin", config_path, True, False, (), ())
+
+    hooks = data.get("hooks") if isinstance(data, dict) else None
+    hook_events: list[str] = []
+    paths: list[Path] = []
+    if isinstance(hooks, dict):
+        for event_name, entries in hooks.items():
+            if event_name not in DEVIN_EVENTS or not isinstance(entries, list):
+                continue
+            managed_entries = [entry for entry in entries if _entry_has_sidepulse_hook(entry)]
+            if managed_entries:
+                hook_events.append(event_name)
+                paths.extend(_paths_from_hook_entries(managed_entries))
+    return ProviderConfig(
+        "devin",
+        config_path,
+        True,
+        bool(hook_events),
+        tuple(sorted(set(hook_events))),
+        _dedupe_paths(paths),
+    )
+
+
 def detect_log_path(provider: str, home: Path | None = None) -> Path:
     if provider == "codex":
         config = detect_codex_config(home)
@@ -593,6 +646,8 @@ def detect_log_path(provider: str, home: Path | None = None) -> Path:
         config = detect_opencode_config(home)
     elif provider == "antigravity":
         config = detect_antigravity_config(home)
+    elif provider == "devin":
+        config = detect_devin_config(home)
     else:
         config = ProviderConfig(provider, default_log_path(provider, home), False, False, (), ())
     if config.log_paths:
