@@ -58,17 +58,25 @@ class T3DelegateLookup:
         """Whether ``record`` comes from a T3 subagent on this Mac."""
         thread_id = record.raw.get(T3CODE_THREAD_KEY)
         thread_id = thread_id if isinstance(thread_id, str) and thread_id else None
-        return self.is_delegate_session(record.provider, record.origin, record.session_id, thread_id)
+        # Records replayed from Codex's rollout transcripts leave ``origin``
+        # empty; the hook's own annotation is still in the payload.
+        origin = record.origin or record.raw.get("agent_origin")
+        return self.is_delegate_session(
+            record.provider, origin if isinstance(origin, str) else None, record.session_id, thread_id,
+        )
 
     def is_delegate_session(
         self, provider: str, origin: str | None, session_id: str | None, thread_id: str | None = None,
     ) -> bool:
         """Whether that session, hosted by T3 on this Mac, is a subagent."""
-        if not is_t3code_origin(origin) or is_relayed_origin(origin):
-            return False
         if not thread_id and not session_id:
             return False
         key = f"{provider}:{session_id or thread_id}"
+        if self.known.get(key):
+            # Known from an earlier record, whatever this one says about its host.
+            return True
+        if not is_t3code_origin(origin) or is_relayed_origin(origin):
+            return False
         if key in self.known:
             return self.known[key]
         now = self.monotonic()
