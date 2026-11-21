@@ -16,9 +16,11 @@ from pathlib import Path
 from . import __version__
 from .providers import default_state_dir
 
-SETUP_URL = "https://sidepulse.io/setup.sh"
-GITHUB_API = 'https://api.github.com/repos/inteliwear/sidepulse'
-GITHUB_MAIN_URL = 'https://github.com/inteliwear/sidepulse/commits/main/'
+# This fork updates from its own repository; sidepulse.io serves upstream's
+# installer, which would replace the fork with inteliwear/sidepulse.
+SETUP_URL = "https://raw.githubusercontent.com/coledeb/sidepulse/main/scripts/setup.sh"
+GITHUB_API = 'https://api.github.com/repos/coledeb/sidepulse'
+GITHUB_MAIN_URL = 'https://github.com/coledeb/sidepulse/commits/main/'
 UPDATE_CHECK_SECONDS = 24 * 60 * 60
 
 

@@ -21,7 +21,8 @@ for option do
 done
 
 PYTHON_BIN=${PYTHON_BIN:-python3}
-INSTALL_SPEC=${SIDEPULSE_INSTALL_SPEC:-"git+https://github.com/inteliwear/sidepulse.git"}
+# This fork installs itself; upstream is inteliwear/sidepulse.
+INSTALL_SPEC=${SIDEPULSE_INSTALL_SPEC:-"git+https://github.com/coledeb/sidepulse.git"}
 INSTALL_ROOT=${SIDEPULSE_INSTALL_ROOT:-"$HOME/.local/share/sidepulse"}
 VENV=$INSTALL_ROOT/venv
 BIN_DIR=${SIDEPULSE_BIN_DIR:-"$HOME/.local/bin"}

@@ -58,7 +58,7 @@ Choose the level that fits how you want to use SidePulse.
 ### 1. One-command setup
 
 ```sh
-curl -fsSL https://sidepulse.io/setup.sh | bash
+curl -fsSL https://raw.githubusercontent.com/coledeb/sidepulse/main/scripts/setup.sh | bash
 ```
 
 The command works on macOS and Linux. It uses an existing Python 3.10 or newer
@@ -93,7 +93,7 @@ Agents and automation can install all available components without prompting.
 This command also reports a failed download to the caller.
 
 ```sh
-bash -o pipefail -c 'curl -fsSL https://sidepulse.io/setup.sh | env SIDEPULSE_SETUP_NONINTERACTIVE=1 sh'
+bash -o pipefail -c 'curl -fsSL https://raw.githubusercontent.com/coledeb/sidepulse/main/scripts/setup.sh | env SIDEPULSE_SETUP_NONINTERACTIVE=1 sh'
 ```
 
 From a checkout, run `sh scripts/setup.sh --headless`. For an existing install,
@@ -135,7 +135,7 @@ If you already manage your own Python 3.10+ environment:
 
 ```sh
 python3 -m pip install --upgrade \
-  "git+https://github.com/inteliwear/sidepulse.git"
+  "git+https://github.com/coledeb/sidepulse.git"
 sidepulse setup
 ```
 
@@ -144,7 +144,7 @@ sidepulse setup
 Use an editable installation when you want to modify or hack on SidePulse:
 
 ```sh
-git clone https://github.com/inteliwear/sidepulse.git
+git clone https://github.com/coledeb/sidepulse.git
 cd sidepulse
 python3 -m pip install -e .
 sidepulse setup
@@ -244,7 +244,7 @@ sidepulse update --headless
 sidepulse update --dry-run
 ```
 
-`update` runs the same installer as `curl -fsSL https://sidepulse.io/setup.sh | bash`.
+`update` runs the same installer as `curl -fsSL https://raw.githubusercontent.com/coledeb/sidepulse/main/scripts/setup.sh | bash`.
 It downloads the script completely before executing it, so curl failures do not
 run a partial installer. The website script forwards to `scripts/setup.sh` on
 GitHub, keeping both entry points on one implementation.

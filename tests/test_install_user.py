@@ -31,7 +31,7 @@ class UserInstallerTests(unittest.TestCase):
         script = root / "scripts" / "setup.sh"
         text = script.read_text()
         self.assertIn('$HOME/.local/share/sidepulse', text)
-        self.assertIn('git+https://github.com/inteliwear/sidepulse.git', text)
+        self.assertIn('git+https://github.com/coledeb/sidepulse.git', text)
         self.assertIn('SIDEPULSE_INSTALL_SPEC', text)
         self.assertIn("sys.version_info < (3, 10)", text)
         self.assertIn('set -- setup', text)
