@@ -49,9 +49,9 @@ try {
         }
     } else {
         $refPart = [Uri]::EscapeDataString($Ref)
-        $revision = (Invoke-RestMethod -Uri "https://api.github.com/repos/inteliwear/sidepulse/commits/$refPart").sha
+        $revision = (Invoke-RestMethod -Uri "https://api.github.com/repos/coledeb/sidepulse/commits/$refPart").sha
         if ($revision -notmatch '^[a-f0-9]{40}$') { throw 'The requested SidePulse source could not be resolved.' }
-        $package = "https://github.com/inteliwear/sidepulse/archive/$revision.zip"
+        $package = "https://github.com/coledeb/sidepulse/archive/$revision.zip"
         $env:SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SIDEPULSE = '0+g' + $revision.Substring(0,12)
         $env:SETUPTOOLS_SCM_PRETEND_METADATA_FOR_SIDEPULSE = "{node=`"g$revision`"}"
     }
