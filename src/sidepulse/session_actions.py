@@ -97,6 +97,8 @@ def session_resume_command(status: AgentStatus) -> str | None:
         return f"cd {cwd} && opencode --session {session_id}"
     if provider == "antigravity":
         return f"cd {cwd} && agy --conversation {session_id}"
+    if provider == "devin":
+        return f"cd {cwd} && devin --resume {session_id}"
     return None
 
 

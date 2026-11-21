@@ -421,6 +421,9 @@ def provider_for_t3_instance(instance: object) -> str:
     """SidePulse's provider name for a T3 provider instance id ("claudeAgent" -> "claude")."""
     text = str(instance or "").strip()
     lowered = text.lower()
+    # Agents T3 installs from the ACP registry are named "acpRegistry_<agent>".
+    if lowered.startswith("acpregistry_") and len(lowered) > len("acpregistry_"):
+        lowered = lowered[len("acpregistry_"):]
     if lowered.startswith("claude"):
         return "claude"
     if lowered.startswith("codex"):
