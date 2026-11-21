@@ -6,6 +6,7 @@ import re
 import tempfile
 import threading
 import time
+import urllib.parse
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path, PureWindowsPath
@@ -519,6 +520,8 @@ class LiveAgentMonitor:
         # shown alongside this monitor's own under the same visibility rules.
         self.extra_statuses: Callable[[], Iterable[AgentStatus]] = tuple
         self._suppressed_codex_sessions: set[str] = set()
+        # Rows running a Claude browser page call: agent_id -> (call id, started).
+        self.browser_waits: dict[str, tuple[str, datetime]] = {}
         self.load_latest_state()
         if recover_on_init:
             self.reconcile_recovery_sources()
@@ -553,6 +556,10 @@ class LiveAgentMonitor:
             status = status_from_event(record, metadata, previous=previous)
             if status is None:
                 return
+            wait = self.browser_waits.get(status.agent_id)
+            if wait and is_parallel_tool_completion(record, status, wait[0]):
+                # Another tool finished while the page call is still open.
+                return
 
             track_pending_permissions(record, self.pending_permissions_by_key)
             if should_ignore_status_transition(
@@ -563,6 +570,11 @@ class LiveAgentMonitor:
             ):
                 return
             self.statuses_by_key[status.agent_id] = status
+            call = claude_browser_page_call(record) if status.mode == AgentMode.TOOL_RUNNING else None
+            if call:
+                self.browser_waits[status.agent_id] = (call, record.logged_at)
+            else:
+                self.browser_waits.pop(status.agent_id, None)
             agent = agent_process_from_record(record)
             if agent is not None:
                 self.agent_process_by_status[status.agent_id] = agent
@@ -666,7 +678,10 @@ class LiveAgentMonitor:
         self.reconcile_claude_session_idle(now)
         self.reconcile_exited_agent_processes(now)
         with self.lock:
-            statuses = tuple(self.statuses_by_key.values())
+            statuses = tuple(
+                browser_wait_status(status, self.browser_waits.get(status.agent_id), now)
+                for status in self.statuses_by_key.values()
+            )
         if only is not None:
             statuses = tuple(status for status in statuses if only(status))
         snapshot = snapshot_from_statuses(
@@ -1516,6 +1531,56 @@ def is_local_t3_settle_candidate(status: AgentStatus) -> bool:
         and is_t3code_origin(origin)
         and RELAY_ORIGIN_SEPARATOR not in origin
     )
+
+
+CLAUDE_BROWSER_WAIT_SECONDS = 10.0
+CLAUDE_BROWSER_PAGE_TOOLS = frozenset({"mcp__Claude_Browser__navigate", "mcp__Claude_Browser__preview_start"})
+CLAUDE_BROWSER_WAIT_MESSAGE = "Check the browser pane — this page is still opening."
+
+
+def claude_browser_page_call(record: HookEvent) -> str | None:
+    """The call id of a Claude browser page load, which can stall on a page
+    the user has to deal with in the browser pane (a sign-in, a prompt)."""
+    if record.provider != "claude" or record.event_name != "PreToolUse":
+        return None
+    if record.tool_name not in CLAUDE_BROWSER_PAGE_TOOLS:
+        return None
+    call = record.raw.get("tool_use_id")
+    tool_input = record.raw.get("tool_input")
+    url = tool_input.get("url") if isinstance(tool_input, dict) else None
+    if not isinstance(call, str) or not call or not isinstance(url, str):
+        return None
+    try:
+        page = urllib.parse.urlsplit(url)
+    except ValueError:
+        return None
+    return call if page.scheme in {"http", "https"} and page.hostname else None
+
+
+def is_parallel_tool_completion(record: HookEvent, status: AgentStatus, call: str) -> bool:
+    """A different tool call that finished normally while ``call`` is open."""
+    finished = record.raw.get("tool_use_id")
+    return (
+        record.provider == "claude"
+        and record.event_name == "PostToolUse"
+        and isinstance(finished, str)
+        and finished != call
+        and status.mode == AgentMode.WORKING
+        and explicit_mode_for_record(record) is None
+    )
+
+
+def browser_wait_status(
+    status: AgentStatus, wait: tuple[str, datetime] | None, now: datetime,
+) -> AgentStatus:
+    """A page call still open after 10 seconds asks the user to look at it."""
+    if (
+        wait is None
+        or status.mode != AgentMode.TOOL_RUNNING
+        or (now - wait[1]).total_seconds() < CLAUDE_BROWSER_WAIT_SECONDS
+    ):
+        return status
+    return replace(status, mode=AgentMode.WAITING_FOR_INPUT, message=CLAUDE_BROWSER_WAIT_MESSAGE)
 
 
 def resolve_record_session(
