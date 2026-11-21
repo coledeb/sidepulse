@@ -89,6 +89,11 @@ class SidePulseService:
             if self.stop_event.is_set():
                 return 0
             self.program_relay.start()
+            from .herdr_remote import monitor_remote_herdr
+            threading.Thread(
+                target=monitor_remote_herdr, args=(self.stop_event, self.program_state.submit),
+                daemon=True, name="SidePulse Herdr",
+            ).start()
             while not self.stop_event.is_set():
                 if not self.program_server.running:
                     self.program_server.stop()

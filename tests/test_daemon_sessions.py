@@ -255,3 +255,69 @@ def test_a_t3_row_finishing_wakes_the_t3_poller_for_a_settle_check():
     # Outside T3 nothing waits on a settle.
     daemon.ingest_line('claude', stop_line('Done.', session='s2'))
     assert Poller.wakes == 1
+
+
+PANE = 'herdr-' + 'a' * 32 + '-' + 'b' * 32
+
+
+def herdr_report(state='working', provider='claude'):
+    return {'v': 1, 'type': 'program_status', 'scope': PANE,
+            'status': {'state': state, 'app': 'claude-code'},
+            'context': {'provider': provider, 'event_name': 'HerdrStatus', 'origin': 'Herdr'}}
+
+
+def test_a_herdr_pane_with_hooks_shows_one_row_everywhere():
+    daemon = sessions()
+    daemon.program_state.submit(herdr_report())
+    assert [row.provider for row in daemon.snapshot().statuses] == ['claude']
+    daemon.ingest_line('claude', {'hook_event_name': 'UserPromptSubmit', 'session_id': 's1',
+                                  'cwd': '/tmp/project', 'prompt': 'do it', 'herdr_pane_scope': PANE})
+    # The menu shows the hook row alone, and phones get it in the pane's place.
+    rows = daemon.snapshot().statuses
+    assert [(row.provider, row.event_name) for row in rows] == [('claude', 'UserPromptSubmit')]
+    assert rows[0].herdr_scope == PANE
+    published, = daemon.program_state.statuses()
+    assert published.event_name == 'UserPromptSubmit'
+    assert f'scope={PANE}' in rows[0].session_link
+    # Herdr's later reports for the pane no longer replace the hook row.
+    daemon.program_state.submit(herdr_report('idle'))
+    published, = daemon.program_state.statuses()
+    assert published.mode == AgentMode.WORKING
+    # A bare event later in the session keeps the pane.
+    daemon.ingest_line('claude', stop_line('Done. Should I push it?'))
+    assert daemon.snapshot().statuses[0].herdr_scope == PANE
+
+
+def test_only_the_newest_session_in_a_pane_takes_its_place():
+    daemon = sessions()
+    old = datetime.now(timezone.utc) - timedelta(seconds=30)
+    daemon.ingest_line('claude', {'hook_event_name': 'Stop', 'session_id': 's1', 'cwd': '/tmp/project',
+                                  'last_assistant_message': 'Done. Should I push it?',
+                                  'herdr_pane_scope': PANE, 'logged_at': old.isoformat()})
+    daemon.ingest_line('claude', {'hook_event_name': 'UserPromptSubmit', 'session_id': 's2',
+                                  'cwd': '/tmp/project', 'prompt': 'next', 'herdr_pane_scope': PANE})
+    scopes = {row.session_id: row.session_link for row in daemon.snapshot().statuses}
+    assert f'scope={PANE}' in scopes['s2']
+    assert f'scope={PANE}' not in scopes['s1']
+    assert len(daemon.program_state.statuses()) == 2
+
+
+def test_subagent_rows_do_not_stand_for_the_pane():
+    daemon = sessions()
+    daemon.ingest_line('claude', {'hook_event_name': 'PreToolUse', 'session_id': 's1', 'agent_id': 'sub',
+                                  'tool_name': 'Read', 'herdr_pane_scope': PANE})
+    assert all(row.herdr_scope is None for row in daemon.snapshot().statuses)
+
+
+def test_hooks_record_their_herdr_pane():
+    from sidepulse import herdr
+    from sidepulse.origin import annotate_payload_with_origin
+
+    env = {'HERDR_PANE_ID': 'w1:p1', 'HERDR_SOCKET_PATH': '/tmp/herdr.sock'}
+    with patch.object(herdr, 'current_pane_scope', return_value=PANE) as lookup:
+        payload = annotate_payload_with_origin('claude', {'session_id': 's1'}, env=env)
+    lookup.assert_called_once_with(env)
+    assert payload['herdr_pane_scope'] == PANE
+    with patch.object(herdr, 'current_pane_scope', side_effect=OSError('busy')):
+        assert 'herdr_pane_scope' not in annotate_payload_with_origin('claude', {'session_id': 's1'}, env=env)
+    assert 'herdr_pane_scope' not in annotate_payload_with_origin('claude', {'session_id': 's1'}, env={})

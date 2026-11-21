@@ -16,6 +16,10 @@ T3CODE_THREAD_ENV = "T3CODE_THREAD_ID"
 T3CODE_THREAD_KEY = "t3code_thread_id"
 T3CODE_ENVIRONMENT_KEY = "t3code_environment_id"
 T3CODE_HOME_ENV = "T3CODE_HOME"
+# The Herdr pane a hook's agent runs in (herdr.terminal_scope), so the daemon
+# shows one row for the pane instead of the hook's row and Herdr's.
+HERDR_PANE_KEY = "herdr_pane_scope"
+HERDR_PANE_SCOPE = re.compile(r"herdr-[0-9a-f]{32}-[0-9a-f]{32}")
 T3CODE_SURFACE = "t3code"
 # These agents run every session inside one long-lived server, and SidePulse's
 # hook runs as that server's child. The server's environment belongs to
@@ -397,9 +401,10 @@ def annotate_payload_with_origin(
     *,
     env: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
+    active_env = os.environ if env is None else env
+    payload = annotate_payload_with_herdr_pane(payload, active_env)
     if "agent_origin" in payload or "agentOrigin" in payload:
         return payload
-    active_env = os.environ if env is None else env
     result = dict(payload)
     result.update(detect_agent_origin(provider, env=active_env).to_payload())
     thread_id = clean_label(active_env.get(T3CODE_THREAD_ENV))
@@ -432,6 +437,23 @@ def is_t3code_origin(origin: str | None) -> bool:
     host = str(origin or "").split(RELAY_ORIGIN_SEPARATOR, 1)[0]
     normalized = " ".join(host.strip().lower().replace("-", " ").split())
     return normalized.endswith(" in t3 code") or normalized in {"t3 code", "t3code"}
+
+
+def annotate_payload_with_herdr_pane(payload: dict[str, Any], env: Mapping[str, str]) -> dict[str, Any]:
+    if HERDR_PANE_KEY in payload or not env.get("HERDR_PANE_ID") or not env.get("HERDR_SOCKET_PATH"):
+        return payload
+    try:
+        from .herdr import current_pane_scope
+
+        scope = current_pane_scope(env)
+    except Exception:
+        # Herdr is busy or gone; the hook row still shows on its own.
+        return payload
+    return {**payload, HERDR_PANE_KEY: scope} if scope else payload
+
+
+def valid_herdr_pane_scope(value: object) -> str | None:
+    return value if isinstance(value, str) and HERDR_PANE_SCOPE.fullmatch(value) else None
 
 
 def t3_link_for_thread(environment_id: str | None, thread_id: str | None) -> str | None:

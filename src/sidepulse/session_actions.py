@@ -148,6 +148,9 @@ def session_open_target(
     status: AgentStatus,
     action: str,
 ) -> SessionOpenTarget | None:
+    if status.is_remote_herdr:
+        # Herdr runs it on another machine; there is nothing to open here.
+        return None
     if is_t3code_origin(status.origin):
         # T3 Code owns the session: "App" opens its thread in T3 Code (or just
         # brings T3 forward when the thread is unknown), and the VS Code

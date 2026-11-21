@@ -28,6 +28,8 @@ MAX_PHONE_STATUS_BYTES = 1800
 MAX_BRIDGE_MESSAGE_BYTES = 2048
 MAX_OUTBOUND_MESSAGE_BYTES = 1024
 HERDR_EVENT = 'HerdrStatus'
+# A Herdr pane's agent exited; its row is cleared.
+SESSION_CLOSED_EVENT = 'SessionClosed'
 TERMINAL_EVENT = 'TerminalOSC'
 HERDR_SCOPE = re.compile(r'herdr-[0-9a-f]{32}-[0-9a-f]{32}\Z')
 MODES = {'idle': AgentMode.IDLE_READY, 'working': AgentMode.WORKING,
@@ -197,7 +199,7 @@ def _ignore_pane_update(previous: dict, update: dict) -> bool:
         return (previous['status'] == update['status']
                 and old_context.get('session_id') == new_context.get('session_id')
                 and all(old_context.get(field) == new_context[field]
-                        for field in ('provider', 'cwd', 'title') if field in new_context))
+                        for field in ('provider', 'cwd', 'title', 'origin') if field in new_context))
     return source == TERMINAL_EVENT and old_source not in {HERDR_EVENT, TERMINAL_EVENT}
 
 

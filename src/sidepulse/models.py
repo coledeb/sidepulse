@@ -5,6 +5,9 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
+# Rows Herdr reports from its saved remote machines: "Herdr · <machine>".
+REMOTE_HERDR_ORIGIN = "Herdr · "
+
 
 class AgentMode(str, Enum):
     IDLE_READY = "idle_ready"
@@ -91,6 +94,12 @@ class AgentStatus:
     session_link: str | None = None
     # T3 Code's deep link to the row's thread (t3code://threads/<env>/<thread>).
     t3_link: str | None = None
+    # The Herdr pane the agent runs in, from its hooks (origin.HERDR_PANE_KEY).
+    herdr_scope: str | None = None
+
+    @property
+    def is_remote_herdr(self) -> bool:
+        return bool(self.origin and self.origin.startswith(REMOTE_HERDR_ORIGIN))
 
     @property
     def priority(self) -> int:
@@ -130,6 +139,7 @@ class AgentStatus:
             **({"seq": self.seq} if self.seq is not None else {}),
             **({"session_link": self.session_link} if self.session_link else {}),
             **({"t3_link": self.t3_link} if self.t3_link else {}),
+            **({"herdr_scope": self.herdr_scope} if self.herdr_scope else {}),
         }
 
 

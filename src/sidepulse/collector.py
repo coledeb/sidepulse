@@ -35,7 +35,9 @@ from .origin import (
     origin_label_from_payload,
     process_state,
     t3_link_for_payload,
+    valid_herdr_pane_scope,
     valid_t3_link,
+    HERDR_PANE_KEY,
     surface_origin,
 )
 from .ipc import ensure_private_dir
@@ -1720,6 +1722,10 @@ def status_from_event(
         project=metadata.project,
         # Later hooks of a thread may not name it (a bare Stop), so keep its link.
         t3_link=t3_link_for_payload(record.raw, origin) or (previous.t3_link if previous else None),
+        # Only a session's own row stands for its pane, not its subagents'.
+        herdr_scope=None if record.agent_id else (
+            valid_herdr_pane_scope(record.raw.get(HERDR_PANE_KEY)) or (previous.herdr_scope if previous else None)
+        ),
     )
 
 
@@ -2127,6 +2133,7 @@ def agent_status_from_dict(data: object) -> AgentStatus | None:
             stale=bool(data.get("stale", False)),
             project=project,
             t3_link=valid_t3_link(data.get("t3_link")),
+            herdr_scope=valid_herdr_pane_scope(data.get("herdr_scope")),
         )
     except Exception:
         return None
