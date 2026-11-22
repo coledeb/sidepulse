@@ -1328,8 +1328,6 @@ def claude_mtime_can_extend_event(event_name: str | None) -> bool:
         "UserPromptSubmit",
         "PreToolUse",
         "PostToolUse",
-        "PreCompact",
-        "PostCompact",
         "SubagentStart",
     }
 
@@ -1354,7 +1352,7 @@ def claude_transcript_event(
     cwd = _string_or_none(row.get("cwd"))
 
     if row_type == "user":
-        if row.get("isMeta") is True:
+        if row.get("isMeta") is True or row.get("isCompactSummary") is True:
             return None
 
         message = row.get("message")
@@ -1857,7 +1855,7 @@ def mode_for_event(record: HookEvent) -> AgentMode | None:
         # previous working status stays, after a manual /compact a finished
         # turn or a pending question stays.
         return None
-    if event in {"UserPromptSubmit", "SubagentStart"}:
+    if event in {"UserPromptSubmit", "PreInvocation", "SubagentStart"}:
         return AgentMode.WORKING
     if event in {"Stop", "SubagentStop"}:
         if record.provider == "codex" and event == "Stop" and not record.agent_id:
