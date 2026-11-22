@@ -403,6 +403,25 @@ def add_sidepulse_sdejectguard_parser(subparsers: argparse._SubParsersAction) ->
     uninstall.add_argument("--dry-run", action="store_true", help="Show what would be removed.")
     uninstall.set_defaults(func=cmd_sidepulse_sdejectguard_uninstall)
 
+    check = guard_subparsers.add_parser(
+        "check",
+        help="Exit 0 if SidePulse Pro Eject Prevention is installed, current, and running.",
+    )
+    check.add_argument(
+        "--scope",
+        choices=("system", "user"),
+        default="system",
+        help="Scope to check.",
+    )
+    check.add_argument(
+        "--wait",
+        type=float,
+        default=0.0,
+        metavar="SECONDS",
+        help="Wait up to this long for an installed guard to start running.",
+    )
+    check.set_defaults(func=cmd_sidepulse_sdejectguard_check)
+
     logs = guard_subparsers.add_parser("logs", help="Show SidePulse Pro Eject Prevention logs.")
     add_sdejectguard_scope_arg(logs)
     logs.add_argument("--lines", type=int, default=80, help="Lines to show per log file.")
@@ -995,6 +1014,28 @@ def cmd_sidepulse_sdejectguard_start(args: argparse.Namespace) -> int:
         return 1
 
     print_sd_eject_guard_result(result)
+    return 0
+
+
+def cmd_sidepulse_sdejectguard_check(args: argparse.Namespace) -> int:
+    from .sd_eject_guard_launch import (
+        SD_EJECT_GUARD_DISPLAY_NAME,
+        sd_eject_guard_problems,
+        wait_for_sd_eject_guard_running,
+    )
+
+    try:
+        problems = sd_eject_guard_problems(
+            args.scope,
+            running=lambda scope: wait_for_sd_eject_guard_running(scope, max(args.wait, 0.0)),
+        )
+    except OSError as exc:
+        problems = [str(exc)]
+    if problems:
+        for problem in problems:
+            print(f"{SD_EJECT_GUARD_DISPLAY_NAME}: {problem}")
+        return 1
+    print(f"{SD_EJECT_GUARD_DISPLAY_NAME}: installed, current, and running ({args.scope})")
     return 0
 
 

@@ -8,6 +8,7 @@ except ModuleNotFoundError:  # Python 3.10 test dependency.
 from sidepulse import daemon_runtime
 from sidepulse.service import SidePulseService
 
+import io
 import json
 import os
 import plistlib
@@ -18,6 +19,7 @@ import sys
 import tempfile
 import time
 import unittest
+from contextlib import redirect_stdout
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -123,6 +125,9 @@ from sidepulse.sd_eject_guard_launch import (
     install_sd_eject_guard,
     read_log_tail,
     sd_eject_guard_installed,
+    sd_eject_guard_problems,
+    sd_eject_guard_running,
+    source_stamp_path,
     stop_sd_eject_guard,
     truncate_log_if_large,
     uninstall_sd_eject_guard,
@@ -8011,6 +8016,98 @@ class AgentMonitorTests(unittest.TestCase):
             self.assertIn(["launchctl", "bootstrap", "system", str(system_paths.plist_path)], calls)
             chown.assert_any_call(system_paths.binary_path, 0, 0)
             chown.assert_any_call(system_paths.plist_path, 0, 0)
+            chown.assert_any_call(source_stamp_path(system_paths.binary_path), 0, 0)
+
+    def test_sd_eject_guard_check_skips_reinstall_after_an_update_touches_the_source(self) -> None:
+        # A SidePulse update rewrites the packaged source with a new mtime. The
+        # installed guard stays current, so setup needs no sudo, as long as the
+        # source's content is unchanged and the job is running.
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            source = base / "sd_eject_guard.c"
+            source.write_text("int main(void) { return 0; }\n")
+            paths = SdEjectGuardPaths(
+                scope="system",
+                plist_path=base / "system" / "io.sidepulse.sdejectguard.plist",
+                binary_path=base / "system" / SD_EJECT_GUARD_BINARY_NAME,
+                stdout_path=base / "system" / "out.log",
+                stderr_path=base / "system" / "err.log",
+            )
+            user_paths = replace(paths, scope="user", plist_path=base / "user" / "io.sidepulse.sdejectguard.plist")
+            check = lambda running=True: sd_eject_guard_problems(
+                "system", source_path=source, system_paths=paths, running=lambda scope: running,
+            )
+            self.assertEqual(len(check()), 2)  # plist and binary missing
+
+            def fake_run(command, *args, **kwargs):
+                if command[0] == "clang":
+                    Path(command[3]).write_bytes(b"binary")
+                return subprocess.CompletedProcess(command, 0)
+
+            with (
+                patch("sidepulse.sd_eject_guard_launch.os.geteuid", return_value=0, create=True),
+                patch("sidepulse.sd_eject_guard_launch.os.chown", create=True),
+                patch("sidepulse.sd_eject_guard_launch.subprocess.run", side_effect=fake_run),
+            ):
+                install = lambda: install_sd_eject_guard(
+                    scope="system", source_path=source, user_paths=user_paths, system_paths=paths,
+                )
+                self.assertTrue(install().compiled)
+                self.assertEqual(check(), [])
+                self.assertEqual(check(running=False), ["io.sidepulse.sdejectguard is not running"])
+
+                future = time.time() + 60
+                os.utime(source, (future, future))
+                self.assertEqual(check(), [])
+                self.assertFalse(install().compiled)
+
+                source.write_text("int main(void) { return 1; }\n")
+                self.assertEqual(check(), [f"{paths.binary_path} is missing or out of date"])
+                self.assertTrue(install().compiled)
+                self.assertEqual(check(), [])
+
+                paths.plist_path.write_bytes(b"old")
+                self.assertEqual(check(), [f"{paths.plist_path} is out of date"])
+
+    def test_sd_eject_guard_running_reads_the_job_state_not_nested_states(self) -> None:
+        def launchctl(stdout, returncode=0):
+            return patch(
+                "sidepulse.sd_eject_guard_launch.subprocess.run",
+                return_value=subprocess.CompletedProcess([], returncode, stdout=stdout, stderr=""),
+            )
+
+        with launchctl("system/io.sidepulse.sdejectguard = {\n\tstate = running\n\tpid = 12\n}\n") as run:
+            self.assertTrue(sd_eject_guard_running("system"))
+        self.assertEqual(run.call_args.args[0], ["launchctl", "print", "system/io.sidepulse.sdejectguard"])
+        with launchctl("x = {\n\tstate = not running\n\tendpoints = {\n\t\tstate = running\n\t}\n}\n"):
+            self.assertFalse(sd_eject_guard_running("system"))
+        with launchctl("", returncode=113):
+            self.assertFalse(sd_eject_guard_running("system"))
+
+    def test_sidepulse_sdejectguard_check_reports_problems_and_waits_for_running(self) -> None:
+        parser = cli_module.build_sidepulse_parser()
+        args = parser.parse_args(["sdejectguard", "check", "--wait", "10"])
+        self.assertEqual((args.scope, args.wait), ("system", 10.0))
+
+        def problems(scope, running):
+            return [] if running(scope) else ["io.sidepulse.sdejectguard is not running"]
+
+        with (
+            patch("sidepulse.sd_eject_guard_launch.sd_eject_guard_problems", side_effect=problems),
+            patch("sidepulse.sd_eject_guard_launch.wait_for_sd_eject_guard_running", return_value=True) as wait,
+            redirect_stdout(io.StringIO()) as stdout,
+        ):
+            self.assertEqual(cli_module.cmd_sidepulse_sdejectguard_check(args), 0)
+        wait.assert_called_once_with("system", 10.0)
+        self.assertIn("installed, current, and running", stdout.getvalue())
+
+        with (
+            patch("sidepulse.sd_eject_guard_launch.sd_eject_guard_problems", side_effect=problems),
+            patch("sidepulse.sd_eject_guard_launch.wait_for_sd_eject_guard_running", return_value=False),
+            redirect_stdout(io.StringIO()) as stdout,
+        ):
+            self.assertEqual(cli_module.cmd_sidepulse_sdejectguard_check(args), 1)
+        self.assertIn("not running", stdout.getvalue())
 
     def test_status_views_keep_all_daemon_statuses(self) -> None:
         now = datetime.now(timezone.utc)

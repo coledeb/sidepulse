@@ -98,8 +98,9 @@ bash -o pipefail -c 'curl -fsSL https://raw.githubusercontent.com/coledeb/sidepu
 ```
 
 From a checkout, run `sh scripts/setup.sh --headless`. For an existing install,
-run `sidepulse update --headless`. Headless macOS setup needs non-interactive
-`sudo` to install the system eject guard. To skip the guard from a checkout,
+run `sidepulse update --headless`. Setup asks for `sudo` only when the system
+eject guard is missing, changed in the new version, or not running; headless
+macOS setup then needs non-interactive `sudo`. To skip the guard from a checkout,
 use `sh scripts/setup.sh --headless --no-sd-eject-guard`.
 
 `sp` is a short alias for `sidepulse`; for example, `sp status` runs
@@ -751,10 +752,13 @@ sidepulse sdejectguard start
 sidepulse sdejectguard stop
 sidepulse sdejectguard uninstall
 sidepulse sdejectguard logs
+sidepulse sdejectguard check
 sidepulse sdejectguard start -it
 ```
 
-`start -it` runs the guard in the current terminal for interactive debugging.
+`check` exits 0 when the system guard is installed, current, and running, and
+needs no `sudo`. `start -it` runs the guard in the current terminal for
+interactive debugging.
 
 On Homebrew Python, use the user-site install form:
 

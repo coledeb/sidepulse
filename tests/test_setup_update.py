@@ -96,6 +96,12 @@ class SetupUpdateTests(unittest.TestCase):
                         return 1
                 if args == ['--version']:
                     print('sidepulse 1.0 ' + MARKER)
+                guard = os.path.join(os.path.dirname(os.environ['SIDEPULSE_TEST_LOG']), 'guard-running')
+                if args[:2] == ['sdejectguard', 'start']:
+                    if not os.environ.get('SIDEPULSE_TEST_GUARD_STALLS'):
+                        open(guard, 'w').close()
+                if args[:2] == ['sdejectguard', 'check']:
+                    return 0 if os.path.exists(guard) else 1
                 return 0
         ''')
         return self.write_wheel(directory, 'sidepulse', {
@@ -213,7 +219,7 @@ class SetupUpdateTests(unittest.TestCase):
 
     def run_piped_setup_in_terminal(
         self, *inputs, headless=False, install_keys=b'', platform='Darwin', no_color=False,
-        developer_tools=False, sudo_fail=False, skip_guard=False,
+        developer_tools=False, sudo_fail=False, skip_guard=False, guard_stalls=False,
     ):
         import pty
 
@@ -235,6 +241,8 @@ class SetupUpdateTests(unittest.TestCase):
         }
         if sudo_fail:
             env['SIDEPULSE_TEST_SUDO_FAIL'] = '1'
+        if guard_stalls:
+            env['SIDEPULSE_TEST_GUARD_STALLS'] = '1'
         options = ['--headless'] if headless else []
         if skip_guard:
             options.append('--no-sd-eject-guard')
@@ -382,8 +390,10 @@ print(settings)
         self.assertNotRegex(output, r'\x1b\[[\d;]*m')
         self.assertIn('SidePulse is installed.', output)
         self.assertEqual(self.calls(), [
+            ['new', ['sdejectguard', 'check', '--scope', 'system']],
             ['sudo', ['-n', '-H', str(self.install_root / 'venv/bin/sidepulse'), 'sdejectguard', 'start', '--scope', 'system']],
             ['new', ['sdejectguard', 'start', '--scope', 'system']],
+            ['new', ['sdejectguard', 'check', '--scope', 'system', '--wait', '10']],
             ['new', ['sdejectguard', 'uninstall', '--scope', 'user']],
             ['new', ['setup', '--no-sd-eject-guard']],
             ['new', ['--version']],
@@ -419,8 +429,29 @@ print(settings)
         self.assertIn('requires non-interactive sudo', output)
         self.assertNotIn('SidePulse is installed.', output)
         self.assertEqual(self.calls(), [
+            ['new', ['sdejectguard', 'check', '--scope', 'system']],
             ['sudo', ['-n', '-H', str(self.install_root / 'venv/bin/sidepulse'), 'sdejectguard', 'start', '--scope', 'system']],
         ])
+
+    def test_update_skips_sudo_when_the_system_guard_is_current_and_running(self):
+        (self.root / 'guard-running').touch()
+        status, output = self.run_piped_setup_in_terminal(headless=True)
+        self.assertEqual(status, 0, output)
+        self.assertNotIn('sudo', output)
+        self.assertIn('SidePulse is installed.', output)
+        self.assertEqual(self.calls(), [
+            ['new', ['sdejectguard', 'check', '--scope', 'system']],
+            ['new', ['sdejectguard', 'uninstall', '--scope', 'user']],
+            ['new', ['setup', '--no-sd-eject-guard']],
+            ['new', ['--version']],
+        ])
+
+    def test_setup_fails_when_the_installed_system_guard_does_not_start(self):
+        status, output = self.run_piped_setup_in_terminal(headless=True, guard_stalls=True)
+        self.assertNotEqual(status, 0)
+        self.assertIn('installed but is not running', output)
+        self.assertNotIn('SidePulse is installed.', output)
+        self.assertEqual(self.calls()[-1], ['new', ['sdejectguard', 'check', '--scope', 'system', '--wait', '10']])
 
     def test_headless_setup_can_skip_system_guard_without_sudo(self):
         status, output = self.run_piped_setup_in_terminal(headless=True, skip_guard=True)

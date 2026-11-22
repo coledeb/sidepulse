@@ -456,18 +456,29 @@ if [ "$PLATFORM" = Darwin ]; then
     # Run the rest of setup as the login user. Only the guard needs root.
     set -- "$@" --no-sd-eject-guard
     if component_selected sd-eject-guard; then
-        printf '      Installing system-wide SD card ejection prevention…\n' >&3
-        if [ "$(id -u)" -eq 0 ]; then
-            "$VENV/bin/sidepulse" sdejectguard start --scope system
+        # Checking needs no root: ask for sudo only when the daemon is missing,
+        # out of date for this version, or not running.
+        if "$VENV/bin/sidepulse" sdejectguard check --scope system; then
+            printf '      System-wide SD card ejection prevention is up to date and running.\n' >&3
         else
-            if ! system_guard_sudo; then
+            printf '      Installing system-wide SD card ejection prevention…\n' >&3
+            if [ "$(id -u)" -eq 0 ]; then
+                "$VENV/bin/sidepulse" sdejectguard start --scope system
+            elif ! system_guard_sudo; then
                 printf 'System-wide SD card ejection prevention could not be installed.\n' >&2
                 if [ -z "$terminal_settings" ]; then
                     printf 'Headless setup requires non-interactive sudo for the eject guard. Rerun in a terminal to authorize it.\n' >&2
                 fi
                 exit 1
             fi
-            # Retire the old per-user guard only after the system job starts.
+            if ! "$VENV/bin/sidepulse" sdejectguard check --scope system --wait 10; then
+                printf 'System-wide SD card ejection prevention was installed but is not running.\n' >&2
+                printf 'See: sidepulse sdejectguard logs --scope system\n' >&2
+                exit 1
+            fi
+        fi
+        if [ "$(id -u)" -ne 0 ]; then
+            # Retire the old per-user guard only once the system job runs.
             "$VENV/bin/sidepulse" sdejectguard uninstall --scope user
         fi
     fi

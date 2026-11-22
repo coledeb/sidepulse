@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import plistlib
+import re
 import subprocess
+import time
 from dataclasses import dataclass
 from importlib.resources import as_file, files
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 from .providers import default_state_dir
 
@@ -115,6 +118,7 @@ def install_sd_eject_guard(
             paths.binary_path.chmod(0o755)
             if resolved_scope == "system":
                 apply_system_ownership(paths.binary_path)
+                apply_system_ownership(source_stamp_path(paths.binary_path))
 
             if plist_changed:
                 paths.plist_path.write_bytes(data)
@@ -179,6 +183,7 @@ def ensure_sd_eject_guard_binary(
         paths.binary_path.chmod(0o755)
         if resolved_scope == "system":
             apply_system_ownership(paths.binary_path)
+            apply_system_ownership(source_stamp_path(paths.binary_path))
     return paths
 
 
@@ -277,7 +282,7 @@ def uninstall_sd_eject_guard(
     for resolved_scope in scopes:
         paths = paths_for_scope(resolved_scope, user_paths=user_paths, system_paths=system_paths)
         binary_paths = sd_eject_guard_binary_paths(paths)
-        artifacts = [paths.plist_path, *binary_paths]
+        artifacts = [paths.plist_path, *binary_paths, source_stamp_path(paths.binary_path)]
         existing = [path for path in artifacts if path.exists()]
         if not existing:
             results.append(
@@ -333,6 +338,69 @@ def uninstall_sd_eject_guard(
             )
         )
     return tuple(results)
+
+
+def sd_eject_guard_problems(
+    scope: ResolvedSdEjectGuardScope = "system",
+    *,
+    source_path: Path | None = None,
+    user_paths: SdEjectGuardPaths | None = None,
+    system_paths: SdEjectGuardPaths | None = None,
+    running: Callable[[ResolvedSdEjectGuardScope], bool] | None = None,
+) -> list[str]:
+    """What an install would change or start; empty when the guard is current and running.
+
+    Needs no root: the daemon's plist, binary and stamp are world-readable and
+    launchctl reports system jobs to any user. Setup uses it to skip sudo.
+    """
+    paths = paths_for_scope(scope, user_paths=user_paths, system_paths=system_paths)
+    problems = []
+    expected = plistlib.dumps(build_sd_eject_guard_plist(paths), sort_keys=False)
+    try:
+        if paths.plist_path.read_bytes() != expected:
+            problems.append(f"{paths.plist_path} is out of date")
+    except FileNotFoundError:
+        problems.append(f"{paths.plist_path} is missing")
+    except OSError as exc:
+        problems.append(f"{paths.plist_path} is unreadable: {exc}")
+    source = source_path or packaged_sd_eject_guard_source()
+    source_context = as_file(source) if not isinstance(source, Path) else _path_context(source)
+    with source_context as resolved_source:
+        if binary_needs_compile(paths.binary_path, resolved_source):
+            problems.append(f"{paths.binary_path} is missing or out of date")
+    problems.extend(f"{legacy} is left over" for legacy in legacy_binary_paths(paths) if legacy.exists())
+    if not problems and not (running or sd_eject_guard_running)(scope):
+        problems.append(f"{SD_EJECT_GUARD_LABEL} is not running")
+    return problems
+
+
+def sd_eject_guard_running(scope: ResolvedSdEjectGuardScope) -> bool:
+    result = subprocess.run(
+        ["launchctl", "print", f"{launch_domain(scope)}/{SD_EJECT_GUARD_LABEL}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    # The job's own state is the first line indented by one tab; nested
+    # endpoint states are indented further.
+    match = re.search(r"^\tstate = (\S+)", result.stdout, re.MULTILINE)
+    return result.returncode == 0 and match is not None and match.group(1) == "running"
+
+
+def wait_for_sd_eject_guard_running(
+    scope: ResolvedSdEjectGuardScope,
+    timeout: float,
+    *,
+    running: Callable[[ResolvedSdEjectGuardScope], bool] = sd_eject_guard_running,
+    interval: float = 0.5,
+) -> bool:
+    deadline = time.monotonic() + timeout
+    while True:
+        if running(scope):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(interval)
 
 
 def resolve_sd_eject_guard_scope(scope: SdEjectGuardScope) -> ResolvedSdEjectGuardScope:
@@ -499,11 +567,22 @@ def packaged_sd_eject_guard_source():
     return files("sidepulse.resources").joinpath("sd_eject_guard.c")
 
 
+def source_stamp_path(binary_path: Path) -> Path:
+    return binary_path.with_name(f"{binary_path.name}.source-sha256")
+
+
+def source_digest(source_path: Path) -> str:
+    return hashlib.sha256(source_path.read_bytes()).hexdigest()
+
+
 def binary_needs_compile(binary_path: Path, source_path: Path) -> bool:
+    # Compare the source's content, not its mtime: every SidePulse install
+    # rewrites the packaged source with a fresh mtime, which would rebuild the
+    # guard (and need sudo for the system daemon) on every update.
     if not binary_path.exists():
         return True
     try:
-        return binary_path.stat().st_mtime < source_path.stat().st_mtime
+        return source_stamp_path(binary_path).read_text().strip() != source_digest(source_path)
     except OSError:
         return True
 
@@ -526,6 +605,7 @@ def compile_sd_eject_guard(source_path: Path, binary_path: Path) -> None:
     )
     tmp_binary.chmod(0o755)
     tmp_binary.replace(binary_path)
+    source_stamp_path(binary_path).write_text(source_digest(source_path) + "\n")
 
 
 def restart_sd_eject_guard(
