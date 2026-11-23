@@ -353,7 +353,7 @@ def _write_mounted_firmware(device: FirmwareDevice, package: FirmwarePackage) ->
     if target.is_symlink():
         raise FirmwareError("The firmware target must not be a symbolic link.")
     try:
-        stream = target.open("wb")
+        stream = _open_firmware_target(target)
     except OSError as exc:
         if exc.errno != errno.EROFS:
             raise
@@ -370,6 +370,48 @@ def _write_mounted_firmware(device: FirmwareDevice, package: FirmwarePackage) ->
             f"Firmware transfer did not finish: {exc}. Keep the device connected for at least "
             "10 seconds, then reconnect and check its version before retrying."
         ) from exc
+
+
+# Files macOS leaves on removable drives. SidePulse never reads them.
+MACOS_METADATA_FILES = (".DS_Store", ".VolumeIcon.icns")
+MACOS_METADATA_DIRS = (".fseventsd", ".Spotlight-V100")
+
+
+def _open_firmware_target(target: Path):
+    """Open FIRMWARE.BIN, making room in a full FAT12 root directory if needed.
+
+    The drive's root directory holds only a few entries, and macOS metadata
+    (AppleDouble ``._*`` files, ``.fseventsd``) can fill it while the drive still
+    has free space. Creating a file then fails with ENOSPC, so remove that
+    metadata once and try again.
+    """
+    try:
+        return target.open("wb")
+    except OSError as exc:
+        if exc.errno != errno.ENOSPC or not _remove_macos_metadata(target.parent):
+            raise
+    return target.open("wb")
+
+
+def _remove_macos_metadata(root: Path) -> bool:
+    import shutil
+
+    removed = False
+    for entry in root.iterdir():
+        name = entry.name
+        try:
+            if entry.is_symlink():
+                continue
+            if entry.is_file() and (name.startswith("._") or name in MACOS_METADATA_FILES):
+                entry.unlink()
+            elif entry.is_dir() and name in MACOS_METADATA_DIRS:
+                shutil.rmtree(entry)
+            else:
+                continue
+        except OSError:
+            continue
+        removed = True
+    return removed
 
 
 def _readonly_firmware(device: FirmwareDevice, package: FirmwarePackage, *, dry_run: bool = False) -> None:
