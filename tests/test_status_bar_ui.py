@@ -341,6 +341,22 @@ class AdvancedAutosaveTests(StatusBarTestCase):
             self.assertEqual(getattr(self.saved[-1], attribute), expected)
         self.assertEqual(len(self.saved), 4)
 
+    def test_dark_hours_tab_saves_times_start_days_and_alerts(self):
+        self.tabs.selectTabViewItemWithIdentifier_("dark_hours")
+        controls = self.target.settings_fields["dark_hours"]
+        self.assertFalse(sb.checkbox_is_on(controls["enabled"]))
+        self.assertEqual(sb.dark_hours_picker_minute(controls["end"]), 390)
+        self.assertTrue(all(sb.checkbox_is_on(day) for day in controls["weekdays"]))
+        controls["enabled"].performClick_(None)
+        picker = controls["start"]
+        picker.setDateValue_(sb.NSDate.dateWithTimeIntervalSince1970_(23 * 3600))
+        picker.sendAction_to_(picker.action(), picker.target())
+        controls["weekdays"][0].performClick_(None)
+        controls["allow_error"].performClick_(None)
+        self.assertEqual(self.saved[-1].dark_hours, sb.DarkHours(
+            enabled=True, start_minute=1380, weekdays=tuple(range(1, 7)), allow_error=True,
+        ))
+
     def test_switching_tabs_commits_the_active_field(self):
         self.edit("idle_timeout_minutes", "10")
         self.tabs.selectTabViewItemWithIdentifier_("agents")
@@ -843,6 +859,25 @@ class WindowBuildTests(StatusBarTestCase):
         )
         self.assertIn(setup.action(), ("openSetup:", b"openSetup:"))
         self.assertEqual(setup.target(), self.controller)
+
+    def test_phpstorm_terminal_click_focuses_ide(self):
+        status = make_status(origin="Claude CLI in PhpStorm")
+        with (
+            patch.object(self.controller, "settings", AgentMonitorSettings()),
+            patch("sidepulse.session_actions.installed_app_paths_for_bundle_id", return_value=("/ide",)),
+            patch("sidepulse.session_actions.vscode_url_available", return_value=False),
+            patch.object(sb, "claude_session_terminal") as terminal,
+            patch.object(sb, "open_terminal_command") as resume,
+            patch.object(sb.subprocess, "Popen") as launch,
+        ):
+            menu = sb.build_session_options_menu(status, datetime.now(timezone.utc), self.controller)
+            self.assertEqual(menu.itemWithTitle_("Open in PhpStorm").state(), 1)
+            self.assertIsNone(menu.itemWithTitle_("Open in VS Code"))
+            self.controller.open_session(status, None, remember=False)
+
+        launch.assert_called_once_with(["open", "-b", "com.jetbrains.PhpStorm"])
+        terminal.assert_not_called()
+        resume.assert_not_called()
 
     def test_open_junie_session_in_ide_uses_bundle_identifier_fallback(self):
         status = make_status(provider="junie", cwd="/tmp/junie-project")
@@ -1537,20 +1572,26 @@ class WindowBuildTests(StatusBarTestCase):
             finally:
                 image.unlockFocus()
 
-    def test_show_settings_window_brings_it_forward_and_starts_previews(self):
-        self.controller.settings_window = None
+    def test_settings_previews_only_animate_on_the_animations_tab(self):
+        controller = sb.StatusBarController.alloc().init()
         with patch.object(sb, 'read_status_history_records') as read_history:
-            self.controller.show_settings_window()
+            controller.show_settings_window()
             read_history.assert_not_called()
-            tabs = self.controller.settings_fields['tabs']
+            tabs = controller.settings_fields['tabs']
+            self.assertIsNone(controller.agent_animation_preview_timer)
+            tabs.selectTabViewItemWithIdentifier_('animations')
+            self.assertIsNotNone(controller.agent_animation_preview_timer)
+            tabs.selectTabViewItemWithIdentifier_('dark_hours')
+            controller.redrawAgentAnimationPreviews_(None)
+            self.assertIsNone(controller.agent_animation_preview_timer)
             tabs.selectTabViewItemWithIdentifier_('history')
             read_history.assert_called_once()
         try:
-            self.assertTrue(self.controller.settings_window.isVisible())
-            self.assertIsNotNone(self.controller.agent_animation_preview_timer)
+            self.assertTrue(controller.settings_window.isVisible())
+            self.assertIsNone(controller.agent_animation_preview_timer)
         finally:
-            self.controller.stop_agent_animation_preview_timer()
-            self.controller.settings_window.orderOut_(None)
+            controller.stop_agent_animation_preview_timer()
+            controller.settings_window.orderOut_(None)
 
 
 class StatusIconAnimationTests(StatusBarTestCase):
