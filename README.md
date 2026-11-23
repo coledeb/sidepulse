@@ -36,6 +36,7 @@ Firmware downloads and release notes are available in
 > - **Charging fill animation.** While charging, the battery LEDs fill from the current level to the end; the plug/unplug preview length is editable.
 > - **Smarter keep-awake.** Only agents on this Mac keep it awake; remote T3 and relayed agents don't. While the Mac is held awake, the display stays on too (one minute after Done, the full five after Ask or Error), unless the lid is closed with no external display. Closing the lid with agents idle ends the keep-awake grace so the Mac sleeps and the lid-close animation plays; when agents keep the Mac awake, the charging fill plays instead and the LEDs aren't left dark.
 > - **Startup animation.** A Startup row in Animations picks the card's power-up program (`INIT.LED`), written only when it changes. Choosing an Off animation stops the magenta fill that otherwise repeats on each closed-lid dark wake.
+> - **No reinsertion after Pro updates.** A Pro firmware upgrade remounts the drive and confirms the new version itself, so the drive no longer shows the firmware file's space as used until the card is pulled. **Remount Drive** in Settings → Diagnostics does the same on demand.
 > - **More settings.** How long Done stays on screen, and the idle pulse speed (4-30 seconds).
 > - **Lower CPU.** The menu bar icon animates with Core Animation, menu-row status icons stay static, and audio apps are rescanned only while the menu is open.
 >
@@ -180,6 +181,14 @@ sidepulse firmware upgrade --all
 
 Each device gets the release for its model. If an upgrade fails, the command
 reports the device, continues with the others, and exits with a failure status.
+
+After copying firmware to a Pro's drive, the command (and **Upgrade** in the
+menu bar) waits for the card to apply it, then unmounts and remounts the drive
+and checks the new version. The card stays in its slot while it restarts, so
+until the drive is remounted the computer keeps showing its old contents,
+including the space the firmware file used. No reinsertion is needed. To
+remount the drive at any other time, use **Remount Drive** in Settings →
+Diagnostics, or `diskutil unmount /Volumes/SidePulse && diskutil mount SidePulse`.
 
 Choose a specific version or install a downloaded ZIP:
 

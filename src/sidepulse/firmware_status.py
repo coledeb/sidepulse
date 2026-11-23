@@ -67,8 +67,10 @@ class FirmwareStatusReader:
         return statuses
 
 
-def install_update(device: firmware.FirmwareDevice, version: str) -> None:
-    """Install only the offered, newer version on the same connected device."""
+def install_update(device: firmware.FirmwareDevice, version: str) -> bool:
+    """Install only the offered, newer version on the same connected device.
+
+    Returns True when FIRMWARE.BIN was written to the mounted drive."""
     if firmware.read_device(device.root) != device:
         raise firmware.FirmwareError("The connected device changed. Check for updates again.")
     if firmware.version_key(version) <= firmware.version_key(device.version):
@@ -76,4 +78,4 @@ def install_update(device: firmware.FirmwareDevice, version: str) -> None:
     package = firmware.load_package(device.product, version, None)
     if package.product != device.product or package.version != firmware.normalize_version(version):
         raise firmware.FirmwareError("The firmware package does not match the selected update.")
-    firmware.write_firmware(device, package)
+    return firmware.write_firmware(device, package)

@@ -121,7 +121,9 @@ from .device_writer import (
     target_from_device_path,
     validate_led_text,
 )
+from .firmware import can_confirm_upgrade, confirm_pro_upgrade
 from .firmware_status import FirmwareStatus, FirmwareStatusReader, install_update
+from .remount import remount_drive
 from .update import BuildInfo, GITHUB_MAIN_URL
 from .ipc import UICommandServer
 from .program_transport import daemon_command, write_daemon_program as write_led_program
@@ -916,33 +918,50 @@ class StatusBarController(NSObject):
         threading.Thread(target=self.upgrade_firmware_worker, args=(status,), daemon=True).start()
 
     def upgrade_firmware_worker(self, status) -> None:
+        confirmed = False
         try:
-            install_update(status.device, status.latest)
+            wrote_drive = install_update(status.device, status.latest)
+        except Exception as exc:
+            message = f"Firmware upgrade failed: {exc}"
+            success = False
+        else:
+            success = True
             message = (
                 f"Firmware {status.latest} transferred. Leave the device connected for at least "
                 "10 seconds, then reconnect to confirm installation."
             )
-            success = True
-        except Exception as exc:
-            message = f"Firmware upgrade failed: {exc}"
-            success = False
+            if can_confirm_upgrade(status.device, bool(wrote_drive)):
+                # The Pro stays in its slot while it restarts, so remount its
+                # drive instead of asking for the card to be reinserted.
+                try:
+                    installed = confirm_pro_upgrade(status.device, status.latest)
+                    message = f"{installed.name} is now on firmware {installed.version}."
+                    confirmed = True
+                except Exception as exc:
+                    message = str(exc)
         self.performSelectorOnMainThread_withObject_waitUntilDone_(
-            "handleFirmwareUpgrade:", (str(status.device.root), message, success), False,
+            "handleFirmwareUpgrade:", (str(status.device.root), message, success, confirmed), False,
         )
 
     def handleFirmwareUpgrade_(self, payload):
-        root, message, success = payload
+        root, message, success, confirmed = payload
         self.firmware_upgrade_root = None
         self.firmware_led_hold_until = time.monotonic() + 10
         try:
             daemon_command({'type': 'output_control', 'pause_seconds': 10})
         except Exception as exc:
             log_status_bar(f'firmware output resume error: {exc}')
-        title = "Reconnect to confirm firmware update" if success else "Firmware upgrade failed"
+        if confirmed:
+            title = "Firmware updated"
+            self.firmware_roots = ()
+        elif success:
+            title = "Reconnect to confirm firmware update"
+        else:
+            title = "Firmware upgrade failed"
         self.firmware_messages[Path(root)] = (title, message)
         self.rebuild_firmware_menu()
         alert = NSAlert.alloc().init()
-        alert.setMessageText_("Firmware transferred" if success else "Firmware upgrade failed")
+        alert.setMessageText_(title if not success or confirmed else "Firmware transferred")
         alert.setInformativeText_(message)
         alert.addButtonWithTitle_("OK")
         alert.runModal()
@@ -2129,6 +2148,50 @@ class StatusBarController(NSObject):
     @objc.IBAction
     def exportDebugHtml_(self, _sender):
         self.export_debug_log("html")
+
+    @objc.IBAction
+    def remountDrive_(self, sender):
+        roots = [
+            device.root for device in self.status_bar_devices(remember=False)
+            if device.connected and device.remote_link is None and device.device_id != VIRTUAL_DEVICE_ID
+            and device.root.is_dir() and (device.root / "STATUS.TXT").is_file()
+        ]
+        if not roots:
+            self.set_settings_message("No mounted SidePulse drive to remount.")
+            return
+        if self.firmware_upgrade_root is not None:
+            self.set_settings_message("Wait for the firmware update to finish before remounting.")
+            return
+        try:
+            daemon_command({'type': 'output_control', 'pause_seconds': 60}, timeout=1)
+        except Exception as exc:
+            log_status_bar(f'remount output pause error: {exc}')
+        sender.setEnabled_(False)
+        self.set_settings_message("Remounting the SidePulse drive…")
+        threading.Thread(target=self.remount_drive_worker, args=(roots,), daemon=True).start()
+
+    def remount_drive_worker(self, roots) -> None:
+        results = []
+        for root in roots:
+            try:
+                mounted = remount_drive(root)
+                results.append(f"Remounted {mounted}.")
+            except Exception as exc:
+                results.append(f"Could not remount {root}: {exc}")
+        self.performSelectorOnMainThread_withObject_waitUntilDone_(
+            "handleRemountDrive:", " ".join(results), False,
+        )
+
+    def handleRemountDrive_(self, message):
+        try:
+            daemon_command({'type': 'output_control', 'pause_seconds': 0})
+        except Exception as exc:
+            log_status_bar(f'remount output resume error: {exc}')
+        button = self.settings_buttons.get("remount_drive")
+        if button is not None:
+            button.setEnabled_(True)
+        self.firmware_roots = ()
+        self.set_settings_message(str(message))
 
     @objc.IBAction
     def refreshHistoryChart_(self, _sender):
@@ -5194,6 +5257,19 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
     add_separator(diagnostics_tab, 24, 280, tab_width - 48)
     add_label(diagnostics_tab, "Settings File", 24, 246, 240, 24)
     settings_path = add_label(diagnostics_tab, "", 32, 208, 588, 22)
+    add_separator(diagnostics_tab, 24, 170, tab_width - 48)
+    add_label(diagnostics_tab, "Device Drive", 24, 136, 240, 24)
+    add_label(
+        diagnostics_tab,
+        "Unmount and remount the SidePulse drive so macOS rereads it, without removing the card.",
+        32,
+        98,
+        588,
+        22,
+    )
+    remount_drive_button = add_button(
+        diagnostics_tab, "Remount Drive", 32, 56, 140, 28, target, "remountDrive:",
+    )
 
     message = add_label(content, "", 24, 12, width - 48, 22)
 
@@ -5243,6 +5319,7 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
         "claude_transcripts": claude_transcripts,
         "battery_power_preview": battery_power_preview,
         "delete_agent_animation_profile": delete_animation_profile,
+        "remount_drive": remount_drive_button,
     }
     return window
 

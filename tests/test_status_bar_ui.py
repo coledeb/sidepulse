@@ -497,7 +497,7 @@ class FirmwareMenuTests(StatusBarTestCase):
         for error in (None, OSError("read-only drive")):
             dispatch = Mock()
             target = SimpleNamespace(performSelectorOnMainThread_withObject_waitUntilDone_=dispatch)
-            with patch.object(sb, "install_update", side_effect=error):
+            with patch.object(sb, "install_update", side_effect=error, return_value=False):
                 sb.StatusBarController.upgrade_firmware_worker(target, status)
                 selector, payload, wait = dispatch.call_args.args
                 self.assertEqual(selector, "handleFirmwareUpgrade:")
@@ -505,6 +505,46 @@ class FirmwareMenuTests(StatusBarTestCase):
                 self.assertEqual(payload[2], error is None)
                 self.assertIn("reconnect" if error is None else "read-only drive", payload[1])
                 self.assertFalse(wait)
+
+    def test_worker_remounts_pro_drive_to_confirm_the_update(self):
+        status = FirmwareStatus(replace(self.firmware_device, product="pro"), "1.1.14")
+        installed = replace(status.device, version="1.1.14")
+        for confirm_error in (None, RuntimeError("Firmware 1.1.14 was transferred, but busy")):
+            dispatch = Mock()
+            target = SimpleNamespace(performSelectorOnMainThread_withObject_waitUntilDone_=dispatch)
+            with patch.object(sb, "install_update", return_value=True), patch.object(
+                sb, "confirm_pro_upgrade", side_effect=confirm_error, return_value=installed,
+            ) as confirm:
+                sb.StatusBarController.upgrade_firmware_worker(target, status)
+            confirm.assert_called_once_with(status.device, "1.1.14")
+            _root, message, success, confirmed = dispatch.call_args.args[1]
+            self.assertTrue(success)
+            self.assertEqual(confirmed, confirm_error is None)
+            self.assertIn("now on firmware 1.1.14" if confirm_error is None else "busy", message)
+
+    def test_remount_button_remounts_local_drives_in_background(self):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(root, ignore_errors=True))
+        (root / "STATUS.TXT").write_text("release_version 1.1.17\n")
+        device = replace(self.device, root=root)
+        sender = Mock()
+        self.controller.firmware_upgrade_root = None
+        with patch.object(sb.StatusBarController, "status_bar_devices", return_value=[device]), patch.object(
+            sb, "daemon_command",
+        ) as command, patch.object(sb.threading, "Thread") as thread, patch.object(
+            sb.StatusBarController, "set_settings_message",
+        ):
+            self.controller.remountDrive_(sender)
+        sender.setEnabled_.assert_called_once_with(False)
+        command.assert_called_once()
+        self.assertEqual(thread.call_args.kwargs["args"], ([root],))
+
+        dispatch = Mock()
+        target = SimpleNamespace(performSelectorOnMainThread_withObject_waitUntilDone_=dispatch)
+        with patch.object(sb, "remount_drive", return_value=root) as remount:
+            sb.StatusBarController.remount_drive_worker(target, [root])
+        remount.assert_called_once_with(root)
+        self.assertEqual(dispatch.call_args.args[:2], ("handleRemountDrive:", f"Remounted {root}."))
 
     def test_version_checks_run_in_one_background_worker(self):
         self.controller.firmware_check_in_flight = False

@@ -326,13 +326,14 @@ def _wait_for_dot_drive(device: FirmwareDevice, address: tuple[int, int]) -> Fir
         time.sleep(0.25)
 
 
-def write_firmware(device: FirmwareDevice, package: FirmwarePackage, *, read_only: bool = False) -> None:
+def write_firmware(device: FirmwareDevice, package: FirmwarePackage, *, read_only: bool = False) -> bool:
+    """Send the firmware; return True when FIRMWARE.BIN was written to the mounted drive."""
     if package.product != device.product:
         raise FirmwareError("The firmware package does not match the device model.")
     if read_only:
         with device_write_lock(device.root):
             _readonly_firmware(device, package)
-        return
+        return False
     address = _usb_address(device.root)
     if address is not None:
         try:
@@ -343,10 +344,10 @@ def write_firmware(device: FirmwareDevice, package: FirmwarePackage, *, read_onl
         except (ImportError, OSError, ValueError, RuntimeError, SubprocessError) as exc:
             raise FirmwareError(f"Could not prepare the Dot drive: {exc}") from exc
     with device_write_lock(device.root):
-        _write_mounted_firmware(device, package)
+        return _write_mounted_firmware(device, package)
 
 
-def _write_mounted_firmware(device: FirmwareDevice, package: FirmwarePackage) -> None:
+def _write_mounted_firmware(device: FirmwareDevice, package: FirmwarePackage) -> bool:
     if read_device(device.root) != device:
         raise FirmwareError("The connected device changed. Run the upgrade again.")
     target = device.root / "FIRMWARE.BIN"
@@ -358,7 +359,7 @@ def _write_mounted_firmware(device: FirmwareDevice, package: FirmwarePackage) ->
         if exc.errno != errno.EROFS:
             raise
         _readonly_firmware(device, package)
-        return
+        return False
     try:
         with stream:
             stream.write(package.payload)
@@ -370,6 +371,7 @@ def _write_mounted_firmware(device: FirmwareDevice, package: FirmwarePackage) ->
             f"Firmware transfer did not finish: {exc}. Keep the device connected for at least "
             "10 seconds, then reconnect and check its version before retrying."
         ) from exc
+    return True
 
 
 # Files macOS leaves on removable drives. SidePulse never reads them.
@@ -500,12 +502,64 @@ def _upgrade_device(device: FirmwareDevice, package: FirmwarePackage, *, dry_run
         print(f"Would upgrade {device.name} from {device.version} to {package.version}. Package verified; no files written.")
         return
     print(f"Sending firmware {package.version}. Keep the device connected.", flush=True)
-    write_firmware(device, package, read_only=read_only)
-    print(
-        f"Firmware {package.version} transferred. Leave the device connected for at least 10 seconds "
-        "while it applies the update, then reconnect and run `sidepulse firmware version` "
-        "to confirm installation."
-    )
+    wrote_drive = write_firmware(device, package, read_only=read_only)
+    if not can_confirm_upgrade(device, wrote_drive):
+        print(
+            f"Firmware {package.version} transferred. Leave the device connected for at least 10 seconds "
+            "while it applies the update, then reconnect and run `sidepulse firmware version` "
+            "to confirm installation."
+        )
+        return
+    print(f"Firmware {package.version} transferred. Waiting for {device.name} to apply it…", flush=True)
+    installed = confirm_pro_upgrade(device, package.version)
+    print(f"{installed.name} is now on firmware {installed.version} ({installed.root}).")
+
+
+PRO_APPLY_SECONDS = 10
+PRO_CONFIRM_SECONDS = 30
+PRO_CONFIRM_RETRY_SECONDS = 5
+
+
+def can_confirm_upgrade(device: FirmwareDevice, wrote_drive: bool) -> bool:
+    """Whether the drive can be remounted to confirm the update without reconnecting.
+
+    A Pro stays in its SD slot while it restarts, so the computer keeps showing the
+    drive's old contents (including the space FIRMWARE.BIN used) until it is
+    remounted. A Dot reconnects over USB by itself and is mounted fresh, and a
+    read-only transfer never wrote a file to the drive.
+    """
+    return (device.product == "pro" and wrote_drive
+            and (sys.platform == "darwin" or sys.platform.startswith("linux")))
+
+
+def confirm_pro_upgrade(device: FirmwareDevice, version: str, *, sleep=time.sleep) -> FirmwareDevice:
+    """Wait for a Pro to apply new firmware, then remount its drive and check the version."""
+    from .remount import RemountError, remount_drive
+
+    target = version_key(version)
+    root = device.root
+    sleep(PRO_APPLY_SECONDS)
+    deadline = time.monotonic() + PRO_CONFIRM_SECONDS
+    while True:
+        try:
+            root = remount_drive(root)
+        except RemountError as exc:
+            raise FirmwareError(f"Firmware {version} was transferred, but {exc}") from exc
+        try:
+            current = read_device(root)
+            if current.serial != device.serial:
+                raise FirmwareError(f"{root} now belongs to another device.")
+            if version_key(current.version) == target:
+                return current
+            problem = f"the device still reports firmware {current.version}"
+        except (FirmwareError, OSError) as exc:
+            problem = str(exc)
+        if time.monotonic() >= deadline:
+            raise FirmwareError(
+                f"Could not confirm firmware {version}: {problem}. Reconnect the device and run "
+                "`sidepulse firmware version`."
+            )
+        sleep(PRO_CONFIRM_RETRY_SECONDS)
 
 
 def add_firmware_parser(subparsers: argparse._SubParsersAction) -> None:

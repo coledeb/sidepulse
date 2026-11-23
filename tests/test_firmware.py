@@ -10,6 +10,7 @@ import unittest
 import zipfile
 import pytest
 from pathlib import Path
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -48,6 +49,10 @@ class FirmwareTests(unittest.TestCase):
         self.addCleanup(patch.stopall)
         patch('sys.stdout', self.stdout).start()
         patch('sys.stderr', self.stderr).start()
+        self.confirm = patch.object(
+            firmware, 'confirm_pro_upgrade',
+            side_effect=lambda device, version: replace(device, version=version),
+        ).start()
 
     def make_device(self, product, version='1.0.5'):
         device = self.root / product
@@ -151,6 +156,7 @@ class FirmwareTests(unittest.TestCase):
             self.assertEqual(sidepulse_main(['firmware', 'upgrade', '--device', str(dot), '--file', str(dot_package)]), 1)
             self.assertEqual(channel.call_count, 1)
             self.assertIn('writable drive', self.stderr.getvalue())
+        self.confirm.assert_not_called()
 
     @unittest.skipUnless(hasattr(os, 'statvfs'), 'POSIX mount flags')
     def test_dry_run_detects_readonly_dot_drive(self):
@@ -194,7 +200,9 @@ class FirmwareTests(unittest.TestCase):
         for name in ('LEDS.LED', 'INIT.LED'):
             self.assertEqual((self.device / name).read_text(), 'existing program')
         self.assertIn('transferred', self.stdout.getvalue())
-        self.assertIn('confirm installation', self.stdout.getvalue())
+        self.assertIn('SidePulse Pro is now on firmware 1.1.0', self.stdout.getvalue())
+        self.confirm.assert_called_once()
+        self.assertEqual(self.confirm.call_args.args[1], '1.1.0')
 
     def test_dry_run_verifies_without_writing(self):
         self.assertEqual(self.upgrade(self.make_package(), '--dry-run'), 0)
@@ -341,3 +349,71 @@ class FirmwareTests(unittest.TestCase):
             with self.assertRaises(firmware.FirmwareError):
                 firmware.load_package('pro', '../other', None)
             download.assert_not_called()
+
+
+class ProUpgradeConfirmationTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name) / 'SidePulse'
+        self.root.mkdir()
+        self.status = self.root / 'STATUS.TXT'
+        self.write_version('1.0.5')
+        self.device = firmware.read_device(self.root)
+        self.sleeps = []
+
+    def write_version(self, version, serial='SP-123'):
+        self.status.write_bytes(f'release_version {version}\nserial {serial}\n'.encode())
+
+    def confirm(self, remount):
+        with patch('sidepulse.remount.remount_drive', side_effect=remount) as remount_drive:
+            result = firmware.confirm_pro_upgrade(self.device, '1.1.0', sleep=self.sleeps.append)
+        return result, remount_drive
+
+    def test_waits_then_remounts_and_reads_new_version(self):
+        def remount(root):
+            self.write_version('1.1.0')
+            return root
+
+        result, remount_drive = self.confirm(remount)
+        self.assertEqual(result.version, '1.1.0')
+        self.assertEqual(remount_drive.call_count, 1)
+        self.assertEqual(self.sleeps, [firmware.PRO_APPLY_SECONDS])
+
+    def test_remounts_again_until_the_update_is_applied(self):
+        versions = iter(['1.0.5', '1.1.0'])
+
+        def remount(root):
+            self.write_version(next(versions))
+            return root
+
+        result, remount_drive = self.confirm(remount)
+        self.assertEqual(result.version, '1.1.0')
+        self.assertEqual(remount_drive.call_count, 2)
+        self.assertEqual(self.sleeps, [firmware.PRO_APPLY_SECONDS, firmware.PRO_CONFIRM_RETRY_SECONDS])
+
+    def test_gives_up_with_reconnect_advice(self):
+        with patch.object(firmware, 'PRO_CONFIRM_SECONDS', 0):
+            with self.assertRaisesRegex(firmware.FirmwareError, 'still reports firmware 1.0.5.*Reconnect'):
+                self.confirm(lambda root: root)
+
+    def test_remount_failure_reports_transferred_firmware(self):
+        from sidepulse.remount import RemountError
+
+        with self.assertRaisesRegex(firmware.FirmwareError, 'was transferred, but busy'):
+            self.confirm(RemountError('busy'))
+
+    def test_another_device_is_not_confirmed(self):
+        def remount(root):
+            self.write_version('1.1.0', serial='SP-999')
+            return root
+
+        with patch.object(firmware, 'PRO_CONFIRM_SECONDS', 0):
+            with self.assertRaisesRegex(firmware.FirmwareError, 'another device'):
+                self.confirm(remount)
+
+    def test_only_pro_drive_writes_are_confirmed(self):
+        dot = replace(self.device, product='dot')
+        self.assertTrue(firmware.can_confirm_upgrade(self.device, True))
+        self.assertFalse(firmware.can_confirm_upgrade(self.device, False))
+        self.assertFalse(firmware.can_confirm_upgrade(dot, True))
