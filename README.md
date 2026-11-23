@@ -169,9 +169,17 @@ sidepulse firmware upgrade --dry-run
 
 The CLI downloads firmware from this repository on GitHub and verifies the ZIP
 and its contents before writing to the device. `--dry-run` downloads and checks
-the package without writing it. With multiple devices connected, select one
-using `--device /Volumes/SidePulse` or `--device /Volumes/PulseDot` (use the actual
-mount path on your computer).
+the package without writing it or changing USB storage settings. With multiple
+devices connected, use `--device` to select a drive or Dot USB selector, or
+upgrade every detected device with one command.
+
+```sh
+sidepulse firmware upgrade --all --dry-run
+sidepulse firmware upgrade --all
+```
+
+Each device gets the release for its model. If an upgrade fails, the command
+reports the device, continues with the others, and exits with a failure status.
 
 Choose a specific version or install a downloaded ZIP:
 
@@ -182,8 +190,18 @@ sidepulse firmware upgrade --file firmware/v1.1.0/sidepulse-pro-1.1.0-ota.zip
 
 Use the ZIP for your model from the [firmware downloads](firmware/README.md).
 Local ZIPs work offline. The CLI rejects packages for the wrong model and older
-versions, and skips a version that is already installed. Copy-based upgrades
-require a writable device drive.
+versions, and skips a version that is already installed.
+
+On macOS, a Pro with firmware 1.1 or newer can receive an update through its
+`setup.html` control channel when the drive is mounted read-only. To require
+that channel even on a writable mount, run
+`sidepulse firmware upgrade --all --read-only`. An outdated Dot reports a
+failure in this mode because its firmware installer requires a writable drive.
+
+For a storage-off Dot with a unique production serial, the CLI enables its drive, matches it after reconnection, and restores
+its saved storage preference before copying. The preference takes effect at
+the next device restart. The host must allow the Dot drive to mount and accept
+writes.
 
 After the transfer, leave the device connected for at least 10 seconds, then
 reconnect it and run `sidepulse firmware version` to confirm the installed
@@ -212,9 +230,9 @@ sidepulse storage off --device SPD-000006
 sidepulse storage status --json
 ```
 
-`sidepulse firmware version` continues to work with storage off. Enable storage
-before installing firmware through the disk drive. SidePulse Pro does not
-support this USB setting.
+`sidepulse firmware version` works with storage off. When an update is needed,
+`sidepulse firmware upgrade` can enable the Dot drive for the transfer.
+The USB storage setting is specific to Dot.
 
 To control live LEDs with storage off, pass the USB selector shown by
 `sidepulse storage status` to `write`:
@@ -278,6 +296,9 @@ sidepulse list --json
 
 The list includes mounted Pro/Dot drives and USB Dots with storage disabled.
 Mounted Dots appear once. USB Dots remain visible when their disk is unmounted.
+Dot firmware 1.1.14 also supports live LED writes when its drive never mounts.
+In that case, `sidepulse list` shows a USB selector with the firmware version
+and serial unavailable.
 
 The CLI, tray, background service and pip package share the same device discovery
 and LED writer. The Python API exposes the same targets shown by `sidepulse ls`:
@@ -968,6 +989,15 @@ The menu-bar dropdown can switch the LEDs between agent status and battery
 status. In **Settings → Advanced**, `Show battery for 7s on plug/unplug` can
 briefly show the battery animation for seven seconds after the power source
 changes when agent status is selected.
+
+Open **Settings → Dark Hours** to schedule lights-out for SidePulse Pro and Dot
+devices displaying agent or battery status. Enable the schedule, choose local
+start and end times, and select the days it starts. The default is midnight to
+6:30 a.m. every day. You can allow waiting-for-input and error alerts through.
+After Dark Hours, the LEDs resume their current display at the saved brightness.
+The schedule also applies when the service starts or the computer wakes. The
+menu bar, SidePulse Notch, linked phones, session history, and sleep prevention
+continue operating throughout.
 
 The Devices section also offers **Add SidePulse Notch**, an optional virtual
 eight-LED device. It appears as a notch-shaped status-bar overlay that covers
