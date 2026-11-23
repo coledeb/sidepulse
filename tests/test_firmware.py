@@ -228,6 +228,42 @@ class FirmwareTests(unittest.TestCase):
         self.assertNotIn('transferred', self.stdout.getvalue())
         self.assertIn('did not finish', self.stderr.getvalue())
 
+    def test_full_root_directory_removes_macos_metadata_and_retries(self):
+        (self.device / '._LEDS.LED').write_bytes(b'appledouble')
+        (self.device / '.DS_Store').write_bytes(b'finder')
+        (self.device / '.fseventsd').mkdir()
+        (self.device / '.fseventsd' / 'fseventsd-uuid').write_bytes(b'x')
+        (self.device / 'LEDS.LED').write_text('keep')
+        open_path = Path.open
+        attempts = []
+
+        def full_root_open(path, mode='r', *args, **kwargs):
+            if path.name == 'FIRMWARE.BIN' and mode == 'wb':
+                attempts.append(path)
+                if (path.parent / '._LEDS.LED').exists():
+                    raise OSError(errno.ENOSPC, 'No space left on device')
+            return open_path(path, mode, *args, **kwargs)
+
+        with patch.object(Path, 'open', full_root_open):
+            self.assertEqual(self.upgrade(self.make_package()), 0)
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual((self.device / 'FIRMWARE.BIN').read_bytes(), b'encrypted firmware payload')
+        self.assertEqual((self.device / 'LEDS.LED').read_text(), 'keep')
+        for name in ('._LEDS.LED', '.DS_Store', '.fseventsd'):
+            self.assertFalse((self.device / name).exists(), name)
+
+    def test_full_root_without_metadata_still_fails(self):
+        open_path = Path.open
+
+        def full_root_open(path, mode='r', *args, **kwargs):
+            if path.name == 'FIRMWARE.BIN' and mode == 'wb':
+                raise OSError(errno.ENOSPC, 'No space left on device')
+            return open_path(path, mode, *args, **kwargs)
+
+        with patch.object(Path, 'open', full_root_open):
+            self.assertEqual(self.upgrade(self.make_package()), 1)
+        self.assertFalse((self.device / 'FIRMWARE.BIN').exists())
+
     def test_symlink_target_is_rejected(self):
         outside = self.root / 'unrelated'
         outside.write_bytes(b'keep me')
