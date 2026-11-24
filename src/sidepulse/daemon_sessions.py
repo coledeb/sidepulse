@@ -165,6 +165,7 @@ class DaemonSessions:
                 on_local_settled=self.settle,
                 on_local_background=self.set_t3_background,
                 on_remote_settled=self.settled,
+                remote_rows=self.monitor.t3_remote_rows,
             )
             if t3_installed():
                 self.t3_poller.start()

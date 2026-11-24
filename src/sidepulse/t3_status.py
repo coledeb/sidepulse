@@ -604,6 +604,21 @@ def settle_done_interval(age_seconds: float) -> float:
     return T3_IDLE_POLL_SECONDS
 
 
+# The status of a row the menu already showed when this poller started (it
+# was restored after a restart); it matches no thread status, so the thread's
+# current state is reported over it.
+RESTORED_STATUS = "restored"
+
+
+@dataclass(frozen=True)
+class RemoteRow:
+    """A row for a linked machine's T3 thread that the menu shows."""
+
+    environment_id: str
+    thread_id: str
+    provider: str
+
+
 @dataclass
 class _Tracked:
     status: str
@@ -632,8 +647,12 @@ class T3StatusPoller:
         on_local_settled: Callable[[LocalWaitingRow, datetime], None] | None = None,
         on_local_background: Callable[[LocalWaitingRow, bool], None] | None = None,
         on_remote_settled: Callable[[Callable[[], bool]], bool] | None = None,
+        remote_rows: Callable[[], Iterable[RemoteRow]] | None = None,
     ) -> None:
         self.ingest = ingest
+        # Linked-machine rows the menu shows, including those restored from
+        # disk after a restart, which this poller has not reported yet.
+        self.remote_rows = remote_rows
         # Given the reports for linked-machine threads that left the
         # unsettled list, runs them with the Settled animation.
         self.on_remote_settled = on_remote_settled
@@ -720,6 +739,7 @@ class T3StatusPoller:
                     self._set_state(STATE_DISCONNECTED)
                     return
                 self.links_checked_at = None
+            self._adopt_shown_rows()
             now = self.monotonic()
             if self.links_checked_at is None or now - self.links_checked_at >= T3_LINKS_REFRESH_SECONDS:
                 self.environments = self._linked_environments()
@@ -757,6 +777,20 @@ class T3StatusPoller:
             self.client = None
             self.last_error = f"unexpected: {exc!r}"
             self._set_state(STATE_UNAVAILABLE)
+
+    def _adopt_shown_rows(self) -> None:
+        """Follow rows the menu shows that this poller never reported.
+
+        ``tracked`` lives in memory, but the rows survive a restart. Without
+        this, a restored row whose thread finished long ago is skipped as
+        history, and settling it in T3 never clears it.
+        """
+        if self.remote_rows is None:
+            return
+        for row in self.remote_rows():
+            key = f"{row.environment_id}/{row.thread_id}"
+            if key not in self.tracked:
+                self.tracked[key] = _Tracked(RESTORED_STATUS, row.provider, float("-inf"))
 
     def _clear_tracked(self, which: Callable[[str], bool] = lambda _environment_id: True) -> None:
         """Clear the rows of threads SidePulse can no longer follow."""
@@ -1064,6 +1098,12 @@ class T3StatusPoller:
             for key in [key for key in self.tracked if key.startswith(prefix) and key not in seen]
         ]
         departed = [(key, tracked) for key, tracked in departed if tracked.status != "idle"]
+        # Restored rows settled while SidePulse was not running clear quietly:
+        # the Settled animation is for a settle the user just made.
+        for key, tracked in departed:
+            if tracked.status == RESTORED_STATUS:
+                self._report_idle(environment_id, label, key[len(prefix):], tracked.provider, observed_at)
+        departed = [(key, tracked) for key, tracked in departed if tracked.status != RESTORED_STATUS]
 
         def report() -> bool:
             for key, tracked in departed:

@@ -97,6 +97,39 @@ class RemoteSettleTests(unittest.TestCase):
         poller.poll_once()
         self.assertEqual(len(settles), 1)
 
+    def test_a_restored_row_is_cleared_quietly_once_its_thread_was_settled(self) -> None:
+        # After a restart the menu still shows an old Done row; the poller
+        # never reported it, and its thread finished hours ago.
+        client, clock, records = FakeClient(), Clock(), []
+        poller = make_poller(client, clock, records)
+        settles = []
+        poller.on_remote_settled = lambda apply: settles.append(apply())
+        poller.remote_rows = lambda: [t3_status.RemoteRow(KARLY_WSL, "old", "claude")]
+        client.threads[KARLY_WSL] = [thread("old", "completed", updated=NOW - timedelta(hours=17))]
+        poller.poll_once()
+        self.assertEqual([record.raw["sidepulse_status"] for record in records], ["completed"])
+        client.threads[KARLY_WSL] = []
+        clock.advance(3)
+        poller.poll_once()
+        self.assertEqual(records[-1].raw["sidepulse_status"], "idle")
+        self.assertEqual(records[-1].session_id, "old")
+        self.assertEqual(len(settles), 1)  # reported as a settle the user made
+
+    def test_a_restored_row_settled_while_sidepulse_was_off_clears_without_animation(self) -> None:
+        client, clock, records = FakeClient(), Clock(), []
+        poller = make_poller(client, clock, records)
+        settles = []
+        poller.on_remote_settled = lambda apply: settles.append(apply())
+        shown = [t3_status.RemoteRow(KARLY_WSL, "gone", "claude")]
+        poller.remote_rows = lambda: shown
+        poller.poll_once()
+        self.assertEqual([(record.session_id, record.raw["sidepulse_status"]) for record in records], [("gone", "idle")])
+        self.assertEqual(settles, [])
+        shown.clear()
+        clock.advance(3)
+        poller.poll_once()
+        self.assertEqual(len(records), 1)
+
 
 class MappingTests(unittest.TestCase):
     def test_thread_status_mapping(self) -> None:
@@ -215,6 +248,24 @@ class PollerTests(unittest.TestCase):
         self.clock.advance(t3_status.T3_PROJECTS_REFRESH_SECONDS)
         self.poller.poll_once()
         self.assertEqual(project_fetches(), 2)
+
+    def test_monitor_lists_its_linked_machine_rows_for_the_poller(self) -> None:
+        self.client.threads[KARLY_WSL] = [thread("t1", "completed"), thread("t2", "running")]
+        self.poller.poll_once()
+        monitor = LiveAgentMonitor()
+        for record in self.records:
+            monitor.ingest_record(record)
+        self.assertEqual(
+            sorted(monitor.t3_remote_rows(), key=lambda row: row.thread_id),
+            [t3_status.RemoteRow(KARLY_WSL, "t1", "claude"), t3_status.RemoteRow(KARLY_WSL, "t2", "claude")],
+        )
+
+        # Rows the poller cleared are no longer listed.
+        self.client.threads[KARLY_WSL] = [thread("t2", "running")]
+        self.clock.advance(3)
+        self.poller.poll_once()
+        monitor.ingest_record(self.records[-1])
+        self.assertEqual([row.thread_id for row in monitor.t3_remote_rows()], ["t2"])
 
     def test_project_list_failure_still_reports_the_thread(self) -> None:
         self.client.fail["t3_project_list"] = t3_status.T3Error("timed out")

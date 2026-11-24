@@ -51,7 +51,7 @@ from .settings import (
     load_settings,
 )
 from .t3_delegates import T3DelegateLookup
-from .t3_status import T3_EVENT_NAME, LocalWaitingRow
+from .t3_status import T3_EVENT_NAME, LocalWaitingRow, RemoteRow
 from .junie_index import junie_session_info, junie_session_project_dir
 from .text_utils import read_recent_lines, truncate_text
 
@@ -579,6 +579,21 @@ class LiveAgentMonitor:
             if agent is not None:
                 self.agent_process_by_status[status.agent_id] = agent
             self.write_latest_state()
+
+    def t3_remote_rows(self) -> list[RemoteRow]:
+        """Shown rows for linked machines' T3 threads, which the poller follows."""
+        with self.lock:
+            statuses = list(self.statuses_by_key.values())
+        rows = []
+        for status in statuses:
+            if status.event_name != T3_EVENT_NAME or status.mode == AgentMode.IDLE_READY:
+                continue
+            match = re.fullmatch(r"t3code://threads/([^/]+)/([^/]+)", valid_t3_link(status.t3_link) or "")
+            if match is None:
+                continue
+            environment_id, thread_id = (urllib.parse.unquote(part) for part in match.groups())
+            rows.append(RemoteRow(environment_id, thread_id, status.provider))
+        return rows
 
     def t3_settle_candidates(self) -> list[LocalWaitingRow]:
         """Rows on this Mac, hosted by T3, that settling the thread clears.
